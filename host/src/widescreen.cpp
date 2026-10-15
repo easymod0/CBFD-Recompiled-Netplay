@@ -304,6 +304,53 @@ extern "C" void conker_bubble_end(uint8_t* rdram, recomp_context* ctx) {
     }
 }
 
+// The bullet holes on the screen in It's War (issue #138). func_150E76D0 makes each against a side of the screen:
+// on the left its x is its half width less 145 (the screen's middle is 146 across), so its left edge is at 1,
+// the 4:3 screen's, and in widescreen the hole hung in the picture beside it. At 0x150E789C ($sp + 0x54, the
+// x) it's moved left as far as the window reaches past the 4:3 screen.
+extern "C" void conker_widen_left_hole(uint8_t* rdram, recomp_context* ctx) {
+    const float ratio = widescreen_ratio();
+    if (ratio <= 1.0f) {
+        return;
+    }
+    const gpr sp = ctx->r29;
+    const float half_frame = (float)MEM_W(0, (gpr)(int32_t)0x800BE620) * 0.5f; // D_800BE620
+    write_float(rdram, sp, 0x54, stack_float(rdram, sp, 0x54) - half_frame * (ratio - 1.0f));
+}
+
+// Screen overlays drawn with func_15154D80: the bullet holes (above), and others like them. Like the sprites,
+// its G_TEXRECT has its corners clamped to 0 and its texture start moved on to match, so a hole moved past the
+// 4:3 frame's left edge would be cut there. At 0x15155470 the rectangle and its two G_RDPHALF words are
+// written ($t4 is the first half, 8 past the rectangle). The corners as worked out, in 10.2 fixed point, are at $sp + 0x60 (left),
+// 0x5C (top), 0x58 (right) and 0x54 (bottom); the texture start before the clamp's change in $t5 and $ra, the
+// steps in $t3 and $t2. A clamped one is rewritten as RT64's extended rectangle, three commands as well, in
+// frames whose camera pass enabled the extended GBI (conker_camera_pass_sync).
+extern "C" void conker_emit_overlay_texrect(uint8_t* rdram, recomp_context* ctx) {
+    if (!extended_enabled || widescreen_ratio() <= 1.0f) {
+        return;
+    }
+    const gpr sp = ctx->r29;
+    const int32_t ulx = (int32_t)stack_float(rdram, sp, 0x60);
+    const int32_t uly = (int32_t)stack_float(rdram, sp, 0x5C);
+    const int32_t lrx = (int32_t)stack_float(rdram, sp, 0x58);
+    const int32_t lry = (int32_t)stack_float(rdram, sp, 0x54);
+    if (ulx >= 0 && uly >= 0) {
+        return; // drawn as the game wrote it
+    }
+    gpr dl = ctx->r12 - 8; // $t4
+    if (((uint32_t)MEM_W(0, dl) >> 24) != 0xE4 || ((uint32_t)MEM_W(8, dl) >> 24) != 0xE1 || ((uint32_t)MEM_W(16, dl) >> 24) != 0xF1) {
+        return;
+    }
+    const uint32_t s = (uint32_t)ctx->r13 & 0xFFFF;    // $t5
+    const uint32_t t = (uint32_t)ctx->r31 & 0xFFFF;    // $ra
+    const uint32_t dsdx = (uint32_t)ctx->r11 & 0xFFFF; // $t3
+    const uint32_t dtdy = (uint32_t)ctx->r10 & 0xFFFF; // $t2
+    const uint32_t tile = 0;
+    put_command(rdram, dl, (rt64_extended_opcode << 24) | g_ex_texrect_v1, tile | (g_ex_origin_none << 3) | (g_ex_origin_none << 15));
+    put_command(rdram, dl, ((uint32_t)(ulx & 0xFFFF) << 16) | (uint32_t)(uly & 0xFFFF), ((uint32_t)(lrx & 0xFFFF) << 16) | (uint32_t)(lry & 0xFFFF));
+    put_command(rdram, dl, (s << 16) | t, (dsdx << 16) | dtdy);
+}
+
 // func_151D5E90 (and func_151D6418) draw a saved copy of the frame, such as the
 // pause menu's blurred background, as 42 textured tiles. The copy only holds the
 // 4:3 frame, so RT64 draws the tiles in the 4:3 area and the widened sides show
