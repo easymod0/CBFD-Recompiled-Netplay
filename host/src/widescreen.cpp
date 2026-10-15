@@ -304,18 +304,30 @@ extern "C" void conker_bubble_end(uint8_t* rdram, recomp_context* ctx) {
     }
 }
 
-// The bullet holes on the screen in It's War (issue #138). func_150E76D0 makes each against a side of the screen:
-// on the left its x is its half width less 145 (the screen's middle is 146 across), so its left edge is at 1,
-// the 4:3 screen's, and in widescreen the hole hung in the picture beside it. At 0x150E789C ($sp + 0x54, the
-// x) it's moved left as far as the window reaches past the 4:3 screen.
-extern "C" void conker_widen_left_hole(uint8_t* rdram, recomp_context* ctx) {
-    const float ratio = widescreen_ratio();
-    if (ratio <= 1.0f) {
-        return;
+// The bullet holes and cracks on the screen in It's War (issue #138). func_150E76D0 makes each against a side of
+// the screen: on the left its x is its half width less 145 (the screen's middle is 146 across), so its left edge
+// is at 1, the 4:3 screen's; on the right 145 less its half width (mirrored), its right edge at 291. In
+// widescreen they hung in the picture beside the 4:3 frame. Each is moved out as far as the window reaches past
+// the 4:3 screen: the left one at 0x150E789C ($sp + 0x54, its x), the right one at 0x150E7880 ($f18, its x,
+// stored to $sp + 0x54 in the branch's delay slot).
+namespace {
+    float hole_widening(uint8_t* rdram) {
+        const float ratio = widescreen_ratio();
+        if (ratio <= 1.0f) {
+            return 0.0f;
+        }
+        const float half_frame = (float)MEM_W(0, (gpr)(int32_t)0x800BE620) * 0.5f; // D_800BE620
+        return half_frame * (ratio - 1.0f);
     }
+}
+
+extern "C" void conker_widen_left_hole(uint8_t* rdram, recomp_context* ctx) {
     const gpr sp = ctx->r29;
-    const float half_frame = (float)MEM_W(0, (gpr)(int32_t)0x800BE620) * 0.5f; // D_800BE620
-    write_float(rdram, sp, 0x54, stack_float(rdram, sp, 0x54) - half_frame * (ratio - 1.0f));
+    write_float(rdram, sp, 0x54, stack_float(rdram, sp, 0x54) - hole_widening(rdram));
+}
+
+extern "C" void conker_widen_right_hole(uint8_t* rdram, recomp_context* ctx) {
+    ctx->f18.fl += hole_widening(rdram);
 }
 
 // Screen overlays drawn with func_15154D80: the bullet holes (above), and others like them. Like the sprites,
