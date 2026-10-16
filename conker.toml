@@ -399,6 +399,13 @@ func = "func_150E76D0"
 before_vram = 0x150E7880
 text = "{ extern void conker_widen_right_hole(uint8_t*, recomp_context*); conker_widen_right_hole(rdram, ctx); }"
 
+# func_15154D80's overlay pieces (the holes, the wasp hive turret's frame...): a piece against a side of the
+# 4:3 screen is stretched to the window's ($f14 its middle, $f18 its half width, at 0x15155100).
+[[patches.hook]]
+func = "func_15154D80"
+before_vram = 0x15155100
+text = "{ extern void conker_widen_overlay_piece(uint8_t*, recomp_context*); conker_widen_overlay_piece(rdram, ctx); }"
+
 # func_15154D80's rectangles (the holes) clamp their left edge at 0; once the rectangle is written ($t4 is 8
 # past it), it's rewritten as RT64's extended one.
 [[patches.hook]]
@@ -483,6 +490,18 @@ text = "{ extern void conker_frame_copy_begin(uint8_t*, recomp_context*); conker
 [[patches.hook]]
 func = "func_151D6418"
 before_vram = 0x151D66E8
+text = "{ extern void conker_frame_copy_end(uint8_t*, recomp_context*); conker_frame_copy_end(rdram, ctx); }"
+
+# The Haybot's red view (Barn Boys, issue #138): func_151A5170 draws the frame back over itself in strips,
+# tinted, as the pause's copy above is drawn; stretched across the window the same way (host/src/widescreen.cpp).
+[[patches.hook]]
+func = "func_151A5170"
+before_vram = 0x151A5170
+text = "{ extern void conker_tint_copy_begin(uint8_t*, recomp_context*); conker_tint_copy_begin(rdram, ctx); }"
+
+[[patches.hook]]
+func = "func_151A5170"
+before_vram = 0x151A55A4
 text = "{ extern void conker_frame_copy_end(uint8_t*, recomp_context*); conker_frame_copy_end(rdram, ctx); }"
 
 # The pause's copy of the frame isn't blurred on the CPU by func_151D61B0 ($a0, the picture):
