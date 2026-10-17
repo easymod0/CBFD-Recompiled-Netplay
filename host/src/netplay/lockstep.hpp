@@ -38,8 +38,8 @@
 //                                peer predicts them (each player's last) up to <reads> reads ahead of the last
 //                                read it has them all for, 0 (the default: it waits) to 12; when one comes
 //                                that isn't what it predicted, the harness goes back to before that read and
-//                                plays on again from there. This peer's own choice: the others may predict or
-//                                not. For now headless only (a window shows the reads played again)
+//                                plays on again from there, unpaced, unseen and unheard. This peer's own choice:
+//                                the others may predict or not
 //
 // A joiner's machine that leaves (or stops answering) leaves the others playing: the host tells them from which
 // read its ports get no input (Gone), and every machine gives them an idle pad from there. The host leaving

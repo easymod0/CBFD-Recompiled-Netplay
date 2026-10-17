@@ -8,8 +8,8 @@
 #   tools/netplay/rollback.sh [--exe host/build/ConkerRecomp] [--rom conker/baserom.us.z64]
 #                             [--reads 1800] [--seed 5] [--timeout 300] [--out <folder>]
 #
-# The matches run at the same time, headless and --fast (a window would show the reads played again: step 4b),
-# each copy with its own ports' pads (the others' scrambled):
+# The matches run at the same time, headless and --fast, each copy with its own ports' pads (the others'
+# scrambled):
 #   both       both predict 8 reads ahead; 100 ms lag, 10 ms jitter, 5% loss, 2% reordered, 1% duplicated
 #   host-only  the same network, only the host predicts (the joiner waits as in lockstep)
 #   join-only  only the joiner predicts, 12 reads ahead (the most); 20 ms lag, then 150 ms from read 300: the
@@ -19,10 +19,14 @@
 #              reads ahead; 50 ms lag
 #   leave      the same with the host predicting 8 and the second joiner quitting at read 1500: the host and the
 #              first joiner play on with port 3 idle from the read the host says, and must match a solo replay so
+# Then, on the timeline's real time (30 reads a second, as a player's game), 900 reads of their own:
+#   paced      both predict 8, at input delay 2 with 50 ms lag and 10 ms jitter (most reads predicted): the
+#              reads played again must not be paced, so the match takes no longer than its reads (+10%, +2 s)
+#   paced-lockstep  the same without predicting, for comparison (it waits for the lag): not checked
 # For each copy that predicts it prints how many reads it predicted and went back. It exits 0 if every match
 # gave the solo replay's game, every copy that predicts went back at least once and never failed to, and the
-# delay change was the same on both sides; 1 if not. The logs are kept in --out; without it they're in a
-# temporary folder, deleted if all passed. It uses UDP ports 27330 to 27335.
+# delay change was the same on both sides, and the paced match kept to time; 1 if not. The logs are kept in
+# --out; without it they're in a temporary folder, deleted if all passed. It uses UDP ports 27330 to 27335.
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -62,12 +66,17 @@ python3 tools/netplay/make_match.py "$OUT/mouse.pads" --mode deathmatch --player
 python3 tools/netplay/make_match.py "$OUT/mouse-other.pads" --mode deathmatch --players 3 --mouse --seed "$((SEED + 1))" --own-view > /dev/null || exit 2
 scramble "$OUT/mouse.pads" "$OUT/mouse-other.pads" 3 "$OUT/mouse-" || exit 2
 MOUSE_READS=$(( ($(wc -c < "$OUT/mouse.pads") - 40) / 73 ))
+PACED_READS=900
+python3 tools/netplay/make_inputs.py "$OUT/paced.pads" --reads "$PACED_READS" --seed "$SEED" --ports 2 --mouse --own-view > /dev/null || exit 2
+python3 tools/netplay/make_inputs.py "$OUT/paced-other.pads" --reads "$PACED_READS" --seed "$((SEED + 1))" --ports 2 --mouse --own-view > /dev/null || exit 2
+scramble "$OUT/paced.pads" "$OUT/paced-other.pads" 2 "$OUT/paced-" || exit 2
 
 failed=0
-echo "solo, mouse-solo"
+echo "solo, mouse-solo, paced-solo"
 start solo
 pads=mouse.pads start mouse-solo
-finish "was the last: quitting" solo mouse-solo || exit 1
+pads=paced.pads start paced-solo
+finish "was the last: quitting" solo mouse-solo paced-solo || exit 1
 
 bad="lag=100,jitter=10,loss=5,reorder=2,dup=1"
 echo "both, host-only, join-only, stall, three, leave (at once)"
@@ -149,10 +158,38 @@ else
     failed=1
 fi
 
+echo "paced, paced-lockstep (at once, $PACED_READS reads each on real time)"
+net="lag=50,jitter=10"
+paced=1 pads=paced-1.pads start paced-host --netplay-host 27330 --netplay-address 127.0.0.1 --players 2 --input-delay 2 --rollback 8 --netplay-fake-network "$net"
+paced=1 pads=paced-2.pads start paced-join --netplay-join "$(code_of paced-host)" --rollback 8 --netplay-fake-network "$net"
+paced=1 pads=paced-1.pads start paced-lockstep-host --netplay-host 27331 --netplay-address 127.0.0.1 --players 2 --input-delay 2 --netplay-fake-network "$net"
+paced=1 pads=paced-2.pads start paced-lockstep-join --netplay-join "$(code_of paced-lockstep-host)" --netplay-fake-network "$net"
+if finish "was the last: quitting" paced-host paced-join paced-lockstep-host paced-lockstep-join; then
+    # Its time from the first read to the last (the rollback summary's) against the reads' own.
+    most=$(( PACED_READS * 11 / 300 + 2 ))
+    for name in paced-host paced-join; do
+        same "$name" paced-solo "$PACED_READS" || failed=1
+        predicted "$name" || failed=1
+        took=$(sed -n 's/^\[harness\] rollback test: .* rollbacks in \([0-9.]*\) s$/\1/p' "$OUT/$name.out")
+        if [ -z "$took" ] || awk "BEGIN { exit !($took > $most) }"; then
+            echo "  $name took ${took:-?} s for $PACED_READS reads (at most $most s): the reads played again were paced"
+            failed=1
+        else
+            echo "    took $took s for $PACED_READS reads ($(( PACED_READS / 30 )) s of game)"
+        fi
+    done
+    for name in paced-lockstep-host paced-lockstep-join; do
+        same "$name" paced-solo "$PACED_READS" || failed=1
+        echo "    waits: $(sed -n 's/^\[netplay\] waits: //p' "$OUT/$name.out")"
+    done
+else
+    failed=1
+fi
+
 if [ $failed -ne 0 ]; then
     echo "logs: $OUT"
     echo "FAILED"
     exit 1
 fi
 if [ $KEEP -eq 1 ]; then echo "logs: $OUT"; else rm -rf "$OUT"; fi
-echo "passed: every match with copies that predict gave each copy the same game as the replay alone"
+echo "passed: every match with copies that predict gave each copy the same game as the replay alone, and on real time kept to it"

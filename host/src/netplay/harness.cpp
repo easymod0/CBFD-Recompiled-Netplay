@@ -537,6 +537,10 @@ namespace {
             bool any_state = false;
             recomp::save_states::LoadResult result = recomp::save_states::LoadResult::NotNow;
             double restore_us = 0;
+            // Replaying from the load up to where the game is (timeline.hpp; further on, if it's replaying already): it
+            // keeps the pacing as it was, so it's on before it.
+            const uint64_t replay_was = ultramodern::timeline::replay_until();
+            ultramodern::timeline::set_replay_until(std::max(replay_was, ultramodern::timeline::delivery_time()));
             for (uint64_t back = 0; back < snapshots.size() && back <= rollback_to; back++) {
                 const uint64_t read = rollback_to - back;
                 if (snapshots[read % snapshots.size()].read != read) continue;
@@ -549,6 +553,9 @@ namespace {
                     break;
                 }
                 rb.not_now++;
+            }
+            if (result != recomp::save_states::LoadResult::Loaded) {
+                ultramodern::timeline::set_replay_until(replay_was);
             }
             if (!any_state) {
                 rb.no_snapshot++;
@@ -594,7 +601,8 @@ namespace {
             auto start = std::chrono::steady_clock::now();
             conker::host_state::load(snapshot.host);
             rb.host_load.add(micros_since(start));
-            rollback_from = reads;
+            // (Going back again partway through playing again: still up to where the game was.)
+            rollback_from = rerunning ? std::max(rollback_from, reads) : reads;
             rerun_reads = rollback_from - rollback_to;
             // The states after it are of the game that's being replaced: they're taken again as it's played again.
             for (Snapshot& later : snapshots) {
@@ -1013,6 +1021,11 @@ namespace {
         }
         if (!playing) {
             match_over = true;
+            // No rollback after it (the game plays on, in a menu match), and shown and heard again should it end
+            // partway through one.
+            rollback_to = UINT64_MAX;
+            rerunning = false;
+            ultramodern::timeline::set_replay_until(0);
             for (int i = 0; i < max_pads; i++) {
                 pads[i] = { 0, 0, 0, pads[i].err_no };
                 motions[i] = still();

@@ -335,9 +335,12 @@ as it came, so peers compare the game as it really went, and the hash log does t
 own choice: the others may predict or not, with the same protocol. The boot's first 30 reads aren't
 predicted (the game changes its main loop there), and near a replay's end every input is waited for, so it
 ends right. The host's `Delay` comes 12 reads further ahead, as a joiner that predicts can be that much
-further on. For now it's headless only: in a window the reads played again would be paced, drawn and heard
-(step 4b). `--rollback-test <every>:<back>` and `--rollback-late <late>[:<seed>]` measure and test going
-back alone (harness.cpp). `rollback.sh` plays matches where some copies predict, over a bad network, and
+further on. The reads played again are replayed (the runtime's `timeline::set_replay_until`, up to the time
+the game had reached): they don't wait for real time and the load doesn't move the pacing, so the game is
+back where it was on time; their graphics tasks aren't drawn, their VIs show no frame and do no host work
+(rumble), and their sound isn't played (it still counts for the game's audio timing). `--rollback-test
+<every>:<back>` and `--rollback-late <late>[:<seed>]` measure and test going back alone (harness.cpp).
+`rollback.sh` plays matches where some copies predict, over a bad network, and
 `lockstep.sh --match-options "--rollback 8 --netplay-fake-network lag=40"` plays every lockstep match so.
 
 ## The scripts
@@ -347,7 +350,7 @@ back alone (harness.cpp). `rollback.sh` plays matches where some copies predict,
 | `check.sh` | the determinism check: replays a made-up recording headless twice, with `--jitter` and with `--state-test`, and fails unless all four give the same hashes (about 30 s; the CI runs it, `.github/workflows/netplay.yml`) |
 | `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, and a desync is caught and reported (about 100 s); `--match-options` gives every copy in a match more options (e.g. `--rollback 8`) |
 | `network.sh` | the bad-network check: matches with lag, jitter, loss, an outage and a change of lag give the same game as a replay alone, and how long each waited (about 70 s) |
-| `rollback.sh` | the rollback check: matches where one, both or some of three copies predict the others' inputs (`--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone (about 60 s) |
+| `rollback.sh` | the rollback check: matches where one, both or some of three copies predict the others' inputs (`--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone; then a match on real time must keep to time (about 100 s) |
 | `lib.sh` | what `lockstep.sh`, `network.sh` and `rollback.sh` share: starting copies, waiting for them, comparing their hash logs, a recording with players idle from a read |
 | `compare_hashes.py` | the first read two hash logs differ at (it exits 1 if they differ); with dumps, the ranges that differ, by data symbol |
 | `compare_desyncs.py` | two peers' desync reports: whether they're comparable, the regions and (with their memory) the ranges that differ, by data symbol |
