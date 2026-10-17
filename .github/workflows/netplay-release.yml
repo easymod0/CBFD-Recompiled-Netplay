@@ -1,0 +1,244 @@
+# This fork's releases (CBFD-Recompiled-Netplay): every push to main builds Windows, Linux and macOS
+# packages with netplay on (CONKER_NETPLAY=ON) and publishes them as a release tagged
+# v<version>-netplay.<run>, e.g. v0.1.6-netplay.12. The version is the one in host/src/main.cpp (mods
+# are checked against it, so it stays upstream's); the run number tells this fork's builds apart.
+#
+# Before publishing, the Linux build must pass tools/netplay/check.sh (the same inputs give the same
+# game), so a build that would desync isn't released. The release is a draft until every package has
+# built; a failed or cancelled run deletes its draft.
+#
+# Like release.yml it reads the ROM from the private repository in the ROM_REPO and ROM_REPO_TOKEN
+# secrets (setup in release.yml), has no pull request trigger, and runs only in this fork: upstream
+# keeps its own release.yml, and this file is never part of a pull request to it.
+name: netplay-release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One release at a time, in push order; a newer push replaces a waiting one, not a running one.
+concurrency:
+  group: netplay-release
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  GIT_TERMINAL_PROMPT: '0'
+
+jobs:
+  prepare:
+    if: github.repository == 'easymod0/CBFD-Recompiled-Netplay'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Check the ROM secrets are set
+        env:
+          ROM_REPO: ${{ secrets.ROM_REPO }}
+          ROM_REPO_TOKEN: ${{ secrets.ROM_REPO_TOKEN }}
+        run: |
+          if [ -z "$ROM_REPO" ] || [ -z "$ROM_REPO_TOKEN" ]; then
+            echo "::error::ROM_REPO and ROM_REPO_TOKEN aren't set (see release.yml)"
+            exit 1
+          fi
+
+      - name: Create the draft release
+        id: tag
+        run: |
+          git clone -q --no-checkout "https://github.com/$GITHUB_REPOSITORY" src
+          git -C src checkout -q "$GITHUB_SHA"
+          version=$(sed -nE 's/.*project_version = recomp::Version\{ *([0-9]+), *([0-9]+), *([0-9]+)(, *"([^"]*)")? *\}.*/\1.\2.\3\5/p' src/host/src/main.cpp)
+          if [ -z "$version" ]; then
+            echo "::error::couldn't find project_version in host/src/main.cpp"
+            exit 1
+          fi
+          tag=v$version-netplay.$GITHUB_RUN_NUMBER
+          short=$(git -C src rev-parse --short HEAD)
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+            --title "Conker's Bad Fur Day: Recompiled Netplay $tag" --notes "Building $short..."
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      # vcpkg keeps the protobuf and abseil it builds (about 20 minutes) in this folder, which is
+      # cached between runs.
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+    steps:
+      - name: Checkout
+        shell: bash
+        run: |
+          git clone -q --no-checkout "https://github.com/$GITHUB_REPOSITORY" .
+          git checkout -q "$GITHUB_SHA"
+
+      - name: Restore vcpkg's cache
+        uses: actions/cache@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}
+
+      - name: Get the ROM
+        shell: bash
+        env:
+          ROM_REPO: ${{ secrets.ROM_REPO }}
+          ROM_REPO_TOKEN: ${{ secrets.ROM_REPO_TOKEN }}
+        run: git clone -q --depth 1 "https://x-access-token:$ROM_REPO_TOKEN@github.com/$ROM_REPO.git" rom-src
+
+      - name: Build
+        shell: cmd
+        run: |
+          mkdir vcpkg-cache 2>nul
+          set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
+          set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON
+          build.cmd rom-src\baserom.us.z64
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "package\ConkerRecompiled"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $build = "host\build-win"
+          Copy-Item "$build\ConkerRecomp.exe", "$build\SDL2.dll", "$build\dxcompiler.dll", "$build\dxil.dll" $out
+          Copy-Item -Recurse "$build\assets" "$out\assets"
+          Copy-Item .github\release\README.txt, LICENSE, .github\release\LICENSES.txt $out
+          Copy-Item tools\N64ModernRuntime\COPYING "$out\LICENSE-GPL-3.0.txt"
+          Copy-Item "$build\_deps\gamenetworkingsockets-src\LICENSE" "$out\LICENSE-GameNetworkingSockets.txt"
+          Copy-Item "$build\vcpkg_installed\x64-windows-static-md\share\protobuf\copyright" "$out\LICENSE-protobuf.txt"
+          Compress-Archive -Path "$out\*" -DestinationPath "package\ConkerRecompiled-Netplay-${{ needs.prepare.outputs.tag }}-Windows.zip"
+
+      - name: Upload to the release
+        shell: bash
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" package/*.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+  linux:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        run: |
+          git clone -q --no-checkout "https://github.com/$GITHUB_REPOSITORY" .
+          git checkout -q "$GITHUB_SHA"
+
+      - name: Get the ROM
+        env:
+          ROM_REPO: ${{ secrets.ROM_REPO }}
+          ROM_REPO_TOKEN: ${{ secrets.ROM_REPO_TOKEN }}
+        run: git clone -q --depth 1 "https://x-access-token:$ROM_REPO_TOKEN@github.com/$ROM_REPO.git" rom-src
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 cmake ninja-build clang lld pkg-config libsdl2-dev libdbus-1-dev \
+            libfreetype-dev libprotobuf-dev protobuf-compiler libssl-dev
+
+      # protobuf linked into the program: distributions ship different protobuf versions.
+      - name: Build
+        env:
+          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON -DProtobuf_USE_STATIC_LIBS=ON
+        run: ./build.sh rom-src/baserom.us.z64 < /dev/null
+
+      - name: Check the same inputs give the same game
+        run: tools/netplay/check.sh --rom rom-src/baserom.us.z64 --out netplay-check
+
+      # The included mods, for every platform (a .nrm is the same file on all of them).
+      - name: Build the mods
+        run: |
+          mkdir -p package/mods
+          for toml in mods/*/mod.toml; do
+            sh mods/build_mod.sh "$(dirname "$toml")"
+            cp "$(dirname "$toml")"/build/*.nrm package/mods/
+          done
+          cp .github/release/MODS.txt package/mods/README.txt
+          (cd package/mods && zip -q "../ConkerRecompiled-Netplay-${{ needs.prepare.outputs.tag }}-Mods.zip" *)
+
+      - name: Package
+        run: |
+          out=package/ConkerRecompiled
+          mkdir -p "$out"
+          cp host/build/ConkerRecomp "$out/"
+          strip "$out/ConkerRecomp"
+          cp -r host/build/assets "$out/assets"
+          cp .github/release/README.txt LICENSE .github/release/LICENSES.txt "$out/"
+          cp tools/N64ModernRuntime/COPYING "$out/LICENSE-GPL-3.0.txt"
+          cp host/build/_deps/gamenetworkingsockets-src/LICENSE "$out/LICENSE-GameNetworkingSockets.txt"
+          cp /usr/share/doc/libprotobuf32t64/copyright "$out/LICENSE-protobuf.txt"
+          tar -czf "package/ConkerRecompiled-Netplay-${{ needs.prepare.outputs.tag }}-Linux.tar.gz" -C package ConkerRecompiled
+
+      - name: Upload to the release
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" package/*.tar.gz package/*-Mods.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+  macos:
+    needs: prepare
+    # Apple Silicon, macOS 15 (the app can't run on a macOS older than the one it's built on).
+    # Netplay on macOS hasn't been played yet: the release notes say so.
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        run: |
+          git clone -q --no-checkout "https://github.com/$GITHUB_REPOSITORY" .
+          git checkout -q "$GITHUB_SHA"
+
+      - name: Get the ROM
+        env:
+          ROM_REPO: ${{ secrets.ROM_REPO }}
+          ROM_REPO_TOKEN: ${{ secrets.ROM_REPO_TOKEN }}
+        run: git clone -q --depth 1 "https://x-access-token:$ROM_REPO_TOKEN@github.com/$ROM_REPO.git" rom-src
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja pkg-config sdl2 freetype dylibbundler protobuf openssl@3
+          xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Build
+        env:
+          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON
+        run: ./build.sh rom-src/baserom.us.z64 < /dev/null
+
+      - name: Package
+        run: |
+          out=package/ConkerRecompiled
+          mkdir -p "$out"
+          sh host/package_macos.sh "$out"
+          cp .github/release/README.txt LICENSE .github/release/LICENSES.txt "$out/"
+          cp tools/N64ModernRuntime/COPYING "$out/LICENSE-GPL-3.0.txt"
+          cp host/build/_deps/gamenetworkingsockets-src/LICENSE "$out/LICENSE-GameNetworkingSockets.txt"
+          cp "$(brew --prefix protobuf)/LICENSE" "$out/LICENSE-protobuf.txt"
+          ditto -c -k --norsrc --noextattr --noacl --keepParent "$out" "package/ConkerRecompiled-Netplay-${{ needs.prepare.outputs.tag }}-macOS.zip"
+
+      - name: Upload to the release
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" package/*.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish:
+    needs: [prepare, windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        run: |
+          tag="${{ needs.prepare.outputs.tag }}"
+          {
+            echo "Built from $GITHUB_SHA ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)."
+            echo
+            echo "Online multiplayer build of Conker's Bad Fur Day: Recompiled. You still need your own US ROM:"
+            echo "pick it in the launcher the first time. Everyone in a match must use the same release."
+            echo
+            echo "macOS: builds, but netplay on macOS hasn't been played yet."
+          } > notes.md
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest --notes-file notes.md
+
+  # A failed or cancelled run leaves no half-built draft behind.
+  clean-up:
+    needs: [prepare, windows, linux, macos, publish]
+    if: (failure() || cancelled()) && needs.prepare.outputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete the draft release
+        run: gh release delete "${{ needs.prepare.outputs.tag }}" --repo "$GITHUB_REPOSITORY" --yes || true
