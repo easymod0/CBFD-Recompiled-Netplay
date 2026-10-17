@@ -81,11 +81,12 @@ jobs:
           git checkout -q "$GITHUB_SHA"
 
       - name: Restore vcpkg's cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: vcpkg-cache
           key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
-          restore-keys: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-
+          # No dash at the end, so this also finds a cache saved under the plain key.
+          restore-keys: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}
 
       - name: Get the ROM
         shell: bash
@@ -107,7 +108,7 @@ jobs:
       # kept.
       - name: Save vcpkg's cache
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: vcpkg-cache
           key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
