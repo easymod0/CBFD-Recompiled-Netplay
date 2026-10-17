@@ -28,6 +28,12 @@
 //                       and plays them again; each read played again must hash as it did the first time. The
 //                       hash log has each read once (so it matches a run without it); at the end it prints
 //                       how long taking, loading and playing again took
+//   --rollback-late <late>[:<seed>]  rollback's local test (issue #22, step 3), with --replay: ports 2 on are
+//                       other machines' players, whose inputs arrive up to <late> reads late (at random, from
+//                       <seed>); till then each is predicted (their last known input), and once the real one
+//                       differs the game goes back to that read and plays on again. A read's hash is logged
+//                       once every input before it is known and was the real one, so the log matches a plain
+//                       replay's
 //   --jitter <us>       sleeps at random, up to <us> microseconds, at the game's OS calls and in the
 //                       graphics thread: a test that the host's speed doesn't change the game
 //   --own-view          records or hashes as a match whose rule is that every player sees only their own
@@ -79,6 +85,7 @@
 #include "hello.hpp"
 #include "lockstep.hpp"
 #include "librecomp/game.hpp"
+#include "librecomp/overlays.hpp"
 #include "librecomp/save_states.hpp"
 #include "recomp.h"
 #include "ultramodern/save_states.hpp"
@@ -136,29 +143,48 @@ namespace {
     bool rerunning = false;
     uint64_t rollback_reads_ahead = 0;      // reads made at least once (the hash log has these)
     std::vector<uint64_t> first_hashes;     // by read
+    // --rollback-late's: the remote ports' inputs, when each arrives, what the game was given, and how far
+    // it's known to be right.
+    uint64_t late_max = 0;
+    uint64_t late_seed = 1;
+    struct ReadInputs {
+        conker::netplay::Pad pads[4];
+        conker::netplay::Motion motions[4];
+    };
+    std::vector<ReadInputs> late_used;                      // by read, in the game as it is now
+    std::vector<uint64_t> late_arrival[4];                  // by port and read: the read (first time) it arrives at
+    uint64_t late_known[4] = {};                            // by port: its reads known (they arrive in order)
+    uint64_t late_verified = 0;                             // reads from 0 known and given as they were
+    uint64_t late_logged = 0;                               // reads whose hash is logged
+    std::vector<uint64_t> late_hash;                        // by read: as it was last made
+    bool late_broken = false;                               // a rollback couldn't be done: the game is wrong
+    uint64_t late_mispredicted = 0;
+    constexpr uint64_t late_boot_reads = 30;
+
+    bool rollback_on() { return rollback_every != 0 || late_max != 0; }
     struct Timings {
         std::vector<double> us;
         void add(double value) { us.push_back(value); }
-        std::string summary() const {
+        std::string summary(const char* unit = "us") const {
             if (us.empty()) return "none";
             std::vector<double> sorted = us;
             std::sort(sorted.begin(), sorted.end());
             double total = 0;
             for (double v : sorted) total += v;
             char line[200];
-            std::snprintf(line, sizeof(line), "%zu, mean %.0f us, median %.0f, p99 %.0f, max %.0f", sorted.size(),
-                total / sorted.size(), sorted[sorted.size() / 2], sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)],
+            std::snprintf(line, sizeof(line), "%zu, mean %.1f %s, median %.0f, p99 %.0f, max %.0f", sorted.size(),
+                total / sorted.size(), unit, sorted[sorted.size() / 2], sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)],
                 sorted.back());
             return line;
         }
     };
     struct RollbackStats {
-        Timings capture, host_save, restore, host_load, rerun_per_read, read_gap, load_wait_reads;
+        Timings capture, host_save, restore, host_load, rerun_per_read, read_gap, load_wait_reads, late_depth;
         uint64_t safe_index = 0;                // safe points since the last read
         std::array<uint64_t, 16> taken_at{}, loaded_at{};  // by safe_index
         uint64_t asked_at_read = 0;
         uint64_t safe_points = 0, busy = 0, capture_failed = 0, not_now = 0, no_snapshot = 0, mismatches = 0;
-        uint64_t given_up = 0;
+        uint64_t given_up = 0, earlier_state = 0, later_load = 0;
         uint64_t reads_without_snapshot = 0, rollbacks = 0, reruns_done = 0;
         uint64_t first_mismatch = UINT64_MAX;
         std::chrono::steady_clock::time_point started, last_read_at;
@@ -445,6 +471,41 @@ namespace {
         return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
     }
 
+    // The game functions a thread waits in, innermost first (as the runtime's game signature walks them), for
+    // --rollback-test's log of where the game's threads change where they wait.
+    std::string game_calls(const ultramodern::save_states::ThreadInfo& thread) {
+        static const std::vector<uint8_t> rom = recomp::get_code_rom();
+        if (thread.game_context == nullptr) return "-";
+        const recomp_context* ctx = static_cast<const recomp_context*>(thread.game_context);
+        uint32_t ra = (uint32_t)ctx->r31, sp = (uint32_t)ctx->r29;
+        std::string out;
+        for (int depth = 0; depth < 64; depth++) {
+            uint32_t func_vram, func_rom, func_size;
+            if (!recomp::overlays::find_loaded_function(ra - 8, func_vram, func_rom, func_size)) break;
+            char name[16];
+            std::snprintf(name, sizeof(name), "%s%08X", out.empty() ? "" : " < ", func_vram);
+            out += name;
+            int32_t frame_size = 0, ra_offset = -1;
+            const uint32_t count = std::min<uint32_t>((ra - 8 - func_vram) / 4, 64);
+            for (uint32_t i = 0; i < count && func_rom + i * 4 + 4 <= rom.size(); i++) {
+                const uint8_t* w = rom.data() + func_rom + i * 4;
+                const uint32_t word = ((uint32_t)w[0] << 24) | ((uint32_t)w[1] << 16) | ((uint32_t)w[2] << 8) | w[3];
+                const int16_t immediate = (int16_t)(word & 0xFFFF);
+                if ((word >> 16) == 0x27BD && immediate < 0 && frame_size == 0) frame_size = -immediate;
+                else if ((word >> 16) == 0xAFBF && ra_offset < 0) ra_offset = immediate;
+                else if ((word >> 16) == 0xFFBF && ra_offset < 0) ra_offset = immediate + 4;
+            }
+            if (frame_size == 0 || ra_offset < 0) break;
+            const uint32_t saved_at = sp + (uint32_t)ra_offset;
+            if (saved_at < 0x80000000u || saved_at + 4 > 0x80000000u + recomp::save_states::game_memory_size) break;
+            ra = (uint32_t)MEM_W(0, (gpr)(int32_t)saved_at);
+            sp += (uint32_t)frame_size;
+            if (ra == 0) break;
+        }
+        return out;
+    }
+    std::string last_places;
+
     // --rollback-test's, at each safe point: a wanted load (back <back> reads), or else a state before the
     // next read, if there's none yet.
     void rollback_safe_point(uint8_t* game_rdram) {
@@ -456,20 +517,39 @@ namespace {
         }
         std::string error;
         if (rollback_to != UINT64_MAX) {
-            Snapshot& snapshot = snapshots[rollback_to % snapshots.size()];
-            if (snapshot.read != rollback_to) {
+            if (snapshots[rollback_to % snapshots.size()].read != rollback_to) {
                 rb.no_snapshot++;
+                if (late_max != 0) {
+                    late_broken = true;
+                    std::printf("[harness] rollback to read %llu: no state for it\n", (unsigned long long)rollback_to);
+                }
                 rollback_to = UINT64_MAX;
                 return;
             }
-            auto start = std::chrono::steady_clock::now();
-            const recomp::save_states::LoadResult result = recomp::save_states::restore(game_rdram, snapshot.state, error);
-            const double restore_us = micros_since(start);
-            if (result == recomp::save_states::LoadResult::NotNow) {
+            // The state before the read to go back to, or else an earlier one (one more read to play again): a
+            // state can't be loaded where a thread waits elsewhere than in it, as the game's main thread does
+            // for one read at a scene change. If none can now, it's tried again at the next safe point.
+            uint64_t target = rollback_to;
+            recomp::save_states::LoadResult result = recomp::save_states::LoadResult::NotNow;
+            double restore_us = 0;
+            for (; target != UINT64_MAX && snapshots[target % snapshots.size()].read == target; target--) {
+                auto start = std::chrono::steady_clock::now();
+                result = recomp::save_states::restore(game_rdram, snapshots[target % snapshots.size()].state, error);
+                restore_us = micros_since(start);
+                if (result != recomp::save_states::LoadResult::NotNow) break;
                 rb.not_now++;
+                if (target == 0) {
+                    target = UINT64_MAX;
+                    break;
+                }
+            }
+            if (result == recomp::save_states::LoadResult::NotNow) {
                 // As rollback would, it gives up after 2 reads (and the reads would have waited for the inputs).
                 if (reads >= rb.asked_at_read + 2) {
                     rb.given_up++;
+                    if (late_max != 0) {
+                        late_broken = true;
+                    }
                     std::printf("[harness] rollback to read %llu given up at read %llu: %s\n", (unsigned long long)rollback_to,
                         (unsigned long long)reads, error.c_str());
                     rollback_to = UINT64_MAX;
@@ -481,14 +561,28 @@ namespace {
                 rollback_to = UINT64_MAX;
                 return;
             }
+            if (target != rollback_to) {
+                rb.earlier_state++;
+            }
+            if (reads != rb.asked_at_read) {
+                rb.later_load++;
+            }
+            rollback_to = target;
+            Snapshot& snapshot = snapshots[target % snapshots.size()];
             rb.restore.add(restore_us);
             rb.loaded_at[index]++;
             rb.load_wait_reads.add((double)(reads - rb.asked_at_read));
-            start = std::chrono::steady_clock::now();
+            auto start = std::chrono::steady_clock::now();
             conker::host_state::load(snapshot.host);
             rb.host_load.add(micros_since(start));
             rollback_from = reads;
             rerun_reads = rollback_from - rollback_to;
+            // The states after it are of the game that's being replaced: they're taken again as it's played again.
+            for (Snapshot& later : snapshots) {
+                if (later.read != UINT64_MAX && later.read > rollback_to) {
+                    later.read = UINT64_MAX;
+                }
+            }
             reads = rollback_to;
             rollback_to = UINT64_MAX;
             rb.rollbacks++;
@@ -509,6 +603,16 @@ namespace {
             return;
         }
         rb.capture.add(micros_since(start));
+        {
+            std::string places;
+            for (const auto& thread : ultramodern::save_states::get_threads(game_rdram)) {
+                places += "  thread " + std::to_string(thread.id) + ": " + game_calls(thread) + "\n";
+            }
+            if (places != last_places) {
+                std::printf("[harness] before read %llu the threads wait in:\n%s", (unsigned long long)reads, places.c_str());
+                last_places = places;
+            }
+        }
         rb.taken_at[index]++;
         start = std::chrono::steady_clock::now();
         snapshot.host = conker::host_state::save();
@@ -531,7 +635,9 @@ namespace {
         if (snapshots[read % snapshots.size()].read != read) {
             rb.reads_without_snapshot++;
         }
-        if (read < first_hashes.size()) {
+        if (late_max != 0) {
+        }
+        else if (read < first_hashes.size()) {
             if (first_hashes[read] != hash) {
                 rb.mismatches++;
                 if (rb.first_mismatch == UINT64_MAX) {
@@ -550,7 +656,7 @@ namespace {
             rb.rerun_per_read.add(micros_since(rerun_started) / (double)rerun_reads);
         }
         // Back <back> reads after this one: to before read + 1 - back, to play this one and those before it again.
-        if (!rerunning && rollback_to == UINT64_MAX && read + 1 >= rollback_back && read >= rollback_reads_ahead &&
+        if (rollback_every != 0 && !rerunning && rollback_to == UINT64_MAX && read + 1 >= rollback_back && read >= rollback_reads_ahead &&
             read % rollback_every == rollback_every - 1) {
             rollback_to = read + 1 - rollback_back;
             rb.asked_at_read = read + 1;
@@ -559,8 +665,15 @@ namespace {
     }
 
     void rollback_report() {
-        if (rollback_every == 0 || !rb.started_set) {
+        if (!rollback_on() || !rb.started_set) {
             return;
+        }
+        if (late_max != 0) {
+            std::printf("[harness] rollback late test: up to %llu reads late (seed %llu), %d ports; %llu reads verified and logged of %llu%s\n",
+                (unsigned long long)late_max, (unsigned long long)late_seed, ports, (unsigned long long)late_logged,
+                (unsigned long long)rollback_reads_ahead, late_broken ? " (A ROLLBACK COULDN'T BE DONE: the game went wrong there)" : "");
+            std::printf("[harness]   reads mispredicted when found %llu; reads gone back: %s\n", (unsigned long long)late_mispredicted,
+                rb.late_depth.summary("reads").c_str());
         }
         const double seconds = micros_since(rb.started) / 1e6;
         std::printf("[harness] rollback test: every %llu reads back %llu; %llu reads made, %llu rollbacks in %.1f s\n",
@@ -570,13 +683,15 @@ namespace {
             "loads not now %llu (rollbacks given up %llu), rollbacks with no state %llu\n",
             (unsigned long long)rb.safe_points, (unsigned long long)rb.busy, (unsigned long long)rb.capture_failed,
             (unsigned long long)rb.reads_without_snapshot, (unsigned long long)rb.not_now, (unsigned long long)rb.given_up, (unsigned long long)rb.no_snapshot);
+        std::printf("[harness]   loads from an earlier state %llu, loads a read or more later %llu\n",
+            (unsigned long long)rb.earlier_state, (unsigned long long)rb.later_load);
         std::printf("[harness]   take:      %s\n", rb.capture.summary().c_str());
         std::printf("[harness]   host save: %s\n", rb.host_save.summary().c_str());
         std::printf("[harness]   load:      %s\n", rb.restore.summary().c_str());
         std::printf("[harness]   host load: %s\n", rb.host_load.summary().c_str());
         std::printf("[harness]   read to read (first time): %s\n", rb.read_gap.summary().c_str());
         std::printf("[harness]   played again, a read: %s\n", rb.rerun_per_read.summary().c_str());
-        std::printf("[harness]   reads a load waited: %s\n", rb.load_wait_reads.summary().c_str());
+        std::printf("[harness]   reads a load waited: %s\n", rb.load_wait_reads.summary("reads").c_str());
         std::string at = "[harness]   safe point after a read (taken/loaded):";
         for (size_t i = 0; i < rb.taken_at.size(); i++) {
             if (rb.taken_at[i] + rb.loaded_at[i] != 0) at += " " + std::to_string(i) + ":" + std::to_string(rb.taken_at[i]) + "/" + std::to_string(rb.loaded_at[i]);
@@ -589,7 +704,7 @@ namespace {
 
     // At a safe point (a delivery point, on the idle thread), with a --state-test save or load asked for.
     void on_safe_point(uint8_t* game_rdram) {
-        if (rollback_every != 0) {
+        if (rollback_on()) {
             rollback_safe_point(game_rdram);
             return;
         }
@@ -678,6 +793,90 @@ namespace {
         return input;
     }
 
+    // --rollback-late's, at each read, with the replay's pads in `pads` and `motions` (the real ones): finds
+    // the inputs that arrived to be other than predicted (and asks to go back), gives the game the remote
+    // ports' predictions, and logs the hashes known to be right.
+    void late_read(uint64_t read, ultramodern::input::Pad* pads, conker::netplay::Motion* motions, uint64_t hash) {
+        auto real_of = [](uint64_t r, int port) {
+            conker::netplay::Pad pad = replay_pad(r, port);
+            return std::pair{ pad, replay_motion_of(r, port) };
+        };
+        if (read >= rollback_reads_ahead) {
+            // The first time: what has arrived by now.
+            for (int port = 1; port < ports; port++) {
+                while (late_known[port] < replay_reads && late_arrival[port][late_known[port]] <= read) {
+                    late_known[port]++;
+                }
+            }
+            // The first read made that was given another input than what arrived.
+            uint64_t wrong = UINT64_MAX;
+            for (uint64_t r = late_verified; r < read && wrong == UINT64_MAX; r++) {
+                for (int port = 1; port < ports; port++) {
+                    if (r >= late_known[port]) continue;
+                    const auto [pad, motion] = real_of(r, port);
+                    if (!(late_used[r].pads[port] == pad) || !(late_used[r].motions[port] == motion)) {
+                        wrong = r;
+                        break;
+                    }
+                }
+            }
+            if (wrong != UINT64_MAX && !late_broken && (rollback_to == UINT64_MAX || wrong < rollback_to)) {
+                rollback_to = wrong;
+                rb.asked_at_read = read + 1;
+                late_mispredicted++;
+                rb.late_depth.add((double)(read + 1 - wrong));
+            }
+        }
+        // The remote ports: as they arrived, or predicted (the last known).
+        ReadInputs& used = late_used[read];
+        for (int port = 0; port < max_pads; port++) {
+            conker::netplay::Pad pad{ pads[port].button, pads[port].stick_x, pads[port].stick_y, pads[port].err_no };
+            conker::netplay::Motion motion = motions[port];
+            if (port >= 1 && port < ports && read >= late_known[port]) {
+                if (late_known[port] == 0) {
+                    pad = { 0, 0, 0, pad.err_no };
+                    motion = still();
+                }
+                else {
+                    const auto [last_pad, last_motion] = real_of(late_known[port] - 1, port);
+                    pad = { last_pad.buttons, last_pad.stick_x, last_pad.stick_y, pad.err_no };
+                    motion = last_motion;
+                }
+                pads[port] = { pad.buttons, pad.stick_x, pad.stick_y, pad.err_no };
+                motions[port] = motion;
+            }
+            used.pads[port] = pad;
+            used.motions[port] = motion;
+        }
+        // Right so far: the reads before this one, each known and given as it was.
+        late_hash[read] = hash;
+        // The last time a read is made is the right one: a dump is written each time.
+        if (hash_log != nullptr && std::find(dump_at.begin(), dump_at.end(), read) != dump_at.end()) {
+            dump_memory(read);
+        }
+        while (!late_broken && late_verified < read) {
+            bool right = true;
+            for (int port = 1; port < ports && right; port++) {
+                if (late_verified >= late_known[port]) {
+                    right = false;
+                    break;
+                }
+                const auto [pad, motion] = real_of(late_verified, port);
+                right = late_used[late_verified].pads[port] == pad && late_used[late_verified].motions[port] == motion;
+            }
+            if (!right) break;
+            late_verified++;
+        }
+        // A read's hash is the result of the reads before it: right once those are.
+        while (hash_log != nullptr && late_logged <= std::min(late_verified, read)) {
+            std::fprintf(hash_log, "%llu %016llx\n", (unsigned long long)late_logged, (unsigned long long)late_hash[late_logged]);
+            late_logged++;
+        }
+        if (hash_log == nullptr) {
+            late_logged = std::max(late_logged, std::min(late_verified, read) + 1);
+        }
+    }
+
     // On the game thread, at each controller read, with the pads the game is about to get.
     void on_read_data(ultramodern::input::Pad* pads, int count) {
         const uint64_t read = reads++;
@@ -718,14 +917,11 @@ namespace {
             return hash;
         };
         // With --rollback-test, each read once (the first time).
-        if (hash_log != nullptr && (rollback_every == 0 || read >= rollback_reads_ahead)) {
+        if (hash_log != nullptr && late_max == 0 && (rollback_every == 0 || read >= rollback_reads_ahead)) {
             std::fprintf(hash_log, "%llu %016llx\n", (unsigned long long)read, (unsigned long long)memory_hash());
             if (std::find(dump_at.begin(), dump_at.end(), read) != dump_at.end()) {
                 dump_memory(read);
             }
-        }
-        if (rollback_every != 0) {
-            rollback_read(read, memory_hash());
         }
 
         if (!replay.empty()) {
@@ -739,6 +935,13 @@ namespace {
                 std::fprintf(stderr, "[harness] read %llu: the game reads %d controllers, the recording %u\n",
                     (unsigned long long)read, count, in[0]);
             }
+        }
+
+        if (late_max != 0) {
+            late_read(read, pads, motions, memory_hash());
+        }
+        if (rollback_on()) {
+            rollback_read(read, memory_hash());
         }
 
         const conker::lockstep::Memory memory{ memory_hash, keep_memory, dump_kept };
@@ -938,6 +1141,23 @@ bool conker::harness::parse_option(int argc, char** argv, int& i) {
         }
         return true;
     }
+    if (std::strcmp(option, "--rollback-late") == 0) {
+        unsigned long long late = 0, seed = 1;
+        char end = 0;
+        const int got = has_value ? std::sscanf(argv[i + 1], "%llu:%llu%c", &late, &seed, &end) : 0;
+        if ((got != 1 && got != 2) || late == 0) {
+            std::fprintf(stderr, "[harness] --rollback-late needs <late>[:<seed>], late above 0\n");
+            options_valid = false;
+        }
+        else {
+            late_max = late;
+            late_seed = seed;
+        }
+        if (has_value) {
+            i++;
+        }
+        return true;
+    }
     if (std::strcmp(option, "--fast") == 0) {
         fast = true;
         return true;
@@ -978,7 +1198,15 @@ bool conker::harness::prepare() {
         std::fprintf(stderr, "[harness] --state-test can't be used in a netplay match\n");
         return false;
     }
-    if (rollback_every != 0 && (conker::lockstep::active() || state_save_at != no_limit || !record_path.empty())) {
+    if (rollback_every != 0 && late_max != 0) {
+        std::fprintf(stderr, "[harness] --rollback-test and --rollback-late can't be used together\n");
+        return false;
+    }
+    if (late_max != 0 && replay_path.empty()) {
+        std::fprintf(stderr, "[harness] --rollback-late needs --replay\n");
+        return false;
+    }
+    if (rollback_on() && (conker::lockstep::active() || state_save_at != no_limit || !record_path.empty())) {
         std::fprintf(stderr, "[harness] --rollback-test is for a replay or playing alone, without --state-test or --record\n");
         return false;
     }
@@ -1196,7 +1424,25 @@ void conker::harness::start(uint8_t* game_rdram) {
     if (state_load_at != no_limit) {
         ultramodern::save_states::set_safe_point_callback(on_safe_point);
     }
-    if (rollback_every != 0) {
+    if (late_max != 0) {
+        // Each remote input arrives 0 to <late> reads after its read, in order.
+        uint64_t random = late_seed * 0x9E3779B97F4A7C15ull + 1;
+        for (int port = 1; port < ports; port++) {
+            late_arrival[port].assign(replay_reads, 0);
+            uint64_t previous = 0;
+            for (uint64_t r = 0; r < replay_reads; r++) {
+                random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+                // Not in the boot's first reads (the game changes its main loop there, so they can't be gone back to):
+                // a match would wait for everyone's inputs there.
+                previous = std::max(previous, r < late_boot_reads ? r : r + random % (late_max + 1));
+                late_arrival[port][r] = previous;
+            }
+        }
+        late_used.assign(replay_reads, ReadInputs{});
+        late_hash.assign(replay_reads, 0);
+        rollback_back = late_max + 6;
+    }
+    if (rollback_on()) {
         snapshots.assign(rollback_back + 2, Snapshot{});
         ultramodern::save_states::set_safe_point_callback(on_safe_point);
         ultramodern::save_states::set_safe_points_wanted(true);
