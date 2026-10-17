@@ -23,6 +23,11 @@
 //                       game goes back to <s> and on again from there: the hash log then holds the
 //                       reads after the load in place of the first ones (they should match a run
 //                       without it). The keys' save states (F5, F7) don't work in that run
+//   --rollback-test <every>:<back>  rollback's measurement (issue #22, step 1): takes a save state at every
+//                       read (the first safe point before it), and every <every> reads goes back <back> reads
+//                       and plays them again; each read played again must hash as it did the first time. The
+//                       hash log has each read once (so it matches a run without it); at the end it prints
+//                       how long taking, loading and playing again took
 //   --jitter <us>       sleeps at random, up to <us> microseconds, at the game's OS calls and in the
 //                       graphics thread: a test that the host's speed doesn't change the game
 //   --own-view          records or hashes as a match whose rule is that every player sees only their own
@@ -56,6 +61,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -114,6 +120,50 @@ namespace {
     std::vector<uint8_t> state_host;
     uint64_t state_next_read = 0;
     long state_log_position = 0;
+    // --rollback-test's: a ring of states, by the read they're before, and what it took.
+    uint64_t rollback_every = 0;
+    uint64_t rollback_back = 0;
+    struct Snapshot {
+        uint64_t read = UINT64_MAX;
+        std::vector<uint8_t> state;
+        std::vector<uint8_t> host;
+    };
+    std::vector<Snapshot> snapshots;
+    uint64_t rollback_to = UINT64_MAX;      // a load wanted: back to before this read
+    uint64_t rollback_from = 0;             // the read the game was at, to play up to again
+    uint64_t rerun_reads = 0;               // how many reads that is
+    std::chrono::steady_clock::time_point rerun_started;
+    bool rerunning = false;
+    uint64_t rollback_reads_ahead = 0;      // reads made at least once (the hash log has these)
+    std::vector<uint64_t> first_hashes;     // by read
+    struct Timings {
+        std::vector<double> us;
+        void add(double value) { us.push_back(value); }
+        std::string summary() const {
+            if (us.empty()) return "none";
+            std::vector<double> sorted = us;
+            std::sort(sorted.begin(), sorted.end());
+            double total = 0;
+            for (double v : sorted) total += v;
+            char line[200];
+            std::snprintf(line, sizeof(line), "%zu, mean %.0f us, median %.0f, p99 %.0f, max %.0f", sorted.size(),
+                total / sorted.size(), sorted[sorted.size() / 2], sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)],
+                sorted.back());
+            return line;
+        }
+    };
+    struct RollbackStats {
+        Timings capture, host_save, restore, host_load, rerun_per_read, read_gap, load_wait_reads;
+        uint64_t safe_index = 0;                // safe points since the last read
+        std::array<uint64_t, 16> taken_at{}, loaded_at{};  // by safe_index
+        uint64_t asked_at_read = 0;
+        uint64_t safe_points = 0, busy = 0, capture_failed = 0, not_now = 0, no_snapshot = 0, mismatches = 0;
+        uint64_t given_up = 0;
+        uint64_t reads_without_snapshot = 0, rollbacks = 0, reruns_done = 0;
+        uint64_t first_mismatch = UINT64_MAX;
+        std::chrono::steady_clock::time_point started, last_read_at;
+        bool started_set = false;
+    } rb;
     bool real_time = false;
     bool fast = false;
     // --own-view's: recording or hashing alone, as in a match whose rule is that everyone sees only their own view.
@@ -391,8 +441,158 @@ namespace {
         return false;
     }
 
+    double micros_since(std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+    }
+
+    // --rollback-test's, at each safe point: a wanted load (back <back> reads), or else a state before the
+    // next read, if there's none yet.
+    void rollback_safe_point(uint8_t* game_rdram) {
+        rb.safe_points++;
+        const uint64_t index = std::min<uint64_t>(rb.safe_index++, 15);
+        if (!ultramodern::save_states::is_quiet()) {
+            rb.busy++;
+            return;
+        }
+        std::string error;
+        if (rollback_to != UINT64_MAX) {
+            Snapshot& snapshot = snapshots[rollback_to % snapshots.size()];
+            if (snapshot.read != rollback_to) {
+                rb.no_snapshot++;
+                rollback_to = UINT64_MAX;
+                return;
+            }
+            auto start = std::chrono::steady_clock::now();
+            const recomp::save_states::LoadResult result = recomp::save_states::restore(game_rdram, snapshot.state, error);
+            const double restore_us = micros_since(start);
+            if (result == recomp::save_states::LoadResult::NotNow) {
+                rb.not_now++;
+                // As rollback would, it gives up after 2 reads (and the reads would have waited for the inputs).
+                if (reads >= rb.asked_at_read + 2) {
+                    rb.given_up++;
+                    std::printf("[harness] rollback to read %llu given up at read %llu: %s\n", (unsigned long long)rollback_to,
+                        (unsigned long long)reads, error.c_str());
+                    rollback_to = UINT64_MAX;
+                }
+                return;
+            }
+            if (result == recomp::save_states::LoadResult::Invalid) {
+                std::fprintf(stderr, "[harness] rollback: the state couldn't be loaded: %s\n", error.c_str());
+                rollback_to = UINT64_MAX;
+                return;
+            }
+            rb.restore.add(restore_us);
+            rb.loaded_at[index]++;
+            rb.load_wait_reads.add((double)(reads - rb.asked_at_read));
+            start = std::chrono::steady_clock::now();
+            conker::host_state::load(snapshot.host);
+            rb.host_load.add(micros_since(start));
+            rollback_from = reads;
+            rerun_reads = rollback_from - rollback_to;
+            reads = rollback_to;
+            rollback_to = UINT64_MAX;
+            rb.rollbacks++;
+            rerunning = true;
+            rerun_started = std::chrono::steady_clock::now();
+            return;
+        }
+        Snapshot& snapshot = snapshots[reads % snapshots.size()];
+        if (snapshot.read == reads) {
+            return;
+        }
+        auto start = std::chrono::steady_clock::now();
+        if (!recomp::save_states::capture(game_rdram, snapshot.state, error)) {
+            snapshot.read = UINT64_MAX;
+            if (rb.capture_failed++ < 5) {
+                std::printf("[harness] rollback: no state before read %llu: %s\n", (unsigned long long)reads, error.c_str());
+            }
+            return;
+        }
+        rb.capture.add(micros_since(start));
+        rb.taken_at[index]++;
+        start = std::chrono::steady_clock::now();
+        snapshot.host = conker::host_state::save();
+        rb.host_save.add(micros_since(start));
+        snapshot.read = reads;
+    }
+
+    // --rollback-test's, at each read: checks a read played again, and asks for the next rollback.
+    void rollback_read(uint64_t read, uint64_t hash) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!rb.started_set) {
+            rb.started = now;
+            rb.started_set = true;
+        }
+        else if (!rerunning) {
+            rb.read_gap.add(std::chrono::duration<double, std::micro>(now - rb.last_read_at).count());
+        }
+        rb.last_read_at = now;
+        rb.safe_index = 0;
+        if (snapshots[read % snapshots.size()].read != read) {
+            rb.reads_without_snapshot++;
+        }
+        if (read < first_hashes.size()) {
+            if (first_hashes[read] != hash) {
+                rb.mismatches++;
+                if (rb.first_mismatch == UINT64_MAX) {
+                    rb.first_mismatch = read;
+                    std::printf("[harness] rollback: read %llu played again hashes %016llx, the first time %016llx\n",
+                        (unsigned long long)read, (unsigned long long)hash, (unsigned long long)first_hashes[read]);
+                }
+            }
+        }
+        else {
+            first_hashes.push_back(hash);
+        }
+        if (rerunning && read + 1 >= rollback_from) {
+            rerunning = false;
+            rb.reruns_done++;
+            rb.rerun_per_read.add(micros_since(rerun_started) / (double)rerun_reads);
+        }
+        // Back <back> reads after this one: to before read + 1 - back, to play this one and those before it again.
+        if (!rerunning && rollback_to == UINT64_MAX && read + 1 >= rollback_back && read >= rollback_reads_ahead &&
+            read % rollback_every == rollback_every - 1) {
+            rollback_to = read + 1 - rollback_back;
+            rb.asked_at_read = read + 1;
+        }
+        rollback_reads_ahead = std::max(rollback_reads_ahead, read + 1);
+    }
+
+    void rollback_report() {
+        if (rollback_every == 0 || !rb.started_set) {
+            return;
+        }
+        const double seconds = micros_since(rb.started) / 1e6;
+        std::printf("[harness] rollback test: every %llu reads back %llu; %llu reads made, %llu rollbacks in %.1f s\n",
+            (unsigned long long)rollback_every, (unsigned long long)rollback_back, (unsigned long long)rollback_reads_ahead,
+            (unsigned long long)rb.rollbacks, seconds);
+        std::printf("[harness]   safe points %llu (busy %llu), states not taken %llu, reads without a state %llu, "
+            "loads not now %llu (rollbacks given up %llu), rollbacks with no state %llu\n",
+            (unsigned long long)rb.safe_points, (unsigned long long)rb.busy, (unsigned long long)rb.capture_failed,
+            (unsigned long long)rb.reads_without_snapshot, (unsigned long long)rb.not_now, (unsigned long long)rb.given_up, (unsigned long long)rb.no_snapshot);
+        std::printf("[harness]   take:      %s\n", rb.capture.summary().c_str());
+        std::printf("[harness]   host save: %s\n", rb.host_save.summary().c_str());
+        std::printf("[harness]   load:      %s\n", rb.restore.summary().c_str());
+        std::printf("[harness]   host load: %s\n", rb.host_load.summary().c_str());
+        std::printf("[harness]   read to read (first time): %s\n", rb.read_gap.summary().c_str());
+        std::printf("[harness]   played again, a read: %s\n", rb.rerun_per_read.summary().c_str());
+        std::printf("[harness]   reads a load waited: %s\n", rb.load_wait_reads.summary().c_str());
+        std::string at = "[harness]   safe point after a read (taken/loaded):";
+        for (size_t i = 0; i < rb.taken_at.size(); i++) {
+            if (rb.taken_at[i] + rb.loaded_at[i] != 0) at += " " + std::to_string(i) + ":" + std::to_string(rb.taken_at[i]) + "/" + std::to_string(rb.loaded_at[i]);
+        }
+        std::printf("%s\n", at.c_str());
+        std::printf("[harness]   reads played again that hashed otherwise: %llu%s\n", (unsigned long long)rb.mismatches,
+            rb.mismatches == 0 ? " (all the same)" : "");
+        std::fflush(stdout);
+    }
+
     // At a safe point (a delivery point, on the idle thread), with a --state-test save or load asked for.
     void on_safe_point(uint8_t* game_rdram) {
+        if (rollback_every != 0) {
+            rollback_safe_point(game_rdram);
+            return;
+        }
         if (state_request == StateRequest::None || !ultramodern::save_states::is_quiet()) {
             return;
         }
@@ -517,11 +717,15 @@ namespace {
             }
             return hash;
         };
-        if (hash_log != nullptr) {
+        // With --rollback-test, each read once (the first time).
+        if (hash_log != nullptr && (rollback_every == 0 || read >= rollback_reads_ahead)) {
             std::fprintf(hash_log, "%llu %016llx\n", (unsigned long long)read, (unsigned long long)memory_hash());
             if (std::find(dump_at.begin(), dump_at.end(), read) != dump_at.end()) {
                 dump_memory(read);
             }
+        }
+        if (rollback_every != 0) {
+            rollback_read(read, memory_hash());
         }
 
         if (!replay.empty()) {
@@ -607,6 +811,7 @@ namespace {
                 std::fflush(hash_log);
             }
             conker::lockstep::leave();
+            rollback_report();
             std::printf("[harness] read %llu was the last: quitting\n", (unsigned long long)read);
             request_quit();
         }
@@ -717,6 +922,22 @@ bool conker::harness::parse_option(int argc, char** argv, int& i) {
         }
         return true;
     }
+    if (std::strcmp(option, "--rollback-test") == 0) {
+        unsigned long long every = 0, back = 0;
+        char end = 0;
+        if (!has_value || std::sscanf(argv[i + 1], "%llu:%llu%c", &every, &back, &end) != 2 || every == 0 || back == 0) {
+            std::fprintf(stderr, "[harness] --rollback-test needs <every>:<back>, both above 0\n");
+            options_valid = false;
+        }
+        else {
+            rollback_every = every;
+            rollback_back = back;
+        }
+        if (has_value) {
+            i++;
+        }
+        return true;
+    }
     if (std::strcmp(option, "--fast") == 0) {
         fast = true;
         return true;
@@ -755,6 +976,10 @@ bool conker::harness::prepare() {
     }
     if (conker::lockstep::active() && state_save_at != no_limit) {
         std::fprintf(stderr, "[harness] --state-test can't be used in a netplay match\n");
+        return false;
+    }
+    if (rollback_every != 0 && (conker::lockstep::active() || state_save_at != no_limit || !record_path.empty())) {
+        std::fprintf(stderr, "[harness] --rollback-test is for a replay or playing alone, without --state-test or --record\n");
         return false;
     }
     if (!dump_at.empty() && hash_log_path.empty()) {
@@ -970,6 +1195,11 @@ void conker::harness::start(uint8_t* game_rdram) {
     ultramodern::input::set_read_data_callback(on_read_data);
     if (state_load_at != no_limit) {
         ultramodern::save_states::set_safe_point_callback(on_safe_point);
+    }
+    if (rollback_every != 0) {
+        snapshots.assign(rollback_back + 2, Snapshot{});
+        ultramodern::save_states::set_safe_point_callback(on_safe_point);
+        ultramodern::save_states::set_safe_points_wanted(true);
     }
 }
 
