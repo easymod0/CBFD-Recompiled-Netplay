@@ -296,6 +296,9 @@ namespace conker {
     // conker_config.cpp: General's Start Game Directly (issue #133), read from the General tab's saved file
     // (main asks before the tabs exist).
     bool start_game_directly();
+    // The Quit prompt's Return to Launcher (main.cpp): quits the game, then starts the program again at the
+    // launcher.
+    void return_to_launcher();
 
     // sound_volumes.cpp: the Sound tab's Music, Sound Effects and Speech volumes.
     namespace sound_volumes {
