@@ -169,6 +169,22 @@ namespace {
     // Whether a peer that's gone stopped answering, rather than saying goodbye (a crash, a lost connection),
     // so it's told as maybe having quit.
     bool gone_silently = false;
+    // What status() and take_news() give the main thread, from the game thread (and the connecting one):
+    // set by publish, under their own lock, as the session's is held while a read waits. A port's round trip
+    // is asked of the library every round_trips_every seconds at most.
+    std::mutex status_mutex;
+    conker::lockstep::Status shown;
+    std::vector<std::string> news;
+    double round_trips_at = 0;
+    constexpr double round_trips_every = 0.5;
+    // How many reads the others are ahead of this peer at the last read (INT64_MIN: nobody else plays).
+    int64_t last_behind = INT64_MIN;
+    void publish(uint8_t waiting_for = 0, double waiting_since = 0);
+    void tell(const std::string& sentence) {
+        std::printf("[netplay] (on screen) %s\n", sentence.c_str());
+        std::lock_guard lock(status_mutex);
+        news.push_back(sentence);
+    }
     // The read the game is at, and how far ahead of it the others' Inputs and hashes may be: a peer runs at
     // most the input delay ahead of the slowest (it waits for their pads), and sends its own pads the delay
     // ahead again, so twice the delay, an Inputs packet's reads and some spare. Anything further is a broken
@@ -217,6 +233,13 @@ namespace {
         return (count == 1 ? "port " : "ports ") + numbers;
     }
 
+    // "Player 2", or "Players 2 and 3", for the player.
+    std::string players_text(uint8_t ports) {
+        std::string text = ports_text(ports);
+        text.replace(0, 4, "Player");
+        return text;
+    }
+
     void print_waits() {
         if (waits.printed || waits.reads == 0) return;
         waits.printed = true;
@@ -239,6 +262,7 @@ namespace {
             left = true;
         }
         ended = true;
+        publish();
     }
 
     // Leaves the match with a goodbye, and polls the library a moment for it to go out (it's sent as the
@@ -254,6 +278,7 @@ namespace {
             }
         }
         ended = true;
+        publish();
     }
 
     std::string hex(uint64_t value, int digits = 16) {
@@ -409,6 +434,21 @@ namespace {
         std::printf("[netplay] port %d plays no more: no input from read %llu, the others play on\n", port + 1, (unsigned long long)from);
     }
 
+    // Tells the player that `ports` left (`silently`: stopped answering), and when nobody else is left, that
+    // this machine's players play on.
+    void tell_left(uint8_t ports, bool silently) {
+        {
+            std::lock_guard lock(status_mutex);
+            shown.left |= ports;
+            if (silently) shown.left_silently |= ports;
+        }
+        tell(players_text(ports) + (silently ? " stopped answering (they may have quit)." : " left."));
+        for (int port = 0; port < match_players; port++) {
+            if ((own_ports & (1u << port)) == 0 && idle_from[port] == never) return;
+        }
+        tell("Everyone else has left: the match goes on here.");
+    }
+
     // The delay becomes `to` from read `from`.
     void change_delay(int to, uint64_t from) {
         std::printf("[netplay] read %llu: the input delay becomes %d from read %llu (it's %d)\n", (unsigned long long)current_read, to,
@@ -442,11 +482,16 @@ namespace {
                 else if (!ended) {
                     // The others play on: every input of theirs this host had was passed on as it came, so
                     // the read after the last is the same for everyone, and none of them is past it.
+                    uint8_t let_go_ports = 0;
                     for (int port = 0; port < conker::netplay::max_players; port++) {
                         if ((event.ports & (1u << port)) != 0 && idle_from[port] == never) {
                             let_go(port, received[port].size());
-                            session->send(Gone{ (uint8_t)port, (uint32_t)received[port].size() });
+                            session->send(Gone{ (uint8_t)port, (uint32_t)received[port].size(), (uint8_t)(event.reason == Reason::timeout) });
+                            let_go_ports |= (uint8_t)(1u << port);
                         }
+                    }
+                    if (let_go_ports != 0) {
+                        tell_left(let_go_ports, event.reason == Reason::timeout);
                     }
                 }
                 break;
@@ -484,9 +529,10 @@ namespace {
                         end_match(Reason::protocol, "the host said a player left at a read that doesn't fit");
                         return;
                     }
-                    std::printf("[netplay] %s left\n", ports_text((uint8_t)(1u << g->port)).c_str());
+                    std::printf("[netplay] %s left%s\n", ports_text((uint8_t)(1u << g->port)).c_str(), g->silent ? " (stopped answering)" : "");
                     gone[g->port] = true;
                     let_go(g->port, g->from_read);
+                    tell_left((uint8_t)(1u << g->port), g->silent != 0);
                 }
                 else if (const Delay* d = std::get_if<Delay>(&event.packet)) {
                     // The host's: from a read this peer hasn't sent its pads at yet, once the last change is made.
@@ -629,12 +675,13 @@ namespace {
         return from - 1;
     }
 
-    // Whether every player's pad for `read` is here (or they've left).
-    bool all_here(uint64_t read) {
+    // The ports whose pad for `read` isn't here yet (and who haven't left), bit n for port n.
+    uint8_t missing(uint64_t read) {
+        uint8_t ports = 0;
         for (int port = 0; port < match_players; port++) {
-            if (received[port].size() <= read && read < idle_from[port]) return false;
+            if (received[port].size() <= read && read < idle_from[port]) ports |= (uint8_t)(1u << port);
         }
-        return true;
+        return ports;
     }
 }
 
@@ -817,6 +864,48 @@ namespace {
     int joined = 0;             // host: the players in so far, the host too
     double connecting_since = 0;
     bool match_started = false;
+
+    // Updates what status() gives, with the ports the read waits for since `waiting_since` (none: it's not
+    // waiting). With the session's lock held, or the session alone.
+    void publish(uint8_t waiting_for, double waiting_since) {
+        const bool playing = match_started && !ended && session != nullptr;
+        std::array<int, conker::netplay::max_players> trips{ -1, -1, -1, -1 };
+        const double t = now();
+        const bool ask = playing && t - round_trips_at >= round_trips_every;
+        if (ask) {
+            trips = session->round_trips_by_port();
+            round_trips_at = t;
+        }
+        std::lock_guard lock(status_mutex);
+        shown.playing = playing;
+        shown.hosting = session != nullptr && session->hosting();
+        shown.players = match_players;
+        shown.own_ports = own_ports;
+        shown.input_delay = delay;
+        shown.others_playing = last_behind != INT64_MIN;
+        shown.ahead = shown.others_playing ? -last_behind : 0;
+        shown.waiting_for = waiting_for;
+        shown.waiting_since = waiting_since;
+        shown.catching_up = catching_up;
+        shown.catching_up_since = catching_up_since;
+        if (ask) shown.round_trip_ms = trips;
+    }
+}
+
+conker::lockstep::Status conker::lockstep::status() {
+    std::lock_guard lock(status_mutex);
+    return shown;
+}
+
+double conker::lockstep::now() {
+    return ::now();
+}
+
+std::vector<std::string> conker::lockstep::take_news() {
+    std::lock_guard lock(status_mutex);
+    std::vector<std::string> out;
+    out.swap(news);
+    return out;
 }
 
 bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
@@ -875,6 +964,13 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     gone = {};
     idle_from.fill(never);
     gone_silently = false;
+    last_behind = INT64_MIN;
+    round_trips_at = 0;
+    {
+        std::lock_guard status_lock(status_mutex);
+        shown = {};
+        news.clear();
+    }
     own_hashes.clear();
     their_hashes.clear();
     if (hosting) {
@@ -961,6 +1057,7 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
     if (match_started) {
         std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s\n", match_players,
             ports_text(own_ports).c_str(), delay, match_own_view ? ", everyone sees only their own view" : "");
+        publish();
         status = "The match starts.";
         return Progress::started;
     }
@@ -993,6 +1090,7 @@ void conker::lockstep::cancel() {
         session = nullptr;
     }
     match_started = false;
+    publish();
 }
 
 bool conker::lockstep::connected() {
@@ -1133,6 +1231,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
 
     const double since = now();
     double last_note = since;
+    uint8_t waiting_for = 0;
     while (true) {
         if (outage_until != 0 && now() >= outage_until) {
             outage_until = 0;
@@ -1147,8 +1246,13 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         if (ended) {
             return false;
         }
-        if (all_here(read)) {
+        const uint8_t missing_ports = missing(read);
+        if (missing_ports == 0) {
             break;
+        }
+        if (missing_ports != waiting_for) {
+            waiting_for = missing_ports;
+            publish(waiting_for, since);
         }
         for (int port = 0; port < match_players; port++) {
             if (received[port].size() <= read && gone[port] && read < idle_from[port]) {
@@ -1180,6 +1284,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
             behind = std::max(behind, read_sending((int64_t)received[port].size() - 1) - (int64_t)read);
         }
     }
+    last_behind = behind;
     if (!catching_up && behind >= behind_to_catch_up) {
         std::printf("[netplay] read %llu: %lld reads behind the others: catching up\n", (unsigned long long)read, (long long)behind);
         set_catching_up(true);
@@ -1216,6 +1321,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
     if (delay_option == auto_delay && session->hosting() && read % hash_every == 0) {
         adapt_delay(read);
     }
+    publish();
 
     for (int port = 0; port < match_players; port++) {
         const Input input = read < idle_from[port] ? received[port][read] : idle_input(port);
@@ -1251,6 +1357,7 @@ void conker::lockstep::leave() {
         left = true;
     }
     ended = true;
+    publish();
 }
 
 void conker::lockstep::finish() {

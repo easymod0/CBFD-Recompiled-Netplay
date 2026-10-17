@@ -42,6 +42,9 @@
 // A peer that falls behind the others (a hitch: loading, the system) catches up on its own: it runs the
 // timeline faster than real time until the others' inputs are no further ahead of it than the delay.
 //
+// What the match is doing (waiting for a player, catching up, a player leaving, the delay and round trips) is
+// kept for the screen (status, take_news: netplay/status.cpp draws it).
+//
 // As a match ends, it prints how many reads waited for the others' input and for how long (for the tests:
 // tools/netplay/network.sh).
 //
@@ -57,6 +60,7 @@
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "ultramodern/input.hpp"
 
@@ -137,6 +141,35 @@ namespace conker::lockstep {
     // game can't go on.
     bool on_read(uint64_t read, ultramodern::input::Pad* pads, netplay::Motion* motions, const InputSource& source,
         const Memory& memory, uint8_t* rdram);
+    // How the match goes, for the player to see (netplay/status.cpp draws it), from any thread: lockstep
+    // keeps it as the game thread goes, which may be stuck at a read waiting for the others.
+    struct Status {
+        bool playing = false;           // a match has started and isn't over
+        bool hosting = false;
+        int players = 0;
+        uint8_t own_ports = 0;          // bit n: port n
+        int input_delay = 0;
+        // How many reads ahead of the furthest of the others this machine is (behind: below 0); none while
+        // nobody else plays.
+        int64_t ahead = 0;
+        bool others_playing = false;
+        // The ports a read waits for (bit n: port n), and since when (seconds, lockstep::now).
+        uint8_t waiting_for = 0;
+        double waiting_since = 0;
+        // Catching up with the others (#16), since when.
+        bool catching_up = false;
+        double catching_up_since = 0;
+        // Each port's round trip (ms; -1 not known: Session::round_trips_by_port), and the ports that left,
+        // and of those the ones that stopped answering.
+        std::array<int, netplay::max_players> round_trip_ms{ -1, -1, -1, -1 };
+        uint8_t left = 0;
+        uint8_t left_silently = 0;
+    };
+    Status status();
+    // The steady clock lockstep's times are on, in seconds.
+    double now();
+    // What has happened since the last call, a sentence each for the player ("Player 3 left."), oldest first.
+    std::vector<std::string> take_news();
     // Ends the match for `reason`, saying `why` (the reason is the peers').
     void end(netplay::Reason reason, const char* why);
     // Why the match ended, in a sentence for the player (after on_read returned false).

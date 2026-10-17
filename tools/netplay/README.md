@@ -285,7 +285,8 @@ read after the last of its inputs the host had, as every joiner's inputs reach t
 host, in order, so nobody can be past it. It tells the joiners still in (`Gone`, sent after those inputs), and
 from that read every machine gives those ports an idle pad: nothing pressed, nothing moved, the player's last
 Controls. Several players on the leaving machine leave together. The host leaving still ends the match (it's
-the hub). Telling the players on screen is for the status display (#19); the log says who left and from when.
+the hub). `Gone` says whether they said goodbye or stopped answering, so every machine can say which on
+screen; the log says who left and from when.
 
 **The delay follows the connection.** With `auto`, the host checks every 30 reads, and changes the delay
 when the round trips want another, or when 3 or more of its reads came late from waiting for the others
@@ -308,6 +309,20 @@ up. So when the others' inputs reach 2 or more reads further than they would if 
 peer's read, it runs the timeline faster than real time (`ultramodern::timeline::set_catching_up`, as
 `--fast`) until they no longer do, then goes back to real time. The sound queued meanwhile is capped as
 always (`audio_output.cpp`), and nothing else needs to change: the game is the same at any speed.
+
+**On screen.** What the match is doing is shown over the game (`host/src/netplay/status.cpp`, a recompui
+overlay like the notices, never in game memory): at the top, "Waiting for Player 2... 4 s" once a read has
+waited a second for the others, "Catching up..." once that's gone on half a second, and for a few seconds
+each, a player leaving ("Player 3 left.", or "stopped answering (they may have quit)") and the host playing
+on when everyone else has left. With General: Netplay Details on, a corner shows the input delay, how many
+frames this machine is ahead of the others (or behind), and each player's round trip (a joiner knows only the
+host's: the others' inputs come through it). Lockstep keeps what's shown (`lockstep::status`, `take_news`)
+under a lock of its own, so the overlay reads it while the game thread waits at a read. While the game waits,
+the timeline gives no VI, and RT64 only presents a frame when the game makes one, so nothing drawn over the
+game (the overlay, the menus) would change: once no VI has come for 100 ms, the runtime's VI thread asks the
+renderer to present the last frame again every 50 ms (`RendererContext::present_again`, RT64's
+`Application::presentAgain`: the last present repeated, paused, as its debugger's pause does, without
+drawing anything of the game's again).
 
 ## The scripts
 

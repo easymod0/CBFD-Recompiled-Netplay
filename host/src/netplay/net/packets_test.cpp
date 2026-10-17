@@ -68,9 +68,10 @@ int main() {
     CHECK(round_trips(Start{ 3, 0 }, 9));
     CHECK(round_trips(Start{ 4, 1, max_delay }, 9));
     CHECK(round_trips(Start{ 4, 1, 2, 0x0C }, 9));
-    CHECK(round_trips(Gone{ 3, 4000000000u }, 10));
-    const std::vector<uint8_t> gone = bytes_of(Gone{ 2, 0x01020304 });
-    CHECK(gone[4] == 8 && gone[5] == 2 && gone[6] == 4 && gone[9] == 1);
+    CHECK(round_trips(Gone{ 3, 4000000000u }, 11));
+    CHECK(round_trips(Gone{ 1, 5, 1 }, 11));
+    const std::vector<uint8_t> gone = bytes_of(Gone{ 2, 0x01020304, 1 });
+    CHECK(gone[4] == 8 && gone[5] == 2 && gone[6] == 4 && gone[9] == 1 && gone[10] == 1);
     CHECK(round_trips(Delay{ max_delay, 4000000000u }, 10));
     const std::vector<uint8_t> delay = bytes_of(Delay{ 5, 0x01020304 });
     CHECK(delay[4] == 9 && delay[5] == 5 && delay[6] == 4 && delay[9] == 1);
@@ -105,6 +106,7 @@ int main() {
     CHECK(bytes_of(Start{ 3, 1, 0, 0x08 }).empty()); // a pair past the players
     CHECK(bytes_of(Start{ 4, 1, 0, 0x07 }).empty()); // an odd number of ports in pairs
     CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
+    CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
     CHECK(bytes_of(Bye{ (Reason)(last_reason + 1) }).empty());
@@ -154,6 +156,9 @@ int main() {
     CHECK(!decodes(data));
     data = gone;
     data[5] = 4;
+    CHECK(!decodes(data));
+    data = gone;
+    data[10] = 2;                                   // silent is 0 or 1
     CHECK(!decodes(data));
     data = hello;
     data[45] = 4;

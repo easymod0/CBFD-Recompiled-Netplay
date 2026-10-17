@@ -16,7 +16,8 @@
 //   6 Bye      u8 reason                                                               6 bytes
 //   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs  9 bytes
 //              (ports below players, an even number of them)
-//   8 Gone     u8 port (1 to 3: never the host's 0), u32 from read                     10 bytes
+//   8 Gone     u8 port (1 to 3: never the host's 0), u32 from read,                    11 bytes
+//              u8 silent (0 or 1: stopped answering)
 //   9 Delay    u8 delay (0 to 8), u32 from read                                        10 bytes
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
@@ -41,7 +42,7 @@ namespace conker::netplay {
                 case hash: return header_size + 12 + 2 * memory_regions;
                 case bye: return header_size + 1;
                 case start: return header_size + 4;
-                case gone: return header_size + 5;
+                case gone: return header_size + 6;
                 case delay: return header_size + 5;
             }
             return 0;
@@ -84,7 +85,7 @@ namespace conker::netplay {
             return valid_reason(p.reason);
         }
         bool valid_fields(const Gone& p) {
-            return p.port >= 1 && p.port < max_players;
+            return p.port >= 1 && p.port < max_players && p.silent <= 1;
         }
         bool valid_fields(const Delay& p) {
             return p.delay <= max_delay;
@@ -195,6 +196,7 @@ namespace conker::netplay {
             else if constexpr (std::is_same_v<T, Gone>) {
                 w.u8(p.port);
                 w.u32(p.from_read);
+                w.u8(p.silent);
             }
             else if constexpr (std::is_same_v<T, Delay>) {
                 w.u8(p.delay);
@@ -292,6 +294,7 @@ namespace conker::netplay {
                 Gone p;
                 p.port = r.u8();
                 p.from_read = r.u32();
+                p.silent = r.u8();
                 packet = p;
                 break;
             }

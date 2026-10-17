@@ -18,7 +18,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 12;
+    constexpr uint16_t protocol_version = 13;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -151,9 +151,12 @@ namespace conker::netplay {
     // Host to the joiners still in: a player has left (their machine said goodbye or stopped answering), and
     // from read `from_read` their port gets no input (an idle pad: nothing pressed, nothing moved). Sent once
     // every input of theirs the host had is passed on, so it's the read after the last of them for everyone.
+    // `silent`: they stopped answering (1: a crash, a lost connection) rather than saying goodbye (0), so the
+    // others can tell the players they may have quit.
     struct Gone {
         uint8_t port = 0;
         uint32_t from_read = 0;
+        uint8_t silent = 0;
         bool operator==(const Gone&) const = default;
     };
 

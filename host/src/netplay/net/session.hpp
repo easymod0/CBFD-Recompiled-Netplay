@@ -97,6 +97,10 @@ namespace conker::netplay {
         // Host: the round trip to each joiner, in milliseconds, as the library measures it (none it doesn't
         // know yet), for choosing the input delay.
         std::vector<int> round_trips_ms() const;
+        // The round trip to each port's machine, in milliseconds, for the player to see (-1: not known, or not
+        // another machine's port): the host's to every joiner's ports; a joiner's to the host, on port 0 (it
+        // can't tell which other ports are the host's, and the other joiners' pads come through the host).
+        std::array<int, max_players> round_trips_by_port() const;
         // Host: the joiners in (machines, not players: one may have several ports).
         int joiners() const;
         // Host: the ports whose views are shown two to a window (each machine with two players', the host's too),

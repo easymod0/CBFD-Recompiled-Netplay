@@ -536,6 +536,16 @@ to the display list, so a window run differed from a headless one (which has no
 renderer) from the second read, and the copies raced the game. RT64 still draws
 everything; only the copy back is skipped.
 
+RT64 can present its last frame again (`Application::presentAgain`, for
+netplay: while the game waits for the others, it makes no frame, and the UI
+drawn over the last one would stay as it was). It repeats the last present,
+paused, as its debugger's pause does, but not the workload: nothing of the
+game's is drawn again. A repeated present (`Present::repeated`) shows the
+frame once, not the frames interpolated before it again, and leaves the
+interpolated frames' counters alone (they may be the next workload's by then).
+ultramodern's renderer interface has it as `present_again` (RecompFrontend's
+RT64 context calls RT64's); the runtime queues one at a time.
+
 RecompFrontend (`recompfrontend.patch`): mouse buttons can be bound, with the
 keyboard's controls (and in single player with the controller's too, as both are
 read then). recompinput already had a mouse input type, but reading it

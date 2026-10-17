@@ -270,6 +270,23 @@ namespace conker::netplay {
         return out;
     }
 
+    std::array<int, max_players> Session::round_trips_by_port() const {
+        std::array<int, max_players> out;
+        out.fill(-1);
+        for (const Peer& peer : peers) {
+            SteamNetConnectionRealTimeStatus_t status;
+            if (SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.connection, &status, 0, nullptr) != k_EResultOK ||
+                status.m_nPing < 0) {
+                continue;
+            }
+            const uint8_t ports = is_host ? peer.ports : 0x01;
+            for (int port = 0; port < max_players; port++) {
+                if ((ports & (1u << port)) != 0) out[port] = status.m_nPing;
+            }
+        }
+        return out;
+    }
+
     int Session::joiners() const {
         return (int)std::count_if(peers.begin(), peers.end(), [](const Peer& p) { return p.port >= 0; });
     }
