@@ -69,7 +69,9 @@ jobs:
     timeout-minutes: 180
     env:
       # vcpkg keeps the protobuf and abseil it builds (about 20 minutes) in this folder, which is
-      # cached between runs.
+      # cached between runs. A cache's key can't be overwritten, so each run saves under its own key
+      # and the next restores the newest: a new runner compiler then refreshes the cache once instead
+      # of rebuilding protobuf on every run.
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
     steps:
       - name: Checkout
@@ -79,10 +81,11 @@ jobs:
           git checkout -q "$GITHUB_SHA"
 
       - name: Restore vcpkg's cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: vcpkg-cache
-          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}
+          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-
 
       - name: Get the ROM
         shell: bash
@@ -98,6 +101,16 @@ jobs:
           set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
           set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON
           build.cmd rom-src\baserom.us.z64
+
+      # Saved right after the build rather than at the end of the job, so a later step failing
+      # doesn't throw away the protobuf build. Also after a failed build: whatever vcpkg finished is
+      # kept.
+      - name: Save vcpkg's cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
 
       - name: Package
         shell: pwsh
