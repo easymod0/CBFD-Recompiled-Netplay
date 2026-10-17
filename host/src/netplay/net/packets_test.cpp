@@ -71,6 +71,9 @@ int main() {
     CHECK(round_trips(Gone{ 3, 4000000000u }, 10));
     const std::vector<uint8_t> gone = bytes_of(Gone{ 2, 0x01020304 });
     CHECK(gone[4] == 8 && gone[5] == 2 && gone[6] == 4 && gone[9] == 1);
+    CHECK(round_trips(Delay{ max_delay, 4000000000u }, 10));
+    const std::vector<uint8_t> delay = bytes_of(Delay{ 5, 0x01020304 });
+    CHECK(delay[4] == 9 && delay[5] == 5 && delay[6] == 4 && delay[9] == 1);
 
     // The layout: header, then little-endian fields.
     const std::vector<uint8_t> hello = bytes_of(Hello{ 0x0807060504030201ull, 0, 0, 0x1112131415161718ull, 0x2122232425262728ull, 2 });
@@ -101,6 +104,7 @@ int main() {
     CHECK(bytes_of(Start{ 2, 0, max_delay + 1 }).empty());
     CHECK(bytes_of(Start{ 3, 1, 0, 0x08 }).empty()); // a pair past the players
     CHECK(bytes_of(Start{ 4, 1, 0, 0x07 }).empty()); // an odd number of ports in pairs
+    CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
     CHECK(bytes_of(Bye{ (Reason)(last_reason + 1) }).empty());
@@ -196,7 +200,7 @@ int main() {
     data = hello;
     data[0] = 'X';
     CHECK(!decodes(data));
-    for (int kind : { 0, 9, 255 }) {
+    for (int kind : { 0, 10, 255 }) {
         data = hello;
         data[4] = (uint8_t)kind;
         CHECK(!decodes(data));

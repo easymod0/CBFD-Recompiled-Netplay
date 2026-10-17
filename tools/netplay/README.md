@@ -274,8 +274,9 @@ each peer prints how many of its reads waited for the others' input (the time in
 how many came over 50 ms after the one before: what a player feels, as a read that waits where the game
 would have slept until its time anyway costs nothing. `network.sh` plays matches at once on real time (as a
 player's game, not `--fast`): on loopback as it is, with 100 ms lag, jitter, 5% loss, reordering and
-duplicates, with a 3 s outage, with the lag going from 20 to 150 ms partway, and with a 1.5 s stall. Each
-must give the solo replay's game, and the stalled copy must catch up; the waits are printed, and
+duplicates, with a 3 s outage, with the lag going from 20 to 150 ms partway and from 150 to 20, and with a
+1.5 s stall. Each must give the solo replay's game, the delay must go up and down with the lag (both copies
+switching at the same read), and the stalled copy must catch up; the waits are printed, and
 `--record <file>` keeps them, a line per copy with the date and commit, to compare over time. About 70 s.
 
 **A player leaving.** When a joiner's machine leaves (saying goodbye, or not answering for about 10 s: a
@@ -285,6 +286,21 @@ host, in order, so nobody can be past it. It tells the joiners still in (`Gone`,
 from that read every machine gives those ports an idle pad: nothing pressed, nothing moved, the player's last
 Controls. Several players on the leaving machine leave together. The host leaving still ends the match (it's
 the hub). Telling the players on screen is for the status display (#19); the log says who left and from when.
+
+**The delay follows the connection.** With `auto`, the host checks every 30 reads, and changes the delay
+when the round trips want another, or when 3 or more of its reads came late from waiting for the others
+since the last check (a lossy network: the inputs sent again come late, which the round trips don't show;
+then one read more, up to 2 more than the round trips need: a peer that can't keep up makes reads late
+whatever the delay). It raises it after 2 checks in a row, and lowers it only after 5 with 12 ms to spare and
+no read late from waiting (a read at a time while it's above what the round trips need for waiting), and not
+within 90 reads of the last change, so it doesn't go back and forth. It
+tells the joiners `Delay`: the delay becomes D from read R, where R is past any read a joiner can have sent
+its pads at before it hears (a joiner is at most the delay ahead of the host, and the Delay comes after the
+host's pads for those reads). Every peer switches at R: from there it sends its pads up to R + D. Raised,
+the reads in between get the pad its controllers give then too (held; the mouse and gyro movement goes with
+the first); lowered, its pads for the reads up to R - 1 + the old delay are already sent, and the live
+ones for those reads aren't sent (a button pressed and let go within them is lost). The pads are sent either way, so every machine gives the game the same.
+A fixed `--input-delay` stays.
 
 **Catching up.** A peer that falls behind (a hitch: loading, the system) lets the others run on until they
 need its input, up to the input delay ahead; from then on they'd wait on it at every read, the delay used

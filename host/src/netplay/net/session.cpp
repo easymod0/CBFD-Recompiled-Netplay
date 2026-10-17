@@ -576,6 +576,17 @@ namespace conker::netplay {
             event.packet = packet;
             events.push_back(std::move(event));
         }
+        else if (std::holds_alternative<Delay>(packet)) {
+            // Once started.
+            if (!started) {
+                drop(peer, Reason::protocol, &events);
+                return;
+            }
+            Event event{ Event::Type::packet };
+            event.port = 0;
+            event.packet = packet;
+            events.push_back(std::move(event));
+        }
         else if (const Bye* bye = std::get_if<Bye>(&packet)) {
             Event event{ Event::Type::ended };
             event.reason = bye->reason;
@@ -656,6 +667,14 @@ namespace conker::netplay {
         for (const Peer& peer : peers) {
             if (peer.port >= 0) {
                 send_to(peer.connection, gone);
+            }
+        }
+    }
+
+    void Session::send(const Delay& delay) {
+        for (const Peer& peer : peers) {
+            if (peer.port >= 0) {
+                send_to(peer.connection, delay);
             }
         }
     }

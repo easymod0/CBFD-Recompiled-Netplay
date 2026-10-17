@@ -18,7 +18,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 11;
+    constexpr uint16_t protocol_version = 12;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -157,7 +157,17 @@ namespace conker::netplay {
         bool operator==(const Gone&) const = default;
     };
 
-    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone>;
+    // Host to the joiners: the input delay becomes `delay` (0 to max_delay) from read `from_read`, as the
+    // connection changes. Every peer switches at that read, which is past any a joiner can be at as it
+    // arrives; the reads a raised delay skips get each player's last pad again, and a lowered one's live
+    // pads for the reads already sent aren't sent (lockstep.cpp).
+    struct Delay {
+        uint8_t delay = 0;
+        uint32_t from_read = 0;
+        bool operator==(const Delay&) const = default;
+    };
+
+    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay>;
 
     // Writes `packet` into `out` and returns its size, or 0 if the packet isn't valid (the same checks
     // as decode's), so nothing invalid is ever sent.

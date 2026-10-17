@@ -24,7 +24,8 @@
 //                                the top and bottom halves of the window; three see the whole split screen
 //   --input-delay <reads|auto>   (hosting) how many reads ahead each peer's own pads are sent, 0 to 8, or
 //                                auto (the default): chosen from the round trips to the players as the
-//                                match starts. The host tells everyone (Start)
+//                                match starts, and changed as they change. The host tells everyone (Start,
+//                                then Delay: every peer switches at the same read)
 //   --netplay-desync-at <read>   (a test) changes a byte of game memory at that read (in region 64,
 //                                0x80400003), which the next hash comparison must catch
 //   --netplay-fake-network <spec>  (a test) fakes a bad network on this peer's side, through the library:
@@ -117,7 +118,7 @@ namespace conker::lockstep {
     };
     // The input of this machine's player `local` (0 is the first) for read `for_read`: `live` holds the pads
     // the controllers give now, or is null for the reads before the first (sent at the start, as nobody has
-    // played yet).
+    // played yet). As the input delay goes up, it's asked for several reads at once (the same pads).
     using InputSource = std::function<Input(uint64_t for_read, const ultramodern::input::Pad* live, int local)>;
     // The game's memory as a read is made (the harness's), for the desync check.
     struct Memory {
