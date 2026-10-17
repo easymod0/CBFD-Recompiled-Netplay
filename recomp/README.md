@@ -541,8 +541,9 @@ netplay: while the game waits for the others, it makes no frame, and the UI
 drawn over the last one would stay as it was). It repeats the last present,
 paused, as its debugger's pause does, but not the workload: nothing of the
 game's is drawn again. A repeated present (`Present::repeated`) shows the
-frame once, not the frames interpolated before it again, and leaves the
-interpolated frames' counters alone (they may be the next workload's by then).
+frame once, not the frames interpolated before it again, and counts the frames
+as presented as a present of one frame does (left alone, a workload could wait
+on them for ever).
 ultramodern's renderer interface has it as `present_again` (RecompFrontend's
 RT64 context calls RT64's); the runtime queues one at a time.
 

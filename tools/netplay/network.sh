@@ -95,26 +95,27 @@ if finish "was the last: quitting" $names; then
     # changes <match> <up|down>: the input delay the match ended with is higher (lower) than it started with,
     # and the joiner made the same changes as the host (each "becomes <d> from read <r>").
     changes() {
-        made=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/$1-host.out")
+        host_made=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/$1-host.out")
         heard=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/$1-join.out")
         was=$(sed -n 's/^\[netplay\] the match starts: .*input delay \([0-9]*\) reads.*/\1/p' "$OUT/$1-host.out")
         now=$(sed -n 's/^\[netplay\] waits: .*; input delay \([0-9]*\),.*/\1/p' "$OUT/$1-host.out")
-        if [ -z "$made" ] || [ "$made" != "$heard" ]; then
-            echo "  $1: the delay changes differ or there are none: host: ${made:-none}; joiner: ${heard:-none}"
+        if [ -z "$host_made" ] || [ "$host_made" != "$heard" ]; then
+            echo "  $1: the delay changes differ or there are none: host: ${host_made:-none}; joiner: ${heard:-none}"
             return 1
         fi
         if [ -z "$was" ] || [ -z "$now" ] || { [ "$2" = up ] && [ "$now" -le "$was" ]; } || { [ "$2" = down ] && [ "$now" -ge "$was" ]; }; then
             echo "  $1: the input delay went from ${was:-?} to ${now:-?}, not $2"
             return 1
         fi
-        echo "  $1: the input delay went from $was to $now ($(echo "$made" | sed 's/\(.*\) \(.*\)/\1 at read \2/' | paste -sd, - | sed 's/,/, /g')), the same on both"
+        echo "  $1: the input delay went from $was to $now ($(echo "$host_made" | sed 's/\(.*\) \(.*\)/\1 at read \2/' | paste -sd, - | sed 's/,/, /g')), the same on both"
     }
     changes lag-change up || failed=1
     changes lag-drop down || failed=1
-    if grep -q 'caught up (' "$OUT/stall-join.out"; then
+    # Once: catching up must leave it level with the others, not fall behind again.
+    if grep -q 'caught up (' "$OUT/stall-join.out" && [ "$(grep -c ': catching up$' "$OUT/stall-join.out")" = 1 ]; then
         echo "  stall-join: $(grep -m1 'reads behind the others' "$OUT/stall-join.out" | sed 's/^\[netplay\] //'); $(grep -m1 'caught up (' "$OUT/stall-join.out" | sed 's/^\[netplay\] //')"
     else
-        echo "  stall-join didn't catch up after its stall"
+        echo "  stall-join didn't catch up after its stall, or caught up more than once ($(grep -c ': catching up$' "$OUT/stall-join.out") times)"
         failed=1
     fi
 else

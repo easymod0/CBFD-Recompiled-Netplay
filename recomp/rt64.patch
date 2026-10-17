@@ -1226,21 +1226,21 @@ index 00a72f6..32e9300 100644
          void buildTransformIdMap(const Workload &workload, std::multimap<uint32_t, uint32_t> &idMap, std::vector<uint32_t> &ignoredIdVector) const;
          uint64_t hashFromCall(const GameCall &call, uint32_t matrixIdHash) const;
 diff --git a/src/hle/rt64_present.h b/src/hle/rt64_present.h
-index e1889e5..8e8cdd1 100644
+index e1889e5..c5d5f40 100644
 --- a/src/hle/rt64_present.h
 +++ b/src/hle/rt64_present.h
 @@ -21,6 +21,9 @@ namespace RT64 {
          std::vector<FramebufferOperation> fbOperations;
          DebuggerFramebuffer debuggerFramebuffer;
          bool paused = false;
-+        // Shown again as it was (presentAgain): the frame once, and the interpolated frames' counters left alone (they
-+        // may be the next workload's by now).
++        // Shown again as it was (presentAgain): the frame once, not the frames interpolated before it again. It counts
++        // the frames as presented, as a present of one frame does, so a workload waiting on them goes on.
 +        bool repeated = false;
          uint64_t presentId = 0;
          uint64_t workloadId = 0;
      };
 diff --git a/src/hle/rt64_present_queue.cpp b/src/hle/rt64_present_queue.cpp
-index 7de5b69..f3ef0de 100644
+index 7de5b69..0a41c76 100644
 --- a/src/hle/rt64_present_queue.cpp
 +++ b/src/hle/rt64_present_queue.cpp
 @@ -9,7 +9,16 @@
@@ -1270,15 +1270,6 @@ index 7de5b69..f3ef0de 100644
                      framesToPresent = frameCounters.count;
                  }
                  else {
-@@ -294,7 +304,7 @@ namespace RT64 {
-                     colorTarget = nullptr;
-                 }
-             }
--            else if (framesToPresent == 1) {
-+            else if (framesToPresent == 1 && !present.repeated) {
-                 frameCountersNextPresented = frameCounters.count;
-             }
- 
 @@ -402,6 +412,7 @@ namespace RT64 {
                  RenderCommandSemaphore *waitSemaphore = drawSemaphores[swapChainIndex].get();
                  presentTimestamp = Timer::current();

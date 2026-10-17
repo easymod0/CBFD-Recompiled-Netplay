@@ -238,6 +238,7 @@ namespace conker::netplay {
             return false;
         }
         entry_open = false;
+        next_inputs.fill(0);
         const Start start{ (uint8_t)match_players, (uint8_t)(own_view ? 1 : 0), (uint8_t)delay, pairs() };
         for (const Peer& peer : peers) {
             if (peer.port >= 0) {
@@ -480,8 +481,12 @@ namespace conker::netplay {
             // anything else is a broken or hostile peer, refused before it's passed on.
             const Inputs* inputs = std::get_if<Inputs>(&packet);
             const Hash* hash = std::get_if<Hash>(&packet);
+            // Each port's Inputs go on from the last read of its earlier ones, and a Hash's read is within the
+            // horizon too: else the others would end the match on it (lockstep checks the same), where dropping
+            // the peer lets them play on without it.
             if ((inputs != nullptr || hash != nullptr) &&
-                (entry_open || (inputs != nullptr && (uint64_t)inputs->first_read + inputs->count > horizon))) {
+                (entry_open || (inputs != nullptr && ((uint64_t)inputs->first_read + inputs->count > horizon ||
+                    inputs->first_read != next_inputs[inputs->port])) || (hash != nullptr && hash->read > horizon))) {
                 drop(peer, Reason::protocol, &events);
                 return;
             }
@@ -494,6 +499,7 @@ namespace conker::netplay {
                 peer.last_hash = hash->read;
             }
             if (inputs != nullptr && (peer.ports & (1u << inputs->port)) != 0) {
+                next_inputs[inputs->port] = inputs->first_read + inputs->count;
                 // Passed on to the others, as they only connect to the host.
                 for (const Peer& other : peers) {
                     if (other.port >= 0 && other.connection != peer.connection) {

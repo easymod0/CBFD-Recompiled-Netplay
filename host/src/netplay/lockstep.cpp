@@ -269,6 +269,7 @@ namespace {
     // library is polled), or the others only hear the match is over when their connection times out.
     void say_goodbye() {
         std::scoped_lock lock(session_mutex);
+        if (catching_up) set_catching_up(false);
         if (session != nullptr && !left) {
             session->leave(Reason::quit);
             left = true;
@@ -464,6 +465,11 @@ namespace {
     }
 
     void handle(const Event& event) {
+        // Once the match is over (a poll's events go on after the one that ended it), nothing more: the first
+        // reason stays the one told, and a desync's report with it.
+        if (ended) {
+            return;
+        }
         switch (event.type) {
             case Event::Type::joined:
             case Event::Type::welcomed:
@@ -1017,6 +1023,11 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 }
                 break;
             case Event::Type::left:
+                // Once started (a joiner leaving in the poll the match started in), as in the match: Gone.
+                if (match_started) {
+                    handle(event);
+                    break;
+                }
                 // Before the start, a joiner leaving frees its ports, for the next to start afresh.
                 joined -= std::popcount(event.ports);
                 for (int port = 0; port < netplay::max_players; port++) {

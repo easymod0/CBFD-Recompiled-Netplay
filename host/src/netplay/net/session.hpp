@@ -158,6 +158,7 @@ namespace conker::netplay {
         uint8_t own_ports = 0;      // joiner: 0 until welcomed
         int match_players = 0;
         uint64_t horizon = 64;
+        std::array<uint64_t, max_players> next_inputs{};   // host: the read each port's next Inputs start at
         Hello hello;
         uint32_t listen_socket = 0;
         uint32_t poll_group = 0;

@@ -307,7 +307,8 @@ A fixed `--input-delay` stays.
 need its input, up to the input delay ahead; from then on they'd wait on it at every read, the delay used
 up. So when the others' inputs reach 2 or more reads further than they would if the others were at this
 peer's read, it runs the timeline faster than real time (`ultramodern::timeline::set_catching_up`, as
-`--fast`) until they no longer do, then goes back to real time. The sound queued meanwhile is capped as
+`--fast`) until they no longer do, then goes back to real time, paced from where the game is then (from
+where it was before, it would sleep the time it gained away and fall behind again). The sound queued meanwhile is capped as
 always (`audio_output.cpp`), and nothing else needs to change: the game is the same at any speed.
 
 **On screen.** What the match is doing is shown over the game (`host/src/netplay/status.cpp`, a recompui

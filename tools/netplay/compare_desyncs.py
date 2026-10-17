@@ -60,14 +60,22 @@ def summary(r):
 def compare_inputs(a, b):
     """Lockstep gives every peer the same inputs: a difference here is a bug in passing them on."""
     start = max(a["inputs_from_read"], b["inputs_from_read"])
-    for port in range(min(len(a["inputs"]), len(b["inputs"]))):
+    if len(a["inputs"]) != len(b["inputs"]):
+        print(f"  inputs: for {len(a['inputs'])} players in one, {len(b['inputs'])} in the other")
+        return False
+    compared = 0
+    for port in range(len(a["inputs"])):
         ia = a["inputs"][port][start - a["inputs_from_read"]:]
         ib = b["inputs"][port][start - b["inputs_from_read"]:]
+        compared += min(len(ia), len(ib))
         for i, (x, y) in enumerate(zip(ia, ib)):
             if x != y:
                 fields = [f"{name} {u} vs {v}" for name, u, v in zip(INPUT_FIELDS, x, y) if u != v]
                 print(f"  port {port + 1}'s input differs at read {start + i}: {', '.join(fields)}")
                 return False
+    if compared == 0:
+        print("  inputs: no read in both reports to compare")
+        return False
     print(f"  inputs: the same in both from read {start}")
     return True
 

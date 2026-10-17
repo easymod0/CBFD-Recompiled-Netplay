@@ -2058,10 +2058,10 @@ index 6e3ed18..221ad3d 100644
  
 diff --git a/ultramodern/src/timeline.cpp b/ultramodern/src/timeline.cpp
 new file mode 100644
-index 0000000..eafc296
+index 0000000..6b467dd
 --- /dev/null
 +++ b/ultramodern/src/timeline.cpp
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,223 @@
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
@@ -2087,6 +2087,9 @@ index 0000000..eafc296
 +    std::atomic_bool deterministic = false;
 +    bool fast = false;
 +    std::atomic_bool catching_up = false;
++    // Set as catching up stops, for pace: from then it paces from where the game is, not from where it was
++    // before (the time it gained would be slept away, and the others ahead again).
++    std::atomic_bool pace_from_now = false;
 +    // The time of the last delivery, and the next VI's number (VI k is at k × ticks_per_vi).
 +    uint64_t now = 0;
 +    uint64_t next_vi = 1;
@@ -2141,8 +2144,11 @@ index 0000000..eafc296
 +        if (fast || catching_up.load(std::memory_order_relaxed)) {
 +            return;
 +        }
-+        const auto target = real_start + ticks_to_duration(ticks);
 +        const auto real_now = std::chrono::high_resolution_clock::now();
++        if (pace_from_now.exchange(false)) {
++            real_start = real_now - ticks_to_duration(ticks);
++        }
++        const auto target = real_start + ticks_to_duration(ticks);
 +        if (real_now < target) {
 +            ultramodern::sleep_until(target);
 +        }
@@ -2163,8 +2169,10 @@ index 0000000..eafc296
 +}
 +
 +void ultramodern::timeline::set_catching_up(bool on) {
-+    // Paced again from where the game is: pace moves real_start on at the first event over 100 ms late,
-+    // and races to the time of any less than that.
++    // Paced again from where the game is (from any thread: pace, on the game's, moves real_start).
++    if (!on && catching_up.exchange(false)) {
++        pace_from_now = true;
++    }
 +    catching_up = on;
 +}
 +
