@@ -160,6 +160,33 @@ namespace {
         ultramodern::timeline::set_catching_up(on);
     }
 
+    // Rollback (#22, --rollback <reads>): instead of waiting at a read for the others' inputs, this peer predicts
+    // them (each player's last input it has) up to `rollback_option` reads past the last read it has every
+    // input for, and when one arrives that isn't what it predicted, the harness loads the state before that
+    // read and the game plays on again from there (harness.cpp) with the inputs as they are now known. Reads
+    // made again (below `frontier`) send nothing and wait for nothing. A peer's hash of a read is only sent
+    // once every input before that read is known and was given as it was (`verified`), so peers compare the
+    // game as it really went. It's this peer's own choice: the others may predict or not.
+    int rollback_option = 0;
+    // Its most (--rollback's), which the horizon and the host's delay changes leave room for.
+    constexpr int most_rollback_window = 12;
+    // The boot changes the game's main loop at once (a state from before can't be loaded after): no
+    // predicting in the first reads.
+    constexpr uint64_t rollback_from_read = 30;
+    uint64_t frontier = 0;                  // the reads made at least once
+    uint64_t last_read = never;             // a replay's last (harness): every input for it is waited for
+    std::vector<std::array<Input, conker::netplay::max_players>> given;   // by read: as the game was given them
+    std::array<uint64_t, conker::netplay::max_players> checked{};         // by port: reads compared with what came
+    uint64_t verified = 0;                  // reads from 0 known and given as they were
+    uint64_t rollback_to = never;           // the earliest read given another input than came, for the harness
+    uint64_t last_made = never;             // the read made last (a read after another than the one before: a rollback)
+    struct Rollbacks {
+        uint64_t count = 0;
+        uint64_t predicted = 0;             // reads made the first time with a prediction
+        uint64_t deepest = 0;
+        uint64_t reads_again = 0;
+    } rollbacks;
+
     std::array<std::vector<Input>, conker::netplay::max_players> received;
     std::array<bool, conker::netplay::max_players> gone{};
     // A player that left the match while it went on (#17): from this read their port gets an idle pad (never:
@@ -210,6 +237,8 @@ namespace {
         std::array<uint64_t, conker::netplay::memory_regions> regions{};
     };
     std::map<uint32_t, OwnHash> own_hashes;
+    // Rollback: this peer's hashes of reads not yet known to be right, until they are (verify).
+    std::map<uint32_t, OwnHash> unverified_hashes;
     std::map<std::pair<int, uint32_t>, Hash> their_hashes;
     // on_read's, while it runs: the memory kept for a desync report.
     const conker::lockstep::Memory* memory_now = nullptr;
@@ -243,6 +272,11 @@ namespace {
     void print_waits() {
         if (waits.printed || waits.reads == 0) return;
         waits.printed = true;
+        if (rollback_option > 0) {
+            std::printf("[netplay] rollback: %llu reads predicted, %llu rollbacks, %llu reads made again, the deepest %llu reads\n",
+                (unsigned long long)rollbacks.predicted, (unsigned long long)rollbacks.count,
+                (unsigned long long)rollbacks.reads_again, (unsigned long long)rollbacks.deepest);
+        }
         std::printf("[netplay] waits: %llu of %llu reads waited for the others, %.0f ms in all, the longest %.0f ms (read %llu); "
             "%llu reads came over %.0f ms after the one before, the latest %.0f ms (read %llu); input delay %d, changed %llu times; "
             "caught up %llu times\n",
@@ -418,6 +452,16 @@ namespace {
         while (own_hashes.size() > 8) {
             own_hashes.erase(own_hashes.begin());
         }
+    }
+
+    // Sends this peer's hash of `read`, keeping it to compare with the others'.
+    void send_hash(uint32_t read, const OwnHash& own) {
+        own_hashes[read] = own;
+        Hash sent_hash{ read, own.hash };
+        for (int i = 0; i < conker::netplay::memory_regions; i++) {
+            sent_hash.regions[i] = (uint16_t)own.regions[i];
+        }
+        session->send(sent_hash);
     }
 
     // A peer found a desync. Its hash for that read came before its goodbye, so if this peer's game is the
@@ -632,7 +676,8 @@ namespace {
     // The host, with auto, at read `read` (every hash_every reads): changes the delay if the round trips have
     // wanted another for long enough. From the read after the furthest a joiner can send its pads at before
     // it hears: a joiner is at most the delay ahead (it needs the host's pads, sent the delay ahead), and
-    // can make the read after its last of the host's pads before the Delay (sent after them) arrives.
+    // can make the read after its last of the host's pads before the Delay (sent after them) arrives; a joiner
+    // that predicts (rollback) up to most_rollback_window reads further.
     void adapt_delay(uint64_t read) {
         const std::vector<int> trips = session->round_trips_ms();
         if (trips.empty() || trips.size() < (size_t)session->joiners() || read < delays.from + settle_reads) {
@@ -667,7 +712,7 @@ namespace {
         }
         std::printf("[netplay] round trips to the players: %s ms; %llu reads late from waiting since the last check\n",
             trips_text(trips).c_str(), (unsigned long long)late);
-        change_delay(to, read + delay + 2);
+        change_delay(to, read + delay + 2 + most_rollback_window);
         session->send(Delay{ (uint8_t)to, (uint32_t)delays.from });
         wanted_higher = 0;
         wanted_lower = 0;
@@ -679,6 +724,72 @@ namespace {
         if (last <= from - 1 + delays.before) return last - delays.before;
         if (last >= from + delays.after) return last - delays.after;
         return from - 1;
+    }
+
+    bool same_input(const Input& a, const Input& b) {
+        return a.pad == b.pad && a.motion == b.motion;
+    }
+
+    // Whether `port`'s input for `read` is known (it came, or they'd left by then), and what it is.
+    bool known(int port, uint64_t read) {
+        return read >= idle_from[port] || read < received[port].size();
+    }
+    Input known_input(int port, uint64_t read) {
+        return read < idle_from[port] ? received[port][read] : idle_input(port);
+    }
+
+    // The input the game is given for `port` at `read`: as it came, or else predicted (their last).
+    Input input_for(int port, uint64_t read) {
+        if (known(port, read)) return known_input(port, read);
+        return received[port].empty() ? idle_input(port) : received[port].back();
+    }
+
+    // Rollback, at read `read` (the first time it's made): the earliest read the game was given another input
+    // than has come since, if any (the harness takes it: take_rollback).
+    void find_mispredictions(uint64_t read) {
+        for (int port = 0; port < match_players; port++) {
+            if ((own_ports & (1u << port)) != 0) continue;
+            const uint64_t until = std::min<uint64_t>(read, idle_from[port] != never ? read : received[port].size());
+            for (uint64_t r = checked[port]; r < until; r++) {
+                if (!same_input(given[r][port], known_input(port, r))) {
+                    if (rollback_to == never || r < rollback_to) {
+                        rollback_to = r;
+                    }
+                    break;
+                }
+            }
+            checked[port] = std::max(checked[port], until);
+        }
+    }
+
+    // Rollback: the reads before `read` known and given as they were, and the hashes of reads now known to be
+    // right sent (and kept to compare).
+    void verify(uint64_t read) {
+        while (verified < read && verified < given.size()) {
+            bool right = true;
+            for (int port = 0; port < match_players && right; port++) {
+                right = known(port, verified) && same_input(given[verified][port], known_input(port, verified));
+            }
+            if (!right) break;
+            verified++;
+        }
+        for (auto it = unverified_hashes.begin(); it != unverified_hashes.end() && it->first <= verified && it->first <= read;) {
+            send_hash(it->first, it->second);
+            it = unverified_hashes.erase(it);
+        }
+    }
+
+    // Puts every player's input for `read` in `pads` and `motions` (4 each): as it came, or predicted (rollback,
+    // which keeps what the game was given and sends the hashes now known to be right).
+    bool give_inputs(uint64_t read, ultramodern::input::Pad* pads, Motion* motions) {
+        for (int port = 0; port < match_players; port++) {
+            const Input input = input_for(port, read);
+            pads[port] = { input.pad.buttons, input.pad.stick_x, input.pad.stick_y, input.pad.err_no };
+            motions[port] = input.motion;
+            if (rollback_option > 0) given[read][port] = input;
+        }
+        if (rollback_option > 0) verify(read);
+        return true;
     }
 
     // The ports whose pad for `read` isn't here yet (and who haven't left), bit n for port n.
@@ -781,6 +892,11 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
         stall_at = at;
         stall_ms = ms;
         if (value != nullptr) i++;
+        return true;
+    }
+    if (std::strcmp(option, "--rollback") == 0) {
+        number(0, most_rollback_window, n);
+        rollback_option = (int)n;
         return true;
     }
     if (std::strcmp(option, "--netplay-desync-at") == 0) {
@@ -979,6 +1095,14 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     }
     own_hashes.clear();
     their_hashes.clear();
+    frontier = 0;
+    given.clear();
+    checked = {};
+    verified = 0;
+    rollback_to = never;
+    last_made = never;
+    unverified_hashes.clear();
+    rollbacks = {};
     if (hosting) {
         std::printf("[netplay] hosting a match of %d on UDP port %d, %d of them here: waiting for the players\n",
             wanted_players, host_port, local_option);
@@ -1175,71 +1299,92 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
     if (ended || stopping) {
         return false;
     }
-    current_read = read;
-    delay = delay_at(read);
-    session->set_horizon(horizon());
-    if (!initial_sent) {
-        if (!quit_watcher.joinable()) {
-            quit_watcher = std::thread([] {
-                while (!stopping && !exited) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                }
-                if (exited) {
-                    std::printf("[netplay] quitting: leaving the match\n");
-                    stopping = true;
-                    say_goodbye();
-                }
-            });
+    // Rollback: a read made again, after the harness went back to before it.
+    const bool again = rollback_option > 0 && read < frontier;
+    if (again) {
+        if (read != last_made + 1) {
+            rollbacks.count++;
+            rollbacks.deepest = std::max(rollbacks.deepest, frontier - read);
         }
+        rollbacks.reads_again++;
     }
-    // This machine's players' input for read + delay, and for any read before it not sent yet: at the first read,
-    // the reads before it (nobody has played yet), and as the delay goes up, those it skips (the controllers'
-    // pads now again: the movement goes with the first). As it goes down, the reads up to it are sent already.
-    if (read + delay < UINT32_MAX - netplay::input_window) {
-        for (int local = 0; local < std::popcount(own_ports); local++) {
-            const int port = nth_own_port(local);
-            for (uint64_t r = received[port].size(); r <= read + delay; r++) {
-                send_own(r, port, source(r, initial_sent || r == read + delay ? pads : nullptr, local));
+    else {
+        current_read = read;
+        delay = delay_at(read);
+        session->set_horizon(horizon());
+        if (!initial_sent) {
+            if (!quit_watcher.joinable()) {
+                quit_watcher = std::thread([] {
+                    while (!stopping && !exited) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    }
+                    if (exited) {
+                        std::printf("[netplay] quitting: leaving the match\n");
+                        stopping = true;
+                        say_goodbye();
+                    }
+                });
+            }
+        }
+        // This machine's players' input for read + delay, and for any read before it not sent yet: at the first read,
+        // the reads before it (nobody has played yet), and as the delay goes up, those it skips (the controllers'
+        // pads now again: the movement goes with the first). As it goes down, the reads up to it are sent already.
+        if (read + delay < UINT32_MAX - netplay::input_window) {
+            for (int local = 0; local < std::popcount(own_ports); local++) {
+                const int port = nth_own_port(local);
+                for (uint64_t r = received[port].size(); r <= read + delay; r++) {
+                    send_own(r, port, source(r, initial_sent || r == read + delay ? pads : nullptr, local));
+                }
+            }
+        }
+        initial_sent = true;
+
+        if (faking && read == outage_at) {
+            fake.outage = true;
+            netplay::set_fake_network(fake);
+            outage_until = now() + outage_seconds;
+            std::printf("[netplay] read %llu: the network is out for %.1f s (--netplay-fake-network)\n", (unsigned long long)read, outage_seconds);
+        }
+        if (faking && read == lag_at) {
+            fake.lag_ms = lag_then;
+            netplay::set_fake_network(fake);
+            std::printf("[netplay] read %llu: the lag is %d ms now (--netplay-fake-network)\n", (unsigned long long)read, lag_then);
+        }
+        if (read == stall_at) {
+            std::printf("[netplay] read %llu: the game stops for %ld ms (--netplay-stall-at)\n", (unsigned long long)read, stall_ms);
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
+            lock.lock();
+            if (stopping) {
+                return false;
             }
         }
     }
-    initial_sent = true;
-
-    if (faking && read == outage_at) {
-        fake.outage = true;
-        netplay::set_fake_network(fake);
-        outage_until = now() + outage_seconds;
-        std::printf("[netplay] read %llu: the network is out for %.1f s (--netplay-fake-network)\n", (unsigned long long)read, outage_seconds);
-    }
-    if (faking && read == lag_at) {
-        fake.lag_ms = lag_then;
-        netplay::set_fake_network(fake);
-        std::printf("[netplay] read %llu: the lag is %d ms now (--netplay-fake-network)\n", (unsigned long long)read, lag_then);
-    }
-    if (read == stall_at) {
-        std::printf("[netplay] read %llu: the game stops for %ld ms (--netplay-stall-at)\n", (unsigned long long)read, stall_ms);
-        lock.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms));
-        lock.lock();
-        if (stopping) {
-            return false;
-        }
-    }
+    last_made = read;
     if (read == desync_at) {
         rdram[recomp::save_states::game_memory_size / 2] ^= 0x5A;
         std::printf("[netplay] read %llu: game memory changed, as --netplay-desync-at asked\n", (unsigned long long)read);
     }
+    // With rollback the game may not be right yet (a prediction): the hash waits until it's known to be (verify).
     if (read % hash_every == 0) {
-        OwnHash& own = own_hashes[(uint32_t)read];
-        own.hash = memory.hash();
-        own.regions = memory.keep(read);
-        Hash sent_hash{ (uint32_t)read, own.hash };
-        for (int i = 0; i < netplay::memory_regions; i++) {
-            sent_hash.regions[i] = (uint16_t)own.regions[i];
+        const OwnHash own{ memory.hash(), memory.keep(read) };
+        // A read made again whose hash was sent was right then (the one gone back to can be): the same again,
+        // and the others take one hash a read.
+        if (rollback_option > 0) {
+            if (own_hashes.empty() || read > own_hashes.rbegin()->first) unverified_hashes[(uint32_t)read] = own;
         }
-        session->send(sent_hash);
+        else {
+            send_hash((uint32_t)read, own);
+        }
+    }
+    if (again) {
+        return give_inputs(read, pads, motions);
     }
 
+    // With rollback, every input up to the window before this read (the others' predicted after it), but every
+    // one in the boot's first reads, and near a replay's end (it ends with every read right).
+    const uint64_t needed = rollback_option == 0 || read < rollback_from_read || read + rollback_option >= last_read
+        ? read : read - rollback_option;
     const double since = now();
     double last_note = since;
     uint8_t waiting_for = 0;
@@ -1257,7 +1402,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         if (ended) {
             return false;
         }
-        const uint8_t missing_ports = missing(read);
+        const uint8_t missing_ports = missing(needed);
         if (missing_ports == 0) {
             break;
         }
@@ -1266,7 +1411,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
             publish(waiting_for, since);
         }
         for (int port = 0; port < match_players; port++) {
-            if (received[port].size() <= read && gone[port] && read < idle_from[port]) {
+            if (received[port].size() <= needed && gone[port] && needed < idle_from[port]) {
                 end_match(Reason::quit, gone_silently ? "a player stopped answering (they may have quit)" : "a player left");
                 return false;
             }
@@ -1334,12 +1479,38 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
     }
     publish();
 
-    for (int port = 0; port < match_players; port++) {
-        const Input input = read < idle_from[port] ? received[port][read] : idle_input(port);
-        pads[port] = { input.pad.buttons, input.pad.stick_x, input.pad.stick_y, input.pad.err_no };
-        motions[port] = input.motion;
+    if (rollback_option > 0) {
+        find_mispredictions(read);
+        for (int port = 0; port < match_players; port++) {
+            if (!known(port, read)) {
+                rollbacks.predicted++;
+                break;
+            }
+        }
+        given.resize(read + 1);
+        frontier = read + 1;
     }
-    return true;
+    return give_inputs(read, pads, motions);
+}
+
+int conker::lockstep::rollback_window() {
+    return ::rollback_option;
+}
+
+uint64_t conker::lockstep::take_rollback() {
+    std::scoped_lock lock(session_mutex);
+    const uint64_t to = rollback_to;
+    rollback_to = never;
+    return to;
+}
+
+uint64_t conker::lockstep::verified_reads() {
+    std::scoped_lock lock(session_mutex);
+    return verified;
+}
+
+void conker::lockstep::set_last_read(uint64_t read) {
+    last_read = read;
 }
 
 FILE* conker::lockstep::create_file(const std::filesystem::path& path) {

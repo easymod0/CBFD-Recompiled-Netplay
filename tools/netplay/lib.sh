@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shared by lockstep.sh and network.sh (sourced, from the repo's root): running copies of the game against
+# Shared by lockstep.sh, network.sh and rollback.sh (sourced, from the repo's root): running copies of the game against
 # each other on this machine, each with its own data folder, and comparing their hash logs. They set EXE, ROM,
 # OUT, READS and TIMEOUT first.
 
@@ -67,16 +67,18 @@ PY
 # start <name> [options...]: one copy in the background, with its own data folder, its hash log in
 # $OUT/<name>.log and its output in $OUT/<name>.out; its PID is added to $pids.
 # The recording is $OUT/inputs.pads, or $OUT/$pads if that's set; it runs --fast unless $paced is set (on
-# the timeline's real time, as a player would).
+# the timeline's real time, as a player would). A copy in a match also gets $MATCH_OPTIONS, if set.
 start() {
     name=$1; shift
     rm -f "$OUT/$name.log" "$OUT/$name.out"
     [ -e "$OUT/data-$name" ] || made="$made $name"
     speed=--fast
     [ -n "${paced:-}" ] && speed=
+    extra=
+    case " $* " in *" --netplay-host "*|*" --netplay-join "*) extra=${MATCH_OPTIONS:-} ;; esac
     # shellcheck disable=SC2086
     "$EXE" --headless --rom "$ROM" --data "$OUT/data-$name" $speed --replay "$OUT/${pads:-inputs.pads}" \
-        --hash-log "$OUT/$name.log" "$@" > "$OUT/$name.out" 2>&1 &
+        --hash-log "$OUT/$name.log" "$@" $extra > "$OUT/$name.out" 2>&1 &
     pids="$pids $!"
     procs="$procs $name:$!"
 }
@@ -150,4 +152,31 @@ same() {
     fi
     echo "  $1 NOT the same as $ref: $result"
     return 1
+}
+
+# idle_from <recording> <out> <ports> <read>: <out>, the recording with each of <ports> (port numbers from 1, e.g.
+# 23) idle from <read> on, as a match gives a player that left: nothing pressed or moved, their last Controls.
+idle_from() {
+    python3 - "$@" <<'PY'
+import sys
+src, out, ports, first = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+data = bytearray(open(src, "rb").read())
+header, read_size, pad_size, motion_size = 40, 73, 5, 13   # version 4 (harness.cpp)
+reads = (len(data) - header) // read_size
+assert 0 < first <= reads
+for port in (int(p) - 1 for p in ports):
+    last = header + (first - 1) * read_size + 1 + 4 * pad_size + port * motion_size
+    controls = data[last + 9:last + 13]
+    for start in range(header + first * read_size, len(data), read_size):
+        pad = start + 1 + port * pad_size
+        motion = start + 1 + 4 * pad_size + port * motion_size
+        data[pad:pad + pad_size] = bytes(pad_size)
+        data[motion:motion + motion_size] = bytes(9) + controls
+open(out, "wb").write(data)
+PY
+}
+
+# left_at <name> <port>: the read from which <name> said port <port> plays no more.
+left_at() {
+    sed -n "s/^\[netplay\] port $2 plays no more: no input from read \([0-9]*\).*/\1/p" "$OUT/$1.out" | head -n 1
 }

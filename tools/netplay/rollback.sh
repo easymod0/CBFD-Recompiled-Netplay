@@ -1,0 +1,158 @@
+#!/bin/sh
+# The rollback check (netplay, issue #22): matches where some copies predict the others' inputs (--rollback)
+# and go back when a prediction was wrong, over a network made worse by the library, must still give each copy
+# exactly what a replay of the same recording alone does, read by read (a copy that predicts logs a read's
+# hash once every input before it is known and was given as it came). Run it after building with
+# CONKER_NETPLAY=ON:
+#
+#   tools/netplay/rollback.sh [--exe host/build/ConkerRecomp] [--rom conker/baserom.us.z64]
+#                             [--reads 1800] [--seed 5] [--timeout 300] [--out <folder>]
+#
+# The matches run at the same time, headless and --fast (a window would show the reads played again: step 4b),
+# each copy with its own ports' pads (the others' scrambled):
+#   both       both predict 8 reads ahead; 100 ms lag, 10 ms jitter, 5% loss, 2% reordered, 1% duplicated
+#   host-only  the same network, only the host predicts (the joiner waits as in lockstep)
+#   join-only  only the joiner predicts, 12 reads ahead (the most); 20 ms lag, then 150 ms from read 300: the
+#              host raises the input delay, which a joiner that predicts must hear before it gets there
+#   stall      both predict 8; input delay 4, 30 ms lag, and the joiner's game stopped for 1.5 s at read 300
+#   three      a 3-player Deathmatch (make_match.py --mouse): the host waits, the joiners predict 4 and 12
+#              reads ahead; 50 ms lag
+#   leave      the same with the host predicting 8 and the second joiner quitting at read 1500: the host and the
+#              first joiner play on with port 3 idle from the read the host says, and must match a solo replay so
+# For each copy that predicts it prints how many reads it predicted and went back. It exits 0 if every match
+# gave the solo replay's game, every copy that predicts went back at least once and never failed to, and the
+# delay change was the same on both sides; 1 if not. The logs are kept in --out; without it they're in a
+# temporary folder, deleted if all passed. It uses UDP ports 27330 to 27335.
+set -u
+
+cd "$(dirname "$0")/../.."
+EXE=host/build/ConkerRecomp
+ROM=conker/baserom.us.z64
+READS=1800
+SEED=5
+TIMEOUT=300
+OUT=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --exe) EXE=$2; shift 2 ;;
+        --rom) ROM=$2; shift 2 ;;
+        --reads) READS=$2; shift 2 ;;
+        --seed) SEED=$2; shift 2 ;;
+        --timeout) TIMEOUT=$2; shift 2 ;;
+        --out) OUT=$2; shift 2 ;;
+        -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+[ -x "$EXE" ] || { echo "no game at $EXE: build it with CONKER_NETPLAY=ON first" >&2; exit 2; }
+[ -f "$ROM" ] || { echo "no ROM at $ROM" >&2; exit 2; }
+# Absolute: the game changes its working folder.
+EXE=$(cd "$(dirname "$EXE")" && pwd)/$(basename "$EXE")
+ROM=$(cd "$(dirname "$ROM")" && pwd)/$(basename "$ROM")
+KEEP=1
+[ -n "$OUT" ] || { OUT=$(mktemp -d "${TMPDIR:-/tmp}/netplay-rollback.XXXXXX"); KEEP=0; }
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+. tools/netplay/lib.sh
+
+python3 tools/netplay/make_inputs.py "$OUT/inputs.pads" --reads "$READS" --seed "$SEED" --ports 2 --mouse --own-view || exit 2
+python3 tools/netplay/make_inputs.py "$OUT/other.pads" --reads "$READS" --seed "$((SEED + 1))" --ports 2 --mouse --own-view > /dev/null || exit 2
+scramble "$OUT/inputs.pads" "$OUT/other.pads" 2 "$OUT/" || exit 2
+python3 tools/netplay/make_match.py "$OUT/mouse.pads" --mode deathmatch --players 3 --mouse --seed "$SEED" --own-view || exit 2
+python3 tools/netplay/make_match.py "$OUT/mouse-other.pads" --mode deathmatch --players 3 --mouse --seed "$((SEED + 1))" --own-view > /dev/null || exit 2
+scramble "$OUT/mouse.pads" "$OUT/mouse-other.pads" 3 "$OUT/mouse-" || exit 2
+MOUSE_READS=$(( ($(wc -c < "$OUT/mouse.pads") - 40) / 73 ))
+
+failed=0
+echo "solo, mouse-solo"
+start solo
+pads=mouse.pads start mouse-solo
+finish "was the last: quitting" solo mouse-solo || exit 1
+
+bad="lag=100,jitter=10,loss=5,reorder=2,dup=1"
+echo "both, host-only, join-only, stall, three, leave (at once)"
+pads=1.pads start both-host --netplay-host 27330 --netplay-address 127.0.0.1 --players 2 --rollback 8 --netplay-fake-network "$bad"
+pads=2.pads start both-join --netplay-join "$(code_of both-host)" --rollback 8 --netplay-fake-network "$bad"
+pads=1.pads start host-only-host --netplay-host 27331 --netplay-address 127.0.0.1 --players 2 --rollback 8 --netplay-fake-network "$bad"
+pads=2.pads start host-only-join --netplay-join "$(code_of host-only-host)" --netplay-fake-network "$bad"
+pads=1.pads start join-only-host --netplay-host 27332 --netplay-address 127.0.0.1 --players 2 --netplay-fake-network "lag=20,lag-at=300:150"
+pads=2.pads start join-only-join --netplay-join "$(code_of join-only-host)" --rollback 12 --netplay-fake-network "lag=20,lag-at=300:150"
+pads=1.pads start stall-host --netplay-host 27333 --netplay-address 127.0.0.1 --players 2 --input-delay 4 --rollback 8 --netplay-fake-network lag=30
+pads=2.pads start stall-join --netplay-join "$(code_of stall-host)" --rollback 8 --netplay-fake-network lag=30 --netplay-stall-at 300:1500
+# A joiner's port is the lowest free one: the second joins once the first is in.
+wait_in() {
+    i=0
+    while ! grep -q "in, on port $2" "$OUT/$1.out" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+}
+pads=mouse-1.pads start three-host --netplay-host 27334 --netplay-address 127.0.0.1 --players 3 --netplay-fake-network lag=50
+code=$(code_of three-host)
+pads=mouse-2.pads start three-join1 --netplay-join "$code" --rollback 4 --netplay-fake-network lag=50
+wait_in three-join1 2
+pads=mouse-3.pads start three-join2 --netplay-join "$code" --rollback 12 --netplay-fake-network lag=50
+pads=mouse-1.pads start leave-host --netplay-host 27335 --netplay-address 127.0.0.1 --players 3 --rollback 8 --netplay-fake-network lag=50
+code=$(code_of leave-host)
+pads=mouse-2.pads start leave-join1 --netplay-join "$code" --rollback 8 --netplay-fake-network lag=50
+wait_in leave-join1 2
+pads=mouse-3.pads start leave-join2 --netplay-join "$code" --netplay-fake-network lag=50 --stop-after 1500
+
+# predicted <name>: the copy predicted and went back at least once, and every rollback could be done.
+predicted() {
+    line=$(sed -n 's/^\[netplay\] rollback: //p' "$OUT/$1.out")
+    if grep -q "COULDN'T\|given up at\|no state for it" "$OUT/$1.out"; then
+        echo "  $1: a rollback couldn't be done ($line)"
+        return 1
+    fi
+    case "$line" in
+        *" 0 rollbacks"*|"") echo "  $1 never went back (${line:-nothing printed})"; return 1 ;;
+    esac
+    echo "    rollback: $line"
+}
+# shellcheck disable=SC2086
+if finish "was the last: quitting" both-host both-join host-only-host host-only-join join-only-host join-only-join \
+    stall-host stall-join three-host three-join1 three-join2 leave-host leave-join1 leave-join2; then
+    for name in both-host both-join host-only-host host-only-join join-only-host join-only-join stall-host stall-join; do
+        same "$name" || failed=1
+        case "$name" in host-only-join|join-only-host) ;; *) predicted "$name" || failed=1 ;; esac
+    done
+    for name in three-host three-join1 three-join2; do
+        same "$name" mouse-solo "$MOUSE_READS" || failed=1
+        [ "$name" = three-host ] || predicted "$name" || failed=1
+    done
+    # The delay changes, as the host made them and the joiner heard them ("becomes <d> from read <r>").
+    made=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/join-only-host.out")
+    heard=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/join-only-join.out")
+    if [ -z "$made" ] || [ "$made" != "$heard" ]; then
+        echo "  join-only: the delay changes differ or there are none: host: ${made:-none}; joiner: ${heard:-none}"
+        failed=1
+    else
+        echo "  join-only: the input delay became $(echo "$made" | sed 's/\(.*\) \(.*\)/\1 from read \2/' | paste -sd, - | sed 's/,/, /g'), the same on both"
+    fi
+    # Port 3 leaving: both say the same read, and the game is the solo replay's with port 3 idle from there.
+    from=$(left_at leave-host 3)
+    if [ -z "$from" ] || [ "$(left_at leave-join1 3)" != "$from" ]; then
+        echo "  leave: the host and the first joiner don't say the same read for port 3 leaving"
+        failed=1
+    else
+        echo "  leave: port 3 idle from read $from"
+        idle_from "$OUT/mouse.pads" "$OUT/leave-solo.pads" 3 "$from" || exit 2
+        pads=leave-solo.pads start leave-solo
+        if finish "was the last: quitting" leave-solo; then
+            same leave-host leave-solo "$MOUSE_READS" || failed=1
+            predicted leave-host || failed=1
+            same leave-join1 leave-solo "$MOUSE_READS" || failed=1
+            predicted leave-join1 || failed=1
+        else
+            failed=1
+        fi
+    fi
+else
+    failed=1
+fi
+
+if [ $failed -ne 0 ]; then
+    echo "logs: $OUT"
+    echo "FAILED"
+    exit 1
+fi
+if [ $KEEP -eq 1 ]; then echo "logs: $OUT"; else rm -rf "$OUT"; fi
+echo "passed: every match with copies that predict gave each copy the same game as the replay alone"

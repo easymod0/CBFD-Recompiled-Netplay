@@ -6,6 +6,7 @@
 #
 #   tools/netplay/lockstep.sh [--exe host/build/ConkerRecomp] [--rom conker/baserom.us.z64]
 #                             [--reads 1800] [--seed 2] [--timeout 300] [--out <folder>]
+#                             [--match-options "<options>"]
 #
 # The runs, all headless and --fast, each copy with a data folder of its own (--data):
 #   solo       the recording replayed alone
@@ -34,6 +35,8 @@
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
+# --match-options gives every copy in a match those options too, e.g. "--rollback 8 --netplay-fake-network
+# lag=40" (rollback, issue #22: every run must still come out the same).
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
@@ -47,6 +50,7 @@ READS=1800
 SEED=2
 TIMEOUT=300
 OUT=
+MATCH_OPTIONS=
 while [ $# -gt 0 ]; do
     case "$1" in
         --exe) EXE=$2; shift 2 ;;
@@ -55,7 +59,8 @@ while [ $# -gt 0 ]; do
         --seed) SEED=$2; shift 2 ;;
         --timeout) TIMEOUT=$2; shift 2 ;;
         --out) OUT=$2; shift 2 ;;
-        -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --match-options) MATCH_OPTIONS=$2; shift 2 ;;
+        -h|--help) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -138,33 +143,6 @@ if finish "was the last: quitting" mouse-host mouse-join1 mouse-join2; then
 else
     failed=1
 fi
-
-# idle_from <recording> <out> <ports> <read>: <out>, the recording with each of <ports> (port numbers from 1, e.g.
-# 23) idle from <read> on, as a match gives a player that left: nothing pressed or moved, their last Controls.
-idle_from() {
-    python3 - "$@" <<'PY'
-import sys
-src, out, ports, first = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-data = bytearray(open(src, "rb").read())
-header, read_size, pad_size, motion_size = 40, 73, 5, 13   # version 4 (harness.cpp)
-reads = (len(data) - header) // read_size
-assert 0 < first <= reads
-for port in (int(p) - 1 for p in ports):
-    last = header + (first - 1) * read_size + 1 + 4 * pad_size + port * motion_size
-    controls = data[last + 9:last + 13]
-    for start in range(header + first * read_size, len(data), read_size):
-        pad = start + 1 + port * pad_size
-        motion = start + 1 + 4 * pad_size + port * motion_size
-        data[pad:pad + pad_size] = bytes(pad_size)
-        data[motion:motion + motion_size] = bytes(9) + controls
-open(out, "wb").write(data)
-PY
-}
-
-# left_at <name> <port>: the read from which <name> said port <port> plays no more.
-left_at() {
-    sed -n "s/^\[netplay\] port $2 plays no more: no input from read \([0-9]*\).*/\1/p" "$OUT/$1.out" | head -n 1
-}
 
 echo "leave"
 # The same 3-player match, the second joiner (port 3) quitting at read 1500: the host and the first joiner play on

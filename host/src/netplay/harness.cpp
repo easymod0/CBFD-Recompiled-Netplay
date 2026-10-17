@@ -34,6 +34,8 @@
 //                       differs the game goes back to that read and plays on again. A read's hash is logged
 //                       once every input before it is known and was the real one, so the log matches a plain
 //                       replay's
+//   --rollback <reads>  in a netplay match (lockstep.hpp): the same going back, with the inputs predicted and
+//                       arriving as they do; the hash log has each read once it's known to be right, as above
 //   --jitter <us>       sleeps at random, up to <us> microseconds, at the game's OS calls and in the
 //                       graphics thread: a test that the host's speed doesn't change the game
 //   --own-view          records or hashes as a match whose rule is that every player sees only their own
@@ -157,11 +159,15 @@ namespace {
     uint64_t late_verified = 0;                             // reads from 0 known and given as they were
     uint64_t late_logged = 0;                               // reads whose hash is logged
     std::vector<uint64_t> late_hash;                        // by read: as it was last made
-    bool late_broken = false;                               // a rollback couldn't be done: the game is wrong
+    bool late_broken = false;                               // a rollback couldn't be done: the game is wrong (also --rollback's)
     uint64_t late_mispredicted = 0;
     constexpr uint64_t late_boot_reads = 30;
 
-    bool rollback_on() { return rollback_every != 0 || late_max != 0; }
+    // --rollback's: lockstep predicts the others' inputs, and says when to go back (take_rollback).
+    bool rollback_match() { return conker::lockstep::active() && conker::lockstep::rollback_window() > 0; }
+    bool rollback_on() { return rollback_every != 0 || late_max != 0 || rollback_match(); }
+    // A replay's last read is done with (it was made with every input right): it's quit.
+    bool last_read_done = false;
     struct Timings {
         std::vector<double> us;
         void add(double value) { us.push_back(value); }
@@ -200,6 +206,9 @@ namespace {
 
     uint8_t* rdram = nullptr;
     FILE* record_file = nullptr;
+    // The reads written to it: with rollback, the end, after which reads made the first time may follow (a match
+    // that ended as reads were made again), cut off at the end.
+    uint64_t recorded_to = 0;
     FILE* hash_log = nullptr;
     std::vector<uint8_t> replay;
     uint64_t replay_reads = 0;
@@ -434,17 +443,20 @@ namespace {
         std::vector<uint8_t> memory;
     };
     std::array<Kept, 2> kept;
-    size_t next_kept = 0;
 
     std::array<uint64_t, conker::netplay::memory_regions> keep_memory(uint64_t read) {
         static_assert((uint64_t)conker::netplay::memory_regions * conker::netplay::memory_region_size ==
             recomp::save_states::game_memory_size);
-        // Reads start again in another match: copies from before are no longer its.
+        // Reads start again in another match, or are made again (rollback): copies from then are no longer the
+        // game's. The copy goes where one is free, else over the oldest.
         for (Kept& old : kept) {
             if (old.read != UINT64_MAX && old.read >= read) old.read = UINT64_MAX;
         }
-        Kept& copy = kept[next_kept];
-        next_kept = (next_kept + 1) % kept.size();
+        Kept* free = &kept[0];
+        for (Kept& old : kept) {
+            if (old.read == UINT64_MAX || (free->read != UINT64_MAX && old.read < free->read)) free = &old;
+        }
+        Kept& copy = *free;
         copy.read = read;
         copy.memory.assign(rdram, rdram + recomp::save_states::game_memory_size);
         for (const Range& skip : left_out()) {
@@ -517,37 +529,41 @@ namespace {
         }
         std::string error;
         if (rollback_to != UINT64_MAX) {
-            if (snapshots[rollback_to % snapshots.size()].read != rollback_to) {
+            // The state before the read to go back to, or else the nearest earlier one there is (more reads to play
+            // again): a state isn't taken where a safe point isn't quiet, and can't be loaded where a thread waits
+            // elsewhere than in it, as the game's main thread does for one read at a scene change. If none can now,
+            // it's tried again at the next safe point.
+            uint64_t target = UINT64_MAX;
+            bool any_state = false;
+            recomp::save_states::LoadResult result = recomp::save_states::LoadResult::NotNow;
+            double restore_us = 0;
+            for (uint64_t back = 0; back < snapshots.size() && back <= rollback_to; back++) {
+                const uint64_t read = rollback_to - back;
+                if (snapshots[read % snapshots.size()].read != read) continue;
+                any_state = true;
+                auto start = std::chrono::steady_clock::now();
+                result = recomp::save_states::restore(game_rdram, snapshots[read % snapshots.size()].state, error);
+                restore_us = micros_since(start);
+                if (result != recomp::save_states::LoadResult::NotNow) {
+                    target = read;
+                    break;
+                }
+                rb.not_now++;
+            }
+            if (!any_state) {
                 rb.no_snapshot++;
-                if (late_max != 0) {
+                if (late_max != 0 || rollback_match()) {
                     late_broken = true;
                     std::printf("[harness] rollback to read %llu: no state for it\n", (unsigned long long)rollback_to);
                 }
                 rollback_to = UINT64_MAX;
                 return;
             }
-            // The state before the read to go back to, or else an earlier one (one more read to play again): a
-            // state can't be loaded where a thread waits elsewhere than in it, as the game's main thread does
-            // for one read at a scene change. If none can now, it's tried again at the next safe point.
-            uint64_t target = rollback_to;
-            recomp::save_states::LoadResult result = recomp::save_states::LoadResult::NotNow;
-            double restore_us = 0;
-            for (; target != UINT64_MAX && snapshots[target % snapshots.size()].read == target; target--) {
-                auto start = std::chrono::steady_clock::now();
-                result = recomp::save_states::restore(game_rdram, snapshots[target % snapshots.size()].state, error);
-                restore_us = micros_since(start);
-                if (result != recomp::save_states::LoadResult::NotNow) break;
-                rb.not_now++;
-                if (target == 0) {
-                    target = UINT64_MAX;
-                    break;
-                }
-            }
             if (result == recomp::save_states::LoadResult::NotNow) {
                 // As rollback would, it gives up after 2 reads (and the reads would have waited for the inputs).
                 if (reads >= rb.asked_at_read + 2) {
                     rb.given_up++;
-                    if (late_max != 0) {
+                    if (late_max != 0 || rollback_match()) {
                         late_broken = true;
                     }
                     std::printf("[harness] rollback to read %llu given up at read %llu: %s\n", (unsigned long long)rollback_to,
@@ -558,6 +574,9 @@ namespace {
             }
             if (result == recomp::save_states::LoadResult::Invalid) {
                 std::fprintf(stderr, "[harness] rollback: the state couldn't be loaded: %s\n", error.c_str());
+                if (late_max != 0 || rollback_match()) {
+                    late_broken = true;
+                }
                 rollback_to = UINT64_MAX;
                 return;
             }
@@ -635,7 +654,7 @@ namespace {
         if (snapshots[read % snapshots.size()].read != read) {
             rb.reads_without_snapshot++;
         }
-        if (late_max != 0) {
+        if (late_max != 0 || rollback_match()) {
         }
         else if (read < first_hashes.size()) {
             if (first_hashes[read] != hash) {
@@ -667,6 +686,13 @@ namespace {
     void rollback_report() {
         if (!rollback_on() || !rb.started_set) {
             return;
+        }
+        if (rollback_match()) {
+            std::printf("[harness] rollback in the match: window %d; %llu reads verified and logged of %llu%s\n",
+                conker::lockstep::rollback_window(), (unsigned long long)late_logged, (unsigned long long)rollback_reads_ahead,
+                late_broken ? " (A ROLLBACK COULDN'T BE DONE: the game went wrong there)" : "");
+            std::printf("[harness]   rollbacks asked %llu; reads gone back: %s\n", (unsigned long long)rb.late_depth.us.size(),
+                rb.late_depth.summary("reads").c_str());
         }
         if (late_max != 0) {
             std::printf("[harness] rollback late test: up to %llu reads late (seed %llu), %d ports; %llu reads verified and logged of %llu%s\n",
@@ -793,6 +819,42 @@ namespace {
         return input;
     }
 
+    // With rollback (--rollback-late's or --rollback's), at each read: its hash `hash`, logged once it's known to
+    // be right. A read's hash is the result of the reads before it: right once those (the first `verified`) are.
+    void log_right(uint64_t read, uint64_t hash, uint64_t verified) {
+        if (late_hash.size() <= read) {
+            late_hash.resize(read + 1);
+        }
+        late_hash[read] = hash;
+        // The last time a read is made is the right one: a dump is written each time.
+        if (hash_log != nullptr && std::find(dump_at.begin(), dump_at.end(), read) != dump_at.end()) {
+            dump_memory(read);
+        }
+        while (hash_log != nullptr && late_logged <= std::min(verified, read)) {
+            std::fprintf(hash_log, "%llu %016llx\n", (unsigned long long)late_logged, (unsigned long long)late_hash[late_logged]);
+            late_logged++;
+        }
+        if (hash_log == nullptr) {
+            late_logged = std::max(late_logged, std::min(verified, read) + 1);
+        }
+    }
+
+    // A replay's (or --stop-after's) last read made, right: written out and quit.
+    void finish_last_read(uint64_t read) {
+        last_read_done = true;
+        // Written out now, should the program end before finish() closes them.
+        if (record_file != nullptr) {
+            std::fflush(record_file);
+        }
+        if (hash_log != nullptr) {
+            std::fflush(hash_log);
+        }
+        conker::lockstep::leave();
+        rollback_report();
+        std::printf("[harness] read %llu was the last: quitting\n", (unsigned long long)read);
+        request_quit();
+    }
+
     // --rollback-late's, at each read, with the replay's pads in `pads` and `motions` (the real ones): finds
     // the inputs that arrived to be other than predicted (and asks to go back), gives the game the remote
     // ports' predictions, and logs the hashes known to be right.
@@ -849,11 +911,6 @@ namespace {
             used.motions[port] = motion;
         }
         // Right so far: the reads before this one, each known and given as it was.
-        late_hash[read] = hash;
-        // The last time a read is made is the right one: a dump is written each time.
-        if (hash_log != nullptr && std::find(dump_at.begin(), dump_at.end(), read) != dump_at.end()) {
-            dump_memory(read);
-        }
         while (!late_broken && late_verified < read) {
             bool right = true;
             for (int port = 1; port < ports && right; port++) {
@@ -867,14 +924,7 @@ namespace {
             if (!right) break;
             late_verified++;
         }
-        // A read's hash is the result of the reads before it: right once those are.
-        while (hash_log != nullptr && late_logged <= std::min(late_verified, read)) {
-            std::fprintf(hash_log, "%llu %016llx\n", (unsigned long long)late_logged, (unsigned long long)late_hash[late_logged]);
-            late_logged++;
-        }
-        if (hash_log == nullptr) {
-            late_logged = std::max(late_logged, std::min(late_verified, read) + 1);
-        }
+        log_right(read, hash, late_verified);
     }
 
     // On the game thread, at each controller read, with the pads the game is about to get.
@@ -897,6 +947,10 @@ namespace {
         // unless one of the below gives it.
         conker::netplay::Motion motions[max_pads] = { still(), still(), still(), still() };
         if (read > last_read || match_over) {
+            // Past a replay's last read with a rollback still wanted at it, which couldn't be done (given up).
+            if (!last_read_done && !match_over && rollback_match() && rollback_to == UINT64_MAX) {
+                finish_last_read(last_read);
+            }
             // Waiting for the quit: the game gets no input.
             for (int i = 0; i < max_pads; i++) {
                 pads[i] = { 0, 0, 0, pads[i].err_no };
@@ -916,8 +970,8 @@ namespace {
             }
             return hash;
         };
-        // With --rollback-test, each read once (the first time).
-        if (hash_log != nullptr && late_max == 0 && (rollback_every == 0 || read >= rollback_reads_ahead)) {
+        // With --rollback-test, each read once (the first time); with --rollback-late or --rollback, once it's right.
+        if (hash_log != nullptr && late_max == 0 && !rollback_match() && (rollback_every == 0 || read >= rollback_reads_ahead)) {
             std::fprintf(hash_log, "%llu %016llx\n", (unsigned long long)read, (unsigned long long)memory_hash());
             if (std::find(dump_at.begin(), dump_at.end(), read) != dump_at.end()) {
                 dump_memory(read);
@@ -941,11 +995,23 @@ namespace {
             late_read(read, pads, motions, memory_hash());
         }
         if (rollback_on()) {
-            rollback_read(read, memory_hash());
+            rollback_read(read, rollback_every != 0 ? memory_hash() : 0);
         }
+        // Before lockstep, which may change the memory (--netplay-desync-at).
+        const uint64_t log_hash = rollback_match() && hash_log != nullptr ? memory_hash() : 0;
 
         const conker::lockstep::Memory memory{ memory_hash, keep_memory, dump_kept };
-        if (conker::lockstep::active() && !conker::lockstep::on_read(read, pads, motions, local_input, memory, rdram)) {
+        bool playing = true;
+        if (conker::lockstep::active()) {
+            if (late_broken && rollback_match()) {
+                conker::lockstep::end(conker::netplay::Reason::desync, "the game couldn't go back to correct a prediction (rollback)");
+                playing = false;
+            }
+            else {
+                playing = conker::lockstep::on_read(read, pads, motions, local_input, memory, rdram);
+            }
+        }
+        if (!playing) {
             match_over = true;
             for (int i = 0; i < max_pads; i++) {
                 pads[i] = { 0, 0, 0, pads[i].err_no };
@@ -965,6 +1031,15 @@ namespace {
             }
             return;
         }
+        if (rollback_match()) {
+            const uint64_t wrong = conker::lockstep::take_rollback();
+            if (wrong != UINT64_MAX && !late_broken && (rollback_to == UINT64_MAX || wrong < rollback_to)) {
+                rollback_to = wrong;
+                rb.asked_at_read = read + 1;
+                rb.late_depth.add((double)(read + 1 - wrong));
+            }
+            log_right(read, log_hash, conker::lockstep::verified_reads());
+        }
 
         // Playing on this machine alone (recording, or hashing): player 1's movement is this machine's. In a
         // match lockstep took it (local_input); in a replay it's the recording's.
@@ -979,6 +1054,10 @@ namespace {
         conker::motion::set_read(motions);
 
         if (record_file != nullptr) {
+            // With rollback a read can be made again: it's written over.
+            if (rollback_match()) {
+                std::fseek(record_file, (long)(header_size + read * read_size), SEEK_SET);
+            }
             uint8_t out[read_size];
             out[0] = (uint8_t)count;
             for (int i = 0; i < max_pads; i++) {
@@ -999,24 +1078,16 @@ namespace {
                 put_u32(m + 9, motion.controls);
             }
             std::fwrite(out, 1, sizeof(out), record_file);
+            recorded_to = read + 1;
             // Written out every 2 s of game or so, should the program end before finish() closes it.
             if (read % 60 == 59) {
                 std::fflush(record_file);
             }
         }
 
-        if (read == last_read) {
-            // Written out now, should the program end before finish() closes them.
-            if (record_file != nullptr) {
-                std::fflush(record_file);
-            }
-            if (hash_log != nullptr) {
-                std::fflush(hash_log);
-            }
-            conker::lockstep::leave();
-            rollback_report();
-            std::printf("[harness] read %llu was the last: quitting\n", (unsigned long long)read);
-            request_quit();
+        // With a rollback wanted, the game goes back and makes it again first.
+        if (read == last_read && !(rollback_match() && rollback_to != UINT64_MAX)) {
+            finish_last_read(read);
         }
     }
 }
@@ -1206,7 +1277,7 @@ bool conker::harness::prepare() {
         std::fprintf(stderr, "[harness] --rollback-late needs --replay\n");
         return false;
     }
-    if (rollback_on() && (conker::lockstep::active() || state_save_at != no_limit || !record_path.empty())) {
+    if ((rollback_every != 0 || late_max != 0) && (conker::lockstep::active() || state_save_at != no_limit || !record_path.empty())) {
         std::fprintf(stderr, "[harness] --rollback-test is for a replay or playing alone, without --state-test or --record\n");
         return false;
     }
@@ -1250,6 +1321,7 @@ bool conker::harness::prepare() {
         std::fprintf(stderr, "[harness] %s has no reads\n", replay_path.c_str());
         return false;
     }
+    conker::lockstep::set_last_read(last_read);
 
     activate();
     return true;
@@ -1442,6 +1514,10 @@ void conker::harness::start(uint8_t* game_rdram) {
         late_hash.assign(replay_reads, 0);
         rollback_back = late_max + 6;
     }
+    if (rollback_match()) {
+        // Back as far as the window, a read or two more as a load waits for a safe point, and earlier states.
+        rollback_back = (uint64_t)conker::lockstep::rollback_window() + 8;
+    }
     if (rollback_on()) {
         snapshots.assign(rollback_back + 2, Snapshot{});
         ultramodern::save_states::set_safe_point_callback(on_safe_point);
@@ -1462,7 +1538,12 @@ void conker::harness::finish() {
     if (record_file != nullptr) {
         std::fclose(record_file);
         record_file = nullptr;
-        std::printf("[harness] recorded %llu reads\n", (unsigned long long)(reads <= last_read ? reads : last_read + 1));
+        if (rollback_match()) {
+            std::error_code error;
+            std::filesystem::resize_file(record_path, header_size + recorded_to * read_size, error);
+        }
+        std::printf("[harness] recorded %llu reads\n", (unsigned long long)(rollback_match() ? recorded_to :
+            reads <= last_read ? reads : last_read + 1));
     }
     if (hash_log != nullptr) {
         std::fclose(hash_log);
