@@ -243,6 +243,7 @@ namespace {
         conker::notices::update();
 #if defined(CONKER_NETPLAY)
         conker::netplay_menu::update();
+        conker::netplay_status::update();
 #endif
         update_hotkeys();
         conker::reticle::update();
@@ -339,6 +340,7 @@ namespace {
         conker::reticle::on_ui_ready();
         options->add_start_game_or_load_rom_option();
 #if defined(CONKER_NETPLAY)
+        conker::netplay_status::on_ui_ready();
         conker::netplay_menu::init(game.game_id, recomp::get_config_path() / game.stored_filename());
         options->add_option("Netplay", conker::netplay_menu::open);
 #endif
@@ -701,9 +703,12 @@ namespace {
             return false;
         }
         if (!recompinput::game_input_disabled()) {
+            // The player aiming with this controller: while the harness is used, its player's port in a netplay
+            // match (this machine's player of the same number).
+            const int player = conker::netplay_profile::active() ? conker::motion::local_port(port) : port;
             // Port 1 has the keyboard, and its controller once one has pressed a button.
             read_port(port < count ? controllers[port] : nullptr, port == 0,
-                port == 0 && conker::mouse_camera::stick_turns_camera(), conker::look_aim::swap_sticks_now(port), conker::look_aim::z_turns_aim(port), buttons, x, y);
+                port == 0 && conker::mouse_camera::stick_turns_camera(), conker::look_aim::swap_sticks_now(player), conker::look_aim::z_turns_aim(player), buttons, x, y);
         }
         return true;
     }
