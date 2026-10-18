@@ -10,6 +10,8 @@
 // the game can't know its public address without a server to ask, so the host looks it up (or gives its
 // local one, for a match at home). The code is the host's address, so the menu says to share it only with
 // people the host trusts. The input delay is lockstep's default, the same on every machine.
+//
+// Rollback (--rollback) is the host's choice too, the same for everyone in the match.
 
 #include <cctype>
 #include <cstdio>
@@ -71,6 +73,7 @@ namespace {
         bool hosting = false;               // a match is hosted (connecting, as the host)
         bool own_view_for_everyone = true;  // hosting: the match's screens rule
         int input_delay = -1;               // hosting: reads, or -1 for auto
+        int rollback = 0;                   // hosting: reads predicted, 0 (off) to 12
         std::string port_text = std::to_string(default_port);
         std::string address_text;
         std::string join_text;
@@ -182,7 +185,7 @@ namespace {
                     std::to_string(local_players + 1) + " or more players: someone has to join.");
                 return;
             }
-            conker::lockstep::set_host(port, players, own_view_for_everyone, input_delay, local_players);
+            conker::lockstep::set_host(port, players, own_view_for_everyone, input_delay, local_players, rollback);
             hosting = true;
             begin();
             show_code();
@@ -319,6 +322,19 @@ namespace {
             delay_radio->add_index_changed_callback([this](uint32_t index) { input_delay = (int)index - 1; });
             text(host, "Auto suits most matches (0 at home). Raise it if the game stutters waiting for a player.",
                 Typography::Body, color::TextDim);
+            recompui::Element* rollback_row = row(host);
+            text(rollback_row, "Rollback", Typography::LabelMD);
+            recompui::Radio* rollback_radio = context.create_element<recompui::Radio>(rollback_row);
+            // Off, 4, 8 or 12 reads.
+            rollback_radio->add_option("Off");
+            for (int reads = 4; reads <= 12; reads += 4) {
+                rollback_radio->add_option(std::to_string(reads));
+            }
+            rollback_radio->set_index(0);
+            rollback_radio->add_index_changed_callback([this](uint32_t index) { rollback = 4 * (int)index; });
+            text(host, "Rollback (experimental): instead of waiting for the others' input, every player's game guesses "
+                "it up to that many reads ahead (about 30 a second) and goes back to correct a wrong guess, so lag is "
+                "felt less.", Typography::Body, color::TextDim);
             recompui::Element* code_row = row(host);
             code_label = text(code_row, "", Typography::LabelMD);
             copy_button = context.create_element<recompui::Button>(code_row, "Copy", recompui::ButtonStyle::Tertiary);

@@ -65,9 +65,10 @@ int main() {
     const std::vector<uint8_t> hash = bytes_of(regions);
     CHECK(hash[17] == 7 && hash[18] == 0 && hash[19] == 8 && hash[20] == 1 && hash[271] == 0x86 && hash[272] == 0x7F);
     CHECK(round_trips(Bye{ Reason::desync }, 6));
-    CHECK(round_trips(Start{ 3, 0 }, 9));
-    CHECK(round_trips(Start{ 4, 1, max_delay }, 9));
-    CHECK(round_trips(Start{ 4, 1, 2, 0x0C }, 9));
+    CHECK(round_trips(Start{ 3, 0 }, 10));
+    CHECK(round_trips(Start{ 4, 1, max_delay }, 10));
+    CHECK(round_trips(Start{ 4, 1, 2, 0x0C }, 10));
+    CHECK(round_trips(Start{ 2, 0, 1, 0, max_rollback }, 10));
     CHECK(round_trips(Gone{ 3, 4000000000u }, 11));
     CHECK(round_trips(Gone{ 1, 5, 1 }, 11));
     const std::vector<uint8_t> gone = bytes_of(Gone{ 2, 0x01020304, 1 });
@@ -88,8 +89,8 @@ int main() {
     CHECK(inputs[51] == 0x00 && inputs[52] == 0x80 && inputs[53] == 0xFF && inputs[54] == 0x7F &&  // motion 0
           inputs[55] == 0x34 && inputs[56] == 0x12 && inputs[57] == 0xFE && inputs[58] == 0xFF && inputs[59] == 0x80 &&
           inputs[60] == 0x05 && inputs[61] == 0x03 && inputs[62] == 0x01 && inputs[63] == 0x00);
-    const std::vector<uint8_t> start = bytes_of(Start{ 3, 1, 3, 0x03 });
-    CHECK(start.size() == 9 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0x03);
+    const std::vector<uint8_t> start = bytes_of(Start{ 3, 1, 3, 0x03, 8 });
+    CHECK(start.size() == 10 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0x03 && start[9] == 8);
 
     // Out-of-range fields are neither sent nor accepted.
     CHECK(bytes_of(Welcome{ 0x04, 2 }).empty());    // a port not below players
@@ -105,6 +106,7 @@ int main() {
     CHECK(bytes_of(Start{ 2, 0, max_delay + 1 }).empty());
     CHECK(bytes_of(Start{ 3, 1, 0, 0x08 }).empty()); // a pair past the players
     CHECK(bytes_of(Start{ 4, 1, 0, 0x07 }).empty()); // an odd number of ports in pairs
+    CHECK(bytes_of(Start{ 2, 0, 0, 0, max_rollback + 1 }).empty());
     CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
     CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
 

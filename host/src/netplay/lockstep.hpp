@@ -34,12 +34,12 @@
 //                                and lag-at=<read>:<ms> (the lag changes), separated by commas. It only makes
 //                                this player's own match worse, so it's in every build, like the above
 //   --netplay-stall-at <read>:<ms>  (a test) the game stops at that read for that long, as on a hitch
-//   --rollback <reads>           (hosting or joining; issue #22) instead of waiting for the others' inputs, this
-//                                peer predicts them (each player's last) up to <reads> reads ahead of the last
-//                                read it has them all for, 0 (the default: it waits) to 12; when one comes
-//                                that isn't what it predicted, the harness goes back to before that read and
-//                                plays on again from there, unpaced, unseen and unheard. This peer's own choice:
-//                                the others may predict or not
+//   --rollback <reads>           (hosting; issue #22) instead of waiting for the others' inputs, every peer
+//                                predicts them (each player's last) up to <reads> reads ahead of the last read
+//                                it has them all for, 0 (the default: they wait) to 12; when one comes that
+//                                isn't what it predicted, the harness goes back to before that read and plays
+//                                on again from there, unpaced, unseen and unheard. The match's, the same for
+//                                everyone: the joiners get it with Start (a joiner can't choose its own)
 //
 // A joiner's machine that leaves (or stops answering) leaves the others playing: the host tells them from which
 // read its ports get no input (Gone), and every machine gives them an idle pad from there. The host leaving
@@ -79,7 +79,8 @@ namespace conker::lockstep {
     bool active();
     // The same as the options, from the menu (frontend's netplay.cpp).
     // `input_delay`: reads, or -1 for auto; `local`: the players on this machine (fewer than `players`).
-    void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1);
+    // `rollback`: the reads every peer predicts ahead (--rollback's), 0 (off) to 12.
+    void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     void set_join(const std::string& where, int local = 1);
     // Checks the options, before the game starts (false: a message was printed).
     bool prepare();

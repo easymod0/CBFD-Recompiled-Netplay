@@ -67,7 +67,8 @@ PY
 # start <name> [options...]: one copy in the background, with its own data folder, its hash log in
 # $OUT/<name>.log and its output in $OUT/<name>.out; its PID is added to $pids.
 # The recording is $OUT/inputs.pads, or $OUT/$pads if that's set; it runs --fast unless $paced is set (on
-# the timeline's real time, as a player would). A copy in a match also gets $MATCH_OPTIONS, if set.
+# the timeline's real time, as a player would). A copy in a match also gets $MATCH_OPTIONS, and a hosting
+# one $HOST_OPTIONS, if set.
 start() {
     name=$1; shift
     rm -f "$OUT/$name.log" "$OUT/$name.out"
@@ -75,7 +76,10 @@ start() {
     speed=--fast
     [ -n "${paced:-}" ] && speed=
     extra=
-    case " $* " in *" --netplay-host "*|*" --netplay-join "*) extra=${MATCH_OPTIONS:-} ;; esac
+    case " $* " in
+        *" --netplay-host "*) extra="${MATCH_OPTIONS:-} ${HOST_OPTIONS:-}" ;;
+        *" --netplay-join "*) extra=${MATCH_OPTIONS:-} ;;
+    esac
     # shellcheck disable=SC2086
     "$EXE" --headless --rom "$ROM" --data "$OUT/data-$name" $speed --replay "$OUT/${pads:-inputs.pads}" \
         --hash-log "$OUT/$name.log" "$@" $extra > "$OUT/$name.out" 2>&1 &

@@ -166,10 +166,11 @@ namespace {
     // read and the game plays on again from there (harness.cpp) with the inputs as they are now known. Reads
     // made again (below `frontier`) send nothing and wait for nothing. A peer's hash of a read is only sent
     // once every input before that read is known and was given as it was (`verified`), so peers compare the
-    // game as it really went. It's this peer's own choice: the others may predict or not.
+    // game as it really went. It's the match's, the same on every peer: the host's (--rollback), which the joiners
+    // get with Start.
     int rollback_option = 0;
     // Its most (--rollback's), which the horizon and the host's delay changes leave room for.
-    constexpr int most_rollback_window = 12;
+    constexpr int most_rollback_window = conker::netplay::max_rollback;
     // The boot changes the game's main loop at once (a state from before can't be loaded after): no
     // predicting in the first reads.
     constexpr uint64_t rollback_from_read = 30;
@@ -373,8 +374,8 @@ namespace {
         std::fprintf(file, "],\n  \"compared_with_port\": %d,\n", port + 1);
         std::fprintf(file, "  \"build_id\": \"%s\",\n  \"build\": \"%s\",\n  \"rom\": \"%s\",\n  \"profile\": \"%s\",\n  \"mods\": \"%s\",\n",
             conker::netplay::build_id(), hex(sent.build).c_str(), hex(sent.rom).c_str(), hex(sent.profile).c_str(), hex(sent.mods).c_str());
-        std::fprintf(file, "  \"players\": %d,\n  \"input_delay\": %d,\n  \"own_view\": %s,\n  \"view_pairs\": %u,\n",
-            match_players, delay_at(read), match_own_view ? "true" : "false", match_pairs);
+        std::fprintf(file, "  \"players\": %d,\n  \"input_delay\": %d,\n  \"own_view\": %s,\n  \"view_pairs\": %u,\n  \"rollback\": %d,\n",
+            match_players, delay_at(read), match_own_view ? "true" : "false", match_pairs, rollback_option);
         std::fprintf(file, "  \"hash\": \"%s\",\n  \"their_hash\": \"%s\",\n  \"differing_regions\": [",
             hex(own.hash).c_str(), hex(theirs.hash).c_str());
         for (size_t i = 0; i < regions.size(); i++) std::fprintf(file, "%s%d", i == 0 ? "" : ", ", regions[i]);
@@ -929,13 +930,14 @@ bool conker::lockstep::active() {
     return host_port > 0 || !join_where.empty();
 }
 
-void conker::lockstep::set_host(int port, int players, bool own_view, int input_delay, int local) {
+void conker::lockstep::set_host(int port, int players, bool own_view, int input_delay, int local, int rollback) {
     host_address.clear();
     host_port = port;
     wanted_players = players;
     local_option = local;
     host_own_view = own_view;
     delay_option = input_delay < 0 ? auto_delay : std::min(input_delay, netplay::max_delay);
+    rollback_option = std::clamp(rollback, 0, most_rollback_window);
     join_where.clear();
 }
 
@@ -943,6 +945,7 @@ void conker::lockstep::set_join(const std::string& where, int local) {
     host_port = -1;
     join_where = where;
     local_option = local;
+    rollback_option = 0;    // the host's, with Start
 }
 
 bool conker::lockstep::prepare() {
@@ -951,6 +954,10 @@ bool conker::lockstep::prepare() {
     }
     if (host_port > 0 && !join_where.empty()) {
         std::fprintf(stderr, "[netplay] --netplay-host and --netplay-join can't be used together\n");
+        return false;
+    }
+    if (!join_where.empty() && rollback_option > 0) {
+        std::fprintf(stderr, "[netplay] --rollback is the host's choice: a joiner predicts as the host's match does\n");
         return false;
     }
     if (host_port > 0 && local_option >= wanted_players) {
@@ -1137,7 +1144,7 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 std::printf("[netplay] %s joined (%d of %d)\n", ports_text(event.ports).c_str(), joined, match_players);
                 if (joined == match_players) {
                     const int chosen = delay_option == auto_delay ? delay_for(session->round_trips_ms(), (size_t)session->joiners()) : delay_option;
-                    if (session->start(host_own_view, chosen)) {
+                    if (session->start(host_own_view, chosen, rollback_option)) {
                         match_started = true;
                         match_own_view = host_own_view;
                         match_pairs = session->pairs();
@@ -1171,6 +1178,7 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 match_started = true;
                 match_own_view = event.own_view;
                 match_pairs = event.pairs;
+                rollback_option = event.rollback;
                 delay = event.delay;
                 delays = { 0, event.delay, event.delay };
                 break;
@@ -1190,8 +1198,9 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         }
     }
     if (match_started) {
-        std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s\n", match_players,
-            ports_text(own_ports).c_str(), delay, match_own_view ? ", everyone sees only their own view" : "");
+        std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s%s\n", match_players,
+            ports_text(own_ports).c_str(), delay, match_own_view ? ", everyone sees only their own view" : "",
+            rollback_option > 0 ? (", rollback " + std::to_string(rollback_option) + " reads").c_str() : "");
         publish();
         status = "The match starts.";
         return Progress::started;

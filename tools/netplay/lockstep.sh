@@ -6,7 +6,7 @@
 #
 #   tools/netplay/lockstep.sh [--exe host/build/ConkerRecomp] [--rom conker/baserom.us.z64]
 #                             [--reads 1800] [--seed 2] [--timeout 300] [--out <folder>]
-#                             [--match-options "<options>"]
+#                             [--match-options "<options>"] [--host-options "<options>"]
 #
 # The runs, all headless and --fast, each copy with a data folder of its own (--data):
 #   solo       the recording replayed alone
@@ -35,8 +35,9 @@
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
-# --match-options gives every copy in a match those options too, e.g. "--rollback 8 --netplay-fake-network
-# lag=40" (rollback, issue #22: every run must still come out the same).
+# --match-options gives every copy in a match those options too, and --host-options every hosting copy, e.g.
+# --host-options "--rollback 8" --match-options "--netplay-fake-network lag=40" (rollback, issue #22, is the
+# host's choice: every run must still come out the same).
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
@@ -51,6 +52,7 @@ SEED=2
 TIMEOUT=300
 OUT=
 MATCH_OPTIONS=
+HOST_OPTIONS=
 while [ $# -gt 0 ]; do
     case "$1" in
         --exe) EXE=$2; shift 2 ;;
@@ -60,7 +62,8 @@ while [ $# -gt 0 ]; do
         --timeout) TIMEOUT=$2; shift 2 ;;
         --out) OUT=$2; shift 2 ;;
         --match-options) MATCH_OPTIONS=$2; shift 2 ;;
-        -h|--help) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --host-options) HOST_OPTIONS=$2; shift 2 ;;
+        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
