@@ -228,6 +228,7 @@ namespace {
                 set_state(State::idle, "Set a netplay server first (Server, above).");
                 return false;
             }
+            save_settings(settings);
             conker::lockstep::set_server(settings.server, settings.allow_direct);
             return true;
         }

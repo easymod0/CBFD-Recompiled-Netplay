@@ -19,16 +19,25 @@ Server, or `--netplay-server`.
 
 On a Linux machine with Docker and a public IP address, you need only `compose.yaml` and `.env.example`
 from this folder: the server's image is published to GitHub's container registry
-(`ghcr.io/easymod0/conker-netplay-server`, for amd64 and arm64) by the `netplay-server` workflow.
+(`ghcr.io/easymod0/conker-netplay-server`, for amd64 and arm64) by the `netplay-server` workflow. (A
+new package on GHCR is private: after its first publish, its owner makes it public once, in the
+package's settings, or `docker compose pull` is refused.)
 
 ```sh
 mkdir conker-netplay && cd conker-netplay
 curl -fsSLO https://raw.githubusercontent.com/easymod0/CBFD-Recompiled-Netplay/netplay/tools/netplay/server/compose.yaml
 curl -fsSL https://raw.githubusercontent.com/easymod0/CBFD-Recompiled-Netplay/netplay/tools/netplay/server/.env.example -o .env
-nano .env                 # set PUBLIC_HOST (or PUBLIC_IP), and TURN_SECRET (openssl rand -hex 24)
+# A random TURN_SECRET, written into .env:
+sed -i "s/^TURN_SECRET=.*/TURN_SECRET=$(openssl rand -hex 24)/" .env
+nano .env                 # set PUBLIC_HOST, e.g. conker.example.org (or PUBLIC_IP)
 docker compose up -d
-docker compose logs -f
+docker compose logs -f    # each says "public address <ip>": check it's this server's
 ```
+
+`TURN_SECRET` is 48 random hex characters (any 16 or more letters and digits will do). Only coturn and the
+signalling server use it; players never see it, and nobody needs it to play. Without `openssl`:
+`head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'`. Changing it (then `docker compose up -d`) stops
+every relay credential given out so far.
 
 **The server's address.** Players connect by name (`PUBLIC_HOST`, e.g. `conker.example.org`; the game's
 Server setting is `conker.example.org:27100`), but the relay has to tell them its IP address: the TURN
@@ -56,13 +65,18 @@ handles badly.
 ## What's limited
 
 - **Signalling:** a peer must register within 5 s, with an id nobody else has (nor had in the last
-  hour). At most `MAX_PER_ADDRESS` connections from one IP address (8) and 4096 in all, and 20 packets a
-  second each (bursts of 60). One room each. From one IP address, at most 10 lookups of room codes that
+  hour). At most `MAX_PER_ADDRESS` connections at once from one IP address (8; an IPv6 address's /64
+  counts as one), 20 new ones in a burst then one each 2 s, 4096 in all, and 20 packets a second each
+  (bursts of 60). A connection without a room that's idle for 10 minutes is closed, and any after 12 hours. One room each. From one IP address, at most 10 lookups of room codes that
   aren't there, then one each 6 s, so codes can't be guessed (a code is one of a trillion, and isn't
   given out again for an hour after its room closes). Anything else closes the connection. The server
   logs counts, never addresses or codes.
-- **coturn:** at most 200 KB/s per relay, `TURN_TOTAL_QUOTA` relays in all (400), and never into private
-  or loopback networks (so it can't be used to reach the server's own network).
+- **coturn:** only the signalling server's credentials; UDP relays only (no TCP relay, which could open
+  connections anywhere); at most 200 KB/s per relay, `TURN_USER_QUOTA` relays per player (32: one per
+  network interface and other player) and `TURN_TOTAL_QUOTA` in all (400); and never into private,
+  loopback, link-local (cloud metadata), multicast, documentation or IPv6-to-IPv4 ranges, so it can't be
+  used to reach the server's own network. Its secret is in a file only it can read, not on its command
+  line.
 
 ## The relay's credentials
 

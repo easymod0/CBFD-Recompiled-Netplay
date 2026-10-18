@@ -16,6 +16,8 @@ on:
       - 'host/src/netplay/net/signal_packets_test.cpp'
       - 'host/src/netplay/net/join_code.*'
       - 'host/src/netplay/net/turn_credentials*'
+      - 'host/src/netplay/net/packets.*'
+      - 'host/src/netplay/net/vcpkg.*'
       - 'host/src/netplay/net/CMakeLists.txt'
       - 'tools/netplay/server/Dockerfile'
       - 'tools/netplay/server/Dockerfile.dockerignore'

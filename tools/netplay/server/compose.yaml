@@ -40,9 +40,14 @@ services:
     image: coturn/coturn:4.6.3
     network_mode: host
     restart: unless-stopped
+    # Only the signalling server's credentials (turn_credentials.hpp), each for a while: use-auth-secret,
+    # with the secret in a config file only coturn can read, not on its command line (which every user of
+    # the machine can see). TURN_TEST_ARGS is for test.sh (compose.test.yaml): empty here.
     environment:
       PUBLIC_IP: ${PUBLIC_IP:-}
       PUBLIC_HOST: ${PUBLIC_HOST:-}
+      TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
+      TURN_TEST_ARGS: ""
     entrypoint:
       - sh
       - -c
@@ -50,16 +55,20 @@ services:
         ip=$${PUBLIC_IP:-$$(getent ahostsv4 "$$PUBLIC_HOST" | awk 'NR == 1 { print $$1 }')}
         [ -n "$$ip" ] || { echo "set PUBLIC_IP in .env, or PUBLIC_HOST to a name that resolves" >&2; exit 1; }
         echo "public address $$ip"
-        exec turnserver "$$@" --external-ip="$$ip"
+        umask 077
+        config=$$(mktemp)
+        printf 'static-auth-secret=%s\n' "$$TURN_SECRET" > "$$config"
+        unset TURN_SECRET
+        # shellcheck disable=SC2086
+        exec turnserver -c "$$config" "$$@" --external-ip="$$ip" $$TURN_TEST_ARGS
       - sh
+    # No -n (it would skip the config file). use-auth-secret stays here: without the file's secret coturn
+    # then refuses everyone, rather than relaying for anyone.
     command:
-      - -n
       - --log-file=stdout
       - --listening-port=3478
       - --realm=${TURN_REALM:-conker}
-      # Only the signalling server's credentials (turn_credentials.hpp), each for a while.
       - --use-auth-secret
-      - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET in .env}
       - --min-port=49160
       - --max-port=49659
       - --fingerprint
@@ -67,18 +76,38 @@ services:
       - --no-tls
       - --no-dtls
       - --no-multicast-peers
+      # Relays over UDP only (the game's way): a TCP relay could be used to open connections anywhere.
+      - --no-tcp-relay
       # Inputs are small: a few KB/s each way per player. This is far more, and stops the relay being
-      # used for anything big.
+      # used for anything big. A player's credentials make a relay for each of its network interfaces and
+      # each other player: --user-quota of them at once, so one player can't take them all.
       - --max-bps=200000
       - --total-quota=${TURN_TOTAL_QUOTA:-400}
-      # Never relay into the server's own networks (a TURN server can otherwise be used to reach them).
+      - --user-quota=${TURN_USER_QUOTA:-32}
+      # Never relay into private, local or special networks (a TURN server can otherwise be used to reach
+      # them, cloud metadata at 169.254.169.254 among them), nor IPv6 ways back into IPv4 ones.
       - --denied-peer-ip=0.0.0.0-0.255.255.255
       - --denied-peer-ip=10.0.0.0-10.255.255.255
       - --denied-peer-ip=100.64.0.0-100.127.255.255
       - --denied-peer-ip=127.0.0.0-127.255.255.255
       - --denied-peer-ip=169.254.0.0-169.254.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.0.0.0-192.0.0.255
+      - --denied-peer-ip=192.0.2.0-192.0.2.255
+      - --denied-peer-ip=192.88.99.0-192.88.99.255
       - --denied-peer-ip=192.168.0.0-192.168.255.255
-      - --denied-peer-ip=::1
+      - --denied-peer-ip=198.18.0.0-198.19.255.255
+      - --denied-peer-ip=198.51.100.0-198.51.100.255
+      - --denied-peer-ip=203.0.113.0-203.0.113.255
+      - --denied-peer-ip=224.0.0.0-255.255.255.255
+      - --denied-peer-ip=::-::ffff
+      - --denied-peer-ip=::ffff:0.0.0.0-::ffff:255.255.255.255
+      - --denied-peer-ip=64:ff9b::-64:ff9b::ffff:ffff
+      - --denied-peer-ip=64:ff9b:1::-64:ff9b:1:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=100::-100::ffff:ffff:ffff:ffff
+      - --denied-peer-ip=2001::-2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=2001:db8::-2001:db8:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=2002::-2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff
       - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
       - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=ff00::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff

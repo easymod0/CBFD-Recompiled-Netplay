@@ -1,5 +1,6 @@
-# For test.sh only: everything on this machine, so the relay may reach private addresses (compose.yaml
-# denies them); the servers find their address by a made-up name (PUBLIC_HOST), as they would by DNS.
+# For test.sh only: everything on this machine. coturn runs with compose.yaml's own options, plus where to
+# listen and relay and leave to relay to this machine's address (allowed over the denied private ones);
+# the servers find their address by a made-up name (PUBLIC_HOST), as they would by DNS.
 services:
   signal:
     extra_hosts:
@@ -7,18 +8,5 @@ services:
   turn:
     extra_hosts:
       - "${PUBLIC_HOST}:${TEST_IP}"
-    command:
-      - -n
-      - --log-file=stdout
-      - --listening-port=3478
-      - --listening-ip=${TEST_IP}
-      - --relay-ip=${TEST_IP}
-      - --realm=conker
-      - --use-auth-secret
-      - --static-auth-secret=${TURN_SECRET}
-      - --min-port=49160
-      - --max-port=49659
-      - --fingerprint
-      - --no-cli
-      - --no-tls
-      - --no-dtls
+    environment:
+      TURN_TEST_ARGS: "--listening-ip=${TEST_IP} --relay-ip=${TEST_IP} --allowed-peer-ip=${TEST_IP}"

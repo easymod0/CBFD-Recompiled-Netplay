@@ -207,6 +207,18 @@ namespace conker::netplay {
         return process_id;
     }
 
+    bool new_id(std::string& error) {
+        uint64_t id = 0;
+        if (!random_key(id)) {
+            error = "couldn't make a new id (no random source)";
+            return false;
+        }
+        process_id = id;
+        const SteamNetworkingIdentity identity = identity_of(process_id);
+        SteamNetworkingSockets()->ResetIdentity(&identity);
+        return true;
+    }
+
     void shutdown() {
         GameNetworkingSockets_Kill();
     }
@@ -376,6 +388,7 @@ namespace conker::netplay {
                 Event event{ Event::Type::ended };
                 event.reason = Reason::timeout;
                 event.detail = why;
+                event.by_signalling = true;
                 events.push_back(std::move(event));
             }
         }
@@ -450,8 +463,8 @@ namespace conker::netplay {
             if (!SteamNetworkingSockets()->GetConnectionInfo(peer.connection, &info)) {
                 return "?";
             }
-            // Through ICE the library doesn't say where it sends.
-            if (info.m_addrRemote.IsIPv6AllZeros()) {
+            // Through ICE, not the address (the library gives the peer's own on a direct route: not for logs).
+            if (signaller != nullptr || info.m_addrRemote.IsIPv6AllZeros()) {
                 return info.m_szConnectionDescription;
             }
             char address[SteamNetworkingIPAddr::k_cchMaxString];
@@ -503,6 +516,7 @@ namespace conker::netplay {
                 // the time itself (the library's own connect timeout covers a way never found).
                 else if (Peer* peer = find(info->m_hConn); is_host && peer != nullptr) {
                     peer->connected_at = now();
+                    peer->up = true;
                 }
                 break;
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
@@ -562,7 +576,7 @@ namespace conker::netplay {
         // Joiners that never said Hello.
         const double t = now();
         for (size_t i = 0; i < peers.size();) {
-            if (is_host && peers[i].port < 0 && t - peers[i].connected_at > handshake_seconds) {
+            if (is_host && peers[i].port < 0 && peers[i].up && t - peers[i].connected_at > handshake_seconds) {
                 drop(peers[i], Reason::timeout, &events);
             }
             else {

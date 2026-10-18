@@ -53,7 +53,8 @@ namespace conker::netplay {
         Signaller& operator=(const Signaller&) = delete;
 
         // Connects to the signalling server at `server` ("host:port") and registers this process's id
-        // (the library must be started).
+        // (the library must be started). A name is looked up on a thread of its own, so this doesn't wait
+        // for it (poll goes on once it's found); false only for what isn't a server's name and port.
         bool connect(const std::string& server, std::string& error);
 
         // ready: the server has taken this process's id (Registered), so others can reach it.
@@ -97,9 +98,19 @@ namespace conker::netplay {
         void on_status_changed(const void* info);
         void fail(const std::string& why);
         void send_now(const signal::Packet& packet);
+        // Opens the connection to `address` (resolved).
+        void open(const std::string& address);
         friend void signaller_status_changed(void* info);
 
         uint32_t connection = 0;
+        // A name being looked up: its thread fills it in (and may outlive this, holding it).
+        struct Resolving {
+            std::mutex mutex;
+            bool done = false;
+            std::string address;
+            std::string error;
+        };
+        std::shared_ptr<Resolving> lookup_in_progress;
         State current_state = State::idle;
         bool registering = false;   // connected, Register sent, Registered not here yet
         std::string failure;

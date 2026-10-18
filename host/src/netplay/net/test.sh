@@ -162,7 +162,8 @@ raw silent 27203 --silent
 raw oversize 27209 --oversize
 
 # Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
-"$bin/netplay_server" --port 27220 > ice.server.txt 2>&1 &
+# (Every probe connects from the same address: more than the server lets one make in a burst.)
+"$bin/netplay_server" --port 27220 --connection-burst 1000 > ice.server.txt 2>&1 &
 server=$!
 room_of() {
     i=0
@@ -190,6 +191,19 @@ for f in ice.host.txt ice.join*.txt; do
     grep -v '^\[netplay\]' "$f"
 done
 if [ $ok -eq 1 ] && grep -q "P2P ICE" ice.join1.txt; then echo "ice: passed"; else echo "ice: FAILED"; failed=1; fi
+# A host that made a room and left, then hosts again from the same process (a new id: the server keeps the
+# old one from reuse).
+"$probe" host room --signal 127.0.0.1:27220 --direct 1 --reads 60 --again 1 > ice-again.host.txt 2>&1 &
+pids=$!
+room=$(room_of ice-again.host.txt)
+"$probe" join "$room" --signal 127.0.0.1:27220 --direct 1 --reads 60 > ice-again.join.txt 2>&1 &
+pids="$pids $!"
+ok=1
+for pid in $pids; do
+    wait "$pid" || ok=0
+done
+if [ $ok -eq 1 ] && grep -q "^left room" ice-again.host.txt; then echo "ice-again: passed"; else
+    echo "ice-again: FAILED"; cat ice-again.host.txt ice-again.join.txt; failed=1; fi
 # expect <name> <text> <probe options...>: the probe fails, saying <text>.
 expect() {
     name=$1; text=$2; shift 2
@@ -200,14 +214,17 @@ expect() {
 expect ice-closed "no room $room on the server" join "$room" --signal 127.0.0.1:27220 --direct 1
 # Relay-only, but this server has no relay.
 expect ice-norelay "offers no TURN relay" host room --signal 127.0.0.1:27220
-# Guessing codes: after 10 that aren't there (one above), the server closes the connection.
+# Guessing codes: after 10 that aren't there (one above; a slow machine's may be refilled, one each 6 s),
+# the server closes the connection.
 i=0
-while [ $i -lt 10 ]; do
-    "$probe" join "ZZZZ-ZZZ$i" --signal 127.0.0.1:27220 --direct 1 > "ice-guess$i.txt" 2>&1
+guessed=
+while [ $i -lt 20 ] && [ -z "$guessed" ]; do
+    "$probe" join "ZZZZ-ZZ$(printf '%02d' $i)" --signal 127.0.0.1:27220 --direct 1 > "ice-guess$i.txt" 2>&1
+    grep -q "too many room codes" "ice-guess$i.txt" && guessed=$i
     i=$((i + 1))
 done
-if grep -q "no room ZZZZ-ZZZ8" ice-guess8.txt && grep -q "too many room codes" ice-guess9.txt; then echo "ice-guess: passed"; else
-    echo "ice-guess: FAILED"; cat ice-guess8.txt ice-guess9.txt; failed=1; fi
+if [ -n "$guessed" ] && [ "$guessed" -ge 9 ] && grep -q "no room ZZZZ-ZZ00" ice-guess0.txt; then echo "ice-guess: passed (refused at $((guessed + 1)))"; else
+    echo "ice-guess: FAILED"; cat ice-guess0.txt "ice-guess$((i - 1)).txt"; failed=1; fi
 kill $server 2>/dev/null
 
 [ $failed -eq 0 ] && echo "all passed" || echo "FAILED"

@@ -2,6 +2,7 @@
 
 #include "signalling.hpp"
 
+#include <thread>
 #include <utility>
 
 #if defined(_WIN32)
@@ -100,10 +101,39 @@ namespace conker::netplay {
     }
 
     bool Signaller::connect(const std::string& server, std::string& error) {
-        const std::string address_text = resolve_address(server, error);
-        if (address_text.empty()) {
+        close();
+        failure.clear();
+        offered_turn.reset();
+        creating_room = false;
+        asked_room = created_room = 0;
+        room_lookup = Lookup::none;
+        const size_t colon = server.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 == server.size()) {
+            error = "\"" + server + "\" isn't a server's name and port";
             return false;
         }
+        current_state = State::connecting;
+        // A literal address at once; a name on a thread of its own (a slow or missing DNS server would
+        // hold the caller for many seconds).
+        SteamNetworkingIPAddr literal;
+        if (literal.ParseString(server.c_str()) && literal.m_port != 0) {
+            open(server);
+            return true;
+        }
+        auto lookup = std::make_shared<Resolving>();
+        lookup_in_progress = lookup;
+        std::thread([lookup, server] {
+            std::string error;
+            const std::string address = resolve_address(server, error);
+            std::lock_guard lock(lookup->mutex);
+            lookup->address = address;
+            lookup->error = error;
+            lookup->done = true;
+        }).detach();
+        return true;
+    }
+
+    void Signaller::open(const std::string& address_text) {
         SteamNetworkingIPAddr address;
         address.ParseString(address_text.c_str());
         SteamNetworkingConfigValue_t options[4];
@@ -113,16 +143,8 @@ namespace conker::netplay {
         options[3].SetInt32(k_ESteamNetworkingConfig_RecvBufferSize, 256 * (int32_t)signal::max_packet_size);
         connection = SteamNetworkingSockets()->ConnectByIPAddress(address, 4, options);
         if (connection == k_HSteamNetConnection_Invalid) {
-            error = "couldn't connect to the server";
-            return false;
+            fail("couldn't connect to the server");
         }
-        current_state = State::connecting;
-        failure.clear();
-        offered_turn.reset();
-        creating_room = false;
-        asked_room = created_room = 0;
-        room_lookup = Lookup::none;
-        return true;
     }
 
     void Signaller::fail(const std::string& why) {
@@ -166,6 +188,21 @@ namespace conker::netplay {
 
     void Signaller::poll() {
         ISteamNetworkingSockets* sockets = SteamNetworkingSockets();
+        if (lookup_in_progress) {
+            std::string address, error;
+            {
+                std::lock_guard lock(lookup_in_progress->mutex);
+                if (lookup_in_progress->done) {
+                    address = lookup_in_progress->address;
+                    error = lookup_in_progress->error;
+                }
+            }
+            if (!address.empty() || !error.empty()) {
+                lookup_in_progress.reset();
+                if (address.empty()) fail(error);
+                else open(address);
+            }
+        }
         sockets->RunCallbacks();
         if (current_state != State::ready && !registering) {
             return;
@@ -308,6 +345,7 @@ namespace conker::netplay {
     }
 
     void Signaller::close() {
+        lookup_in_progress.reset();
         if (connection != k_HSteamNetConnection_Invalid) {
             SteamNetworkingSockets()->CloseConnection(connection, 0, nullptr, true);
             connection = k_HSteamNetConnection_Invalid;

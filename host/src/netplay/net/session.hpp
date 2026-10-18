@@ -11,7 +11,7 @@
 // same. The host keeps its listen socket and its signaller for as long as the session lasts.
 //
 // The handshake: a joiner sends Hello (the match's key, then build, ROM, settings profile and mods
-// hashes) within 3 s. The host closes a wrong key at once, telling it nothing
+// hashes) within 3 s of its connection coming up. The host closes a wrong key at once, telling it nothing
 // else; then it refuses any other difference, or a full or started match, and otherwise gives it the
 // lowest free ports, one for each player on its machine (the Hello says how many; the host's players have
 // the first ports, from 0), with Welcome. Once every port is taken, the host starts the match
@@ -59,6 +59,8 @@ namespace conker::netplay {
         int rollback = 0;       // started: the reads every peer predicts ahead (0: off)
         Reason reason = Reason::quit;
         std::string detail;     // the library's account of a closed connection, for the log
+        bool by_signalling = false; // ended: the signalling server's word (the host isn't there, or the
+                                    // server's gone), and `detail` says it for the player
         Packet packet;
     };
 
@@ -72,6 +74,9 @@ namespace conker::netplay {
     void shutdown();
     // This process's id (never 0, once started).
     uint64_t local_id();
+    // Gives this process a new id (and the library that identity), closing every connection: for each new
+    // match through a signalling server, which doesn't give an id out again for an hour after it's left.
+    bool new_id(std::string& error);
 
     // How ICE connections find their way: the servers the library asks (STUN for this machine's public
     // address, TURN to relay), as "host:port" lists separated by commas (empty: none), and which ways are
@@ -134,8 +139,8 @@ namespace conker::netplay {
         // another machine's port): the host's to every joiner's ports; a joiner's to the host, on port 0 (it
         // can't tell which other ports are the host's, and the other joiners' pads come through the host).
         std::array<int, max_players> round_trips_by_port() const;
-        // How the connection to `port`'s machine goes, for the log: the address this end sends to (not known
-        // through ICE) and the library's description. A joiner's only peer is the host.
+        // How the connection to `port`'s machine goes, for the log: the address this end sends to (not through
+        // ICE, where it may be the peer's own) and the library's description. A joiner's only peer is the host.
         std::string route(int port) const;
         // Host: the joiners in (machines, not players: one may have several ports).
         int joiners() const;
@@ -171,7 +176,8 @@ namespace conker::netplay {
             uint32_t connection = 0;
             int port = -1;          // its first port; -1 until the handshake is done
             uint8_t ports = 0;      // all of them (bit n: port n)
-            double connected_at = 0;
+            double connected_at = 0;   // host: when its connection came up (Connected)
+            bool up = false;            // host: it has (the handshake time runs from then)
             int64_t last_hash = -1; // the read of the last Hash from it (one per read, in order)
         };
 

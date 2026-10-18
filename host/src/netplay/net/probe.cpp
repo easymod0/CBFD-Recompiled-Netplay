@@ -23,6 +23,8 @@
 //                        offers its TURN relay, if it has one)
 //     --direct 1         allow direct connections too, not only through the TURN relay
 //     --turn-password <p>  (a test) use the server's relay with this password instead of the one it gave
+//     --again 1          (a test, hosting a room) make a room and leave first, then host with a new id, as
+//                        the game does when a player tries again
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
@@ -157,6 +159,7 @@ int main(int argc, char** argv) {
     std::string signal_server;
     bool relay_only = true;
     std::string turn_password;
+    bool again = false;
     for (int i = 3; i + 1 < argc; i += 2) {
         const std::string option = argv[i];
         const char* value = argv[i + 1];
@@ -173,6 +176,7 @@ int main(int argc, char** argv) {
         else if (option == "--signal") signal_server = value;
         else if (option == "--direct") relay_only = std::atoi(value) == 0;
         else if (option == "--turn-password") turn_password = value;
+        else if (option == "--again") again = std::atoi(value) != 0;
         else return usage();
     }
     const bool oversize = !hosting && argc == 4 && std::strcmp(argv[3], "--oversize") == 0;
@@ -210,6 +214,20 @@ int main(int argc, char** argv) {
             }
             return done();
         };
+        if (again && hosting && !signal_server.empty()) {
+            if (!signaller.connect(signal_server, error) || !wait([&] { return signaller.state() == Signaller::State::ready; })) {
+                std::fprintf(stderr, "the first time: %s\n", signaller.error().c_str());
+            }
+            else {
+                signaller.create_room(1);
+                wait([&] { return signaller.room() != 0; });
+                std::printf("left room %s\n", encode_room_code(signaller.room()).c_str());
+            }
+            signaller.close();
+            if (!new_id(error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+            }
+        }
         if (signal_server.empty()) {
             started = hosting ? session.host((uint16_t)std::atoi(where.c_str()), players, me, error, local) : session.join(where, me, error);
         }

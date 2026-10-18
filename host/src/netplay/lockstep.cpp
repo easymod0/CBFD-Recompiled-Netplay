@@ -1184,7 +1184,11 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     netplay::Hello mine = me;
     mine.players = (uint8_t)local_option;
     if (host_room || netplay::decode_room_code(join_where)) {
-        // Through the server: the session starts once it's there (poll_connect).
+        // Through the server: the session starts once it's there (poll_connect). A new id each time (the
+        // last one's may still be on the server, or be kept from reuse there).
+        if (!netplay::new_id(error)) {
+            return false;
+        }
         signaller = new netplay::Signaller();
         if (server_option.empty() || !signaller->connect(server_option, error)) {
             error = server_option.empty() ? "no netplay server is set" : "couldn't reach the netplay server: " + error;
@@ -1293,7 +1297,8 @@ namespace {
             signaller->poll();
         }
         if (signaller->state() == Signaller::State::failed) {
-            return fail("Lost the netplay server: " + signaller->error() + ".");
+            return fail((rendezvous == Rendezvous::registering ? "Couldn't reach the netplay server: " : "Lost the netplay server: ") +
+                signaller->error() + ".");
         }
         if (now() - rendezvous_since > server_seconds) {
             return fail("The netplay server didn't answer.");
@@ -1414,7 +1419,8 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 break;
             case Event::Type::ended:
                 std::printf("[netplay] couldn't join: %s (%s)\n", netplay::describe(event.reason), event.detail.c_str());
-                status = std::string("Couldn't join: ") + netplay::describe(event.reason) + ".";
+                // Through the server, why it couldn't find the host says more than "timed out".
+                status = "Couldn't join: " + (event.by_signalling ? event.detail : std::string(netplay::describe(event.reason))) + ".";
                 // Full for this machine's players, not for one: fewer may fit.
                 if (event.reason == Reason::full && local_option > 1) {
                     status += " Fewer players on this computer may fit.";
