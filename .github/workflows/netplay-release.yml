@@ -4,7 +4,9 @@
 # are checked against it, so it stays upstream's); the run number tells this fork's builds apart.
 #
 # Before publishing, the Linux build must pass tools/netplay/check.sh (the same inputs give the same
-# game), so a build that would desync isn't released. The release is a draft until every package has
+# game), rollback.sh (matches that predict and go back, over a faked bad network, give the same game, and
+# on real time keep to it) and rollback-modes.sh (going back across every mode's changes), so a build that
+# would desync isn't released. The release is a draft until every package has
 # built; a failed or cancelled run deletes its draft. Its notes list the commits since the previous
 # release (.github/release/netplay-changes.sh).
 #
@@ -223,6 +225,27 @@ jobs:
 
       - name: Check the same inputs give the same game
         run: tools/netplay/check.sh --rom rom-src/baserom.us.z64 --out netplay-check
+
+      # Rollback (issue #22): about 4 minutes here; a runner has fewer cores than they were timed on, so the
+      # waits are longer.
+      - name: Check rollback in matches
+        run: tools/netplay/rollback.sh --rom rom-src/baserom.us.z64 --timeout 900 --out netplay-rollback
+
+      - name: Check rollback across every mode
+        run: tools/netplay/rollback-modes.sh --rom rom-src/baserom.us.z64 --timeout 900 --out netplay-rollback-modes
+
+      # A check that fails keeps its logs (hash logs, each copy's output, desync reports) with the run.
+      - name: Keep the checks' logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: netplay-checks-logs
+          path: |
+            netplay-check/
+            netplay-rollback/
+            netplay-rollback-modes/
+          retention-days: 14
+          if-no-files-found: ignore
 
       # The included mods, for every platform (a .nrm is the same file on all of them).
       - name: Build the mods
