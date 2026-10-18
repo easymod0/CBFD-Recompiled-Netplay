@@ -49,16 +49,23 @@ record must be **DNS only** (grey cloud): its proxy carries web traffic, not UDP
 To build the server from a clone of this repository instead:
 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`.
 
-Open in the firewall:
+Open in the firewall (all UDP: the game uses TURN over UDP only, and coturn relays nothing over TCP):
 
 | Port | What |
 |---|---|
 | UDP 27100 | signalling (`SIGNAL_PORT`) |
-| UDP and TCP 3478 | TURN |
+| UDP 3478 | TURN: players get their relays here |
 | UDP 49160-49659 | the relays themselves (one per player and network interface while they play) |
 
 Both containers use the host's network, as coturn's relay ports are a range that Docker's port mapping
 handles badly.
+
+**Hosting at home**, behind a router: forward those ports to the machine running the containers, at the
+same numbers (don't remap them), and give that machine a fixed address on your network (a DHCP
+reservation). `PUBLIC_HOST`'s record points at your home's public IP; if your provider changes it, update
+the record (a dynamic DNS updater can) and `docker compose restart`. Playing from the same network as the
+server reaches it through the public IP from inside, which needs the router's NAT loopback (hairpinning):
+if players outside can connect and you can't from home, that's why.
 
 `docker compose pull && docker compose up -d` updates them; `docker compose down` stops them.
 

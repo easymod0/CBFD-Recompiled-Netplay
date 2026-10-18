@@ -9,7 +9,8 @@
 #   docker compose -f compose.yaml -f compose.build.yaml up -d --build
 #
 # Both use the host's network: coturn relays on a range of UDP ports, which Docker's port mapping handles
-# badly. Open in the firewall: UDP 27100 (signalling), UDP and TCP 3478 (TURN), UDP 49160-49659 (relays).
+# badly. Open in the firewall (or forward, at home): UDP 27100 (signalling), UDP 3478 (TURN), UDP
+# 49160-49659 (relays).
 #
 # The relay has to tell players its public IP address (the TURN protocol carries an address, not a name).
 # Each container takes PUBLIC_IP if it's set, or else looks PUBLIC_HOST up as it starts: after the address
