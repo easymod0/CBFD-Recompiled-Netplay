@@ -158,8 +158,16 @@ and, at the read where they first differ, the memory itself:
 (its `CMakeLists.txt`). The game links it with `CONKER_NETPLAY`, for the lockstep (below).
 
 - **GameNetworkingSockets** (v1.6.1, downloaded while configuring): encrypted UDP connections, direct by
-  address. The host listens on a port; the others connect to it, and it passes their inputs on. Its
-  NAT traversal and relays (ICE) are off for now, so the host may have to forward the port.
+  address, or through its own ICE client. The host listens; the others connect to it, and it passes
+  their inputs on. Direct by address, the host may have to forward the port. Through ICE, the peers find
+  each other by id through a signalling server, and the library finds a way: directly through NAT, or
+  through a TURN relay. By default it's relay-only, so no peer is told another's address. The servers:
+  `tools/netplay/server/` (below).
+- **`signal_packets.cpp`, `signalling.cpp`**: signalling's own packets (Register, Signal, Unreachable,
+  Refused: versioned, each field checked, fuzzed with the others) and a peer's connection to the
+  signalling server. It passes the library's ICE signals between peer ids, and never sees the game's
+  packets. `netplay_server` (`signal_server.cpp`) is the server: one registration per connection, ids
+  not reused for an hour, limits per address and per second, and it logs counts only.
 - **`packets.cpp`**: every packet (Hello, Welcome, Refuse, Start, Inputs, Hash, Bye), fixed-size and
   versioned, each field checked; the only code that reads from the network. `packets_test.cpp` tests
   it and `fuzz_packets.cpp` fuzzes it.
@@ -183,9 +191,18 @@ and, at the read where they first differ, the memory itself:
 - **`netplay_probe`**: two or more copies play a made-up match (`host <port>`, which prints its join
   code for 127.0.0.1, `join <code>`, `--loss <percent>`) and check every pad arrived right; `--hostile`
   joiners must be dropped, `join --silent` checks a joiner that never says Hello is dropped and `join
-  --oversize` one that sends too big a message; `code <address:port> <key>` prints a code. `test.sh` runs
-  the tests and a few matches; `.github/workflows/netplay-transport.yml` runs them on Windows, Linux and
-  macOS (no ROM needed).
+  --oversize` one that sends too big a message; `code <address:port> <key>` prints a code. Through ICE:
+  `host ice --signal <server:port>` prints a ticket (its id and the key), `join <ticket> --signal ...`,
+  with `--turn`, `--turn-user`, `--turn-password`, `--stun` and `--direct 1`. `test.sh` runs
+  the tests and a few matches (also through ICE, directly); `tools/netplay/server/test.sh` plays
+  relay-only matches through the servers' Docker setup and checks no peer is told an address but the
+  relay's. `.github/workflows/netplay-transport.yml` runs them on Windows, Linux and macOS (the relay on
+  Linux; no ROM needed).
+
+## The servers
+
+`tools/netplay/server/`: the signalling server and coturn (the TURN relay) in one `docker compose`
+file, for anyone to host. See its README.
 
 ## Lockstep
 

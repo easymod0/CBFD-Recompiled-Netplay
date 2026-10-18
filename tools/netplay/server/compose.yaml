@@ -1,0 +1,53 @@
+# Netplay's servers: the signalling server (players find each other's way through it) and coturn (the
+# TURN relay, so players don't see each other's addresses). See README.md.
+#
+#   cp .env.example .env    # then set PUBLIC_IP and TURN_PASSWORD
+#   docker compose up -d --build
+#
+# Both use the host's network: coturn relays on a range of UDP ports, which Docker's port mapping handles
+# badly. Open in the firewall: UDP 27100 (signalling), UDP and TCP 3478 (TURN), UDP 49160-49659 (relays).
+
+services:
+  signal:
+    build:
+      context: ../../..
+      dockerfile: tools/netplay/server/Dockerfile
+    image: conker-netplay-server
+    network_mode: host
+    restart: unless-stopped
+    command: ["--port", "${SIGNAL_PORT:-27100}", "--max-per-address", "${MAX_PER_ADDRESS:-8}"]
+
+  turn:
+    image: coturn/coturn:4.6.3
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --external-ip=${PUBLIC_IP:?set PUBLIC_IP in .env}
+      - --realm=${TURN_REALM:-conker}
+      - --lt-cred-mech
+      - --user=${TURN_USER:-conker}:${TURN_PASSWORD:?set TURN_PASSWORD in .env}
+      - --min-port=49160
+      - --max-port=49659
+      - --fingerprint
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --no-multicast-peers
+      # Inputs are small: a few KB/s each way per player. This is far more, and stops the relay being
+      # used for anything big.
+      - --max-bps=200000
+      - --total-quota=${TURN_TOTAL_QUOTA:-400}
+      # Never relay into the server's own networks (a TURN server can otherwise be used to reach them).
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff

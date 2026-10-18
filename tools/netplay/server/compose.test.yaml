@@ -1,0 +1,19 @@
+# For test.sh only: everything on this machine, so the relay may reach private addresses (compose.yaml
+# denies them).
+services:
+  turn:
+    command:
+      - -n
+      - --log-file=stdout
+      - --listening-port=3478
+      - --listening-ip=${PUBLIC_IP}
+      - --relay-ip=${PUBLIC_IP}
+      - --realm=conker
+      - --lt-cred-mech
+      - --user=${TURN_USER:-conker}:${TURN_PASSWORD}
+      - --min-port=49160
+      - --max-port=49659
+      - --fingerprint
+      - --no-cli
+      - --no-tls
+      - --no-dtls

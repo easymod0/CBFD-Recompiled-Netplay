@@ -1,0 +1,22 @@
+# The signalling server (netplay_server, host/src/netplay/net/signal_server.cpp), built from the netplay
+# transport's folder. The context is the repository; Dockerfile.dockerignore leaves out all but that folder.
+#
+#   docker build -f tools/netplay/server/Dockerfile -t conker-netplay-server .
+
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake ninja-build g++ git ca-certificates libprotobuf-dev protobuf-compiler libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY host/src/netplay/net /src
+RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /build --target netplay_server signal_packets_test \
+    && /build/signal_packets_test
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32 libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /build/netplay_server /usr/local/bin/netplay_server
+USER nobody
+EXPOSE 27100/udp
+ENTRYPOINT ["netplay_server"]
+CMD ["--port", "27100"]

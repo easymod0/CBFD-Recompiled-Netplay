@@ -5,7 +5,9 @@
 # also lossy; a joiner with more players than ports left, which must be refused), joiners with another match's key, another ROM or
 # other mods, which must be refused, joiners sending Inputs early or far ahead or a Hash twice, which
 # must be dropped, as must one sending Inputs for a port that isn't its own, one that never says Hello, which must be dropped too, and one sending a message bigger
-# than any packet, which the library must close.
+# than any packet, which the library must close. Then matches through ICE, by the signalling server
+# netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh), and a
+# joiner whose host isn't on the server.
 #   sh host/src/netplay/net/test.sh <build folder>
 set -u
 bin=$1
@@ -14,6 +16,7 @@ failed=0
 
 "$bin/packets_test" || failed=1
 "$bin/join_code_test" || failed=1
+"$bin/signal_packets_test" || failed=1
 
 # The join code a host printed in <file> (its key is random), once it has.
 code_of() {
@@ -155,6 +158,41 @@ raw() {
 }
 raw silent 27203 --silent
 raw oversize 27209 --oversize
+
+# Through ICE: the server, then a host and two joiners by its ticket (its id and the key), lossy.
+"$bin/netplay_server" --port 27220 > ice.server.txt 2>&1 &
+server=$!
+ticket_of() {
+    i=0
+    while [ $i -lt 100 ]; do
+        ticket=$(sed -n 's/^ticket //p' "$1")
+        [ -n "$ticket" ] && { echo "$ticket"; return; }
+        sleep 0.1
+        i=$((i + 1))
+    done
+}
+"$probe" host ice --players 3 --signal 127.0.0.1:27220 --direct 1 --reads 150 --loss 20 > ice.host.txt 2>&1 &
+pids=$!
+ticket=$(ticket_of ice.host.txt)
+for i in 1 2; do
+    "$probe" join "$ticket" --signal 127.0.0.1:27220 --direct 1 --reads 150 --loss 20 > "ice.join$i.txt" 2>&1 &
+    pids="$pids $!"
+    sleep 0.5
+done
+ok=1
+for pid in $pids; do
+    wait "$pid" || ok=0
+done
+for f in ice.host.txt ice.join*.txt; do
+    echo "-- $f"
+    grep -v '^\[netplay\]' "$f"
+done
+if [ $ok -eq 1 ] && grep -q "P2P ICE" ice.join1.txt; then echo "ice: passed"; else echo "ice: FAILED"; failed=1; fi
+# A host nobody registered: the joiner hears so at once.
+"$probe" join 0123456789abcdef-0123456789abcdef --signal 127.0.0.1:27220 --direct 1 > ice-nohost.join.txt 2>&1
+if grep -q "the host isn't on the signalling server" ice-nohost.join.txt; then echo "ice-nohost: passed"; else
+    echo "ice-nohost: FAILED"; cat ice-nohost.join.txt; failed=1; fi
+kill $server 2>/dev/null
 
 [ $failed -eq 0 ] && echo "all passed" || echo "FAILED"
 exit $failed
