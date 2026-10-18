@@ -270,8 +270,12 @@ pads=couch-12.pads start couch-host2 --netplay-host 27314 --netplay-address 127.
 pads=couch-3.pads start couch-join1 --netplay-join "$(code_of couch-host2)"
 if finish "was the last: quitting" couch-host2 couch-join1; then
     grep -q "this is ports 1 and 2" "$OUT/couch-host2.out" || { echo "  couch-host2 isn't on ports 1 and 2"; failed=1; }
-    # The automatic delay counts the joining machine's round trip (one, on loopback: 0), not its players.
-    grep -q "this is ports 1 and 2, input delay 0" "$OUT/couch-host2.out" || { echo "  couch-host2's automatic input delay isn't 0"; failed=1; }
+    # The automatic delay counts the joining machine's round trip (one, on loopback: 0), not its players
+    # (unless --match-options fakes a slower network).
+    case " $MATCH_OPTIONS " in
+        *" --netplay-fake-network "*) ;;
+        *) grep -q "this is ports 1 and 2, input delay 0" "$OUT/couch-host2.out" || { echo "  couch-host2's automatic input delay isn't 0"; failed=1; } ;;
+    esac
     for name in couch-host2 couch-join1; do
         same $name couch-solo12 "$MOUSE_READS" || failed=1
     done
