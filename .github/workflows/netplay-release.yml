@@ -29,6 +29,16 @@ concurrency:
 env:
   GH_TOKEN: ${{ github.token }}
   GIT_TERMINAL_PROMPT: '0'
+  # ccache keeps the game's compiled objects between runs, so a push only recompiles what it
+  # changed (RT64, RmlUi and most of RecompiledFuncs rarely do). Cached like vcpkg's folder below:
+  # each run saves under its own key and the next restores the newest.
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
+  # For the game's configure (build.sh and build.cmd pass them on). Precompiled headers are off
+  # because ccache can't cache what's compiled with one (RmlUi uses one).
+  CCACHE_CMAKE_ARGS: >-
+    -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
 
 jobs:
   prepare:
@@ -88,6 +98,23 @@ jobs:
           # No dash at the end, so this also finds a cache saved under the plain key.
           restore-keys: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}
 
+      - name: Restore ccache's cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: ccache-windows-${{ github.run_id }}
+          restore-keys: ccache-windows-
+
+      # ccache 4.6 or later caches MSVC's compiles; the runner has none.
+      - name: Install ccache
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 -o ccache.zip https://github.com/ccache/ccache/releases/download/v4.14.1/ccache-4.14.1-windows-x86_64.zip
+          echo "6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4  ccache.zip" | sha256sum -c -
+          unzip -q -j ccache.zip '*/ccache.exe' -d ccache-bin
+          rm ccache.zip
+          echo "$GITHUB_WORKSPACE\\ccache-bin" >> "$GITHUB_PATH"
+
       - name: Get the ROM
         shell: bash
         env:
@@ -95,13 +122,17 @@ jobs:
           ROM_REPO_TOKEN: ${{ secrets.ROM_REPO_TOKEN }}
         run: git clone -q --depth 1 "https://x-access-token:$ROM_REPO_TOKEN@github.com/$ROM_REPO.git" rom-src
 
+      # The debug information goes in each object (/Z7) rather than a shared PDB (/Zi), which
+      # ccache can't cache.
       - name: Build
         shell: cmd
         run: |
           mkdir vcpkg-cache 2>nul
           set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
-          set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON
-          build.cmd rom-src\baserom.us.z64
+          set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON %CCACHE_CMAKE_ARGS% -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+          ccache -z
+          build.cmd rom-src\baserom.us.z64 || exit /b 1
+          ccache -s
 
       # Saved right after the build rather than at the end of the job, so a later step failing
       # doesn't throw away the protobuf build. Also after a failed build: whatever vcpkg finished is
@@ -112,6 +143,13 @@ jobs:
         with:
           path: vcpkg-cache
           key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
+
+      - name: Save ccache's cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ccache-windows-${{ github.run_id }}
 
       - name: Package
         shell: pwsh
@@ -151,13 +189,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y git python3 cmake ninja-build clang lld pkg-config libsdl2-dev libdbus-1-dev \
-            libfreetype-dev libprotobuf-dev protobuf-compiler libssl-dev
+            libfreetype-dev libprotobuf-dev protobuf-compiler libssl-dev ccache
+
+      - name: Restore ccache's cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.run_id }}
+          restore-keys: ccache-linux-
 
       # protobuf linked into the program: distributions ship different protobuf versions.
       - name: Build
         env:
-          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON -DProtobuf_USE_STATIC_LIBS=ON
-        run: ./build.sh rom-src/baserom.us.z64 < /dev/null
+          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON -DProtobuf_USE_STATIC_LIBS=ON ${{ env.CCACHE_CMAKE_ARGS }}
+        run: |
+          ccache -z
+          ./build.sh rom-src/baserom.us.z64 < /dev/null
+          ccache -s
+
+      - name: Save ccache's cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.run_id }}
 
       - name: Check the same inputs give the same game
         run: tools/netplay/check.sh --rom rom-src/baserom.us.z64 --out netplay-check
@@ -209,13 +264,33 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install cmake ninja pkg-config sdl2 freetype dylibbundler protobuf openssl@3
+          brew install cmake ninja pkg-config sdl2 freetype dylibbundler protobuf openssl@3 ccache
           xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
 
+      - name: Restore ccache's cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: ccache-macos-${{ github.run_id }}
+          restore-keys: ccache-macos-
+
+      # RT64 and the game have Objective-C(++) parts on macOS.
       - name: Build
         env:
-          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON
-        run: ./build.sh rom-src/baserom.us.z64 < /dev/null
+          CONKER_CMAKE_ARGS: >-
+            -DCONKER_NETPLAY=ON ${{ env.CCACHE_CMAKE_ARGS }}
+            -DCMAKE_OBJC_COMPILER_LAUNCHER=ccache -DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache
+        run: |
+          ccache -z
+          ./build.sh rom-src/baserom.us.z64 < /dev/null
+          ccache -s
+
+      - name: Save ccache's cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ccache-macos-${{ github.run_id }}
 
       - name: Package
         run: |
