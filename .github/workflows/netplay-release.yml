@@ -131,7 +131,8 @@ jobs:
           set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
           set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON %CCACHE_CMAKE_ARGS% -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
           ccache -z
-          build.cmd rom-src\baserom.us.z64 || exit /b 1
+          rem Without call, cmd doesn't come back from build.cmd.
+          call build.cmd rom-src\baserom.us.z64 || exit /b 1
           ccache -s
 
       # Saved right after the build rather than at the end of the job, so a later step failing
