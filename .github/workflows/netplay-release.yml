@@ -5,7 +5,8 @@
 #
 # Before publishing, the Linux build must pass tools/netplay/check.sh (the same inputs give the same
 # game), so a build that would desync isn't released. The release is a draft until every package has
-# built; a failed or cancelled run deletes its draft.
+# built; a failed or cancelled run deletes its draft. Its notes list the commits since the previous
+# release (.github/release/netplay-changes.sh).
 #
 # Like release.yml it reads the ROM from the private repository in the ROM_REPO and ROM_REPO_TOKEN
 # secrets (setup in release.yml), has no pull request trigger, and runs only in this fork: upstream
@@ -314,6 +315,19 @@ jobs:
       - name: Publish the release
         run: |
           tag="${{ needs.prepare.outputs.tag }}"
+          # The history without the files (enough for the log; the commit fetched too, should main have moved on
+          # since), and the release before this one: the latest published whose commit this one comes from.
+          git clone -q --filter=blob:none --no-checkout "https://github.com/$GITHUB_REPOSITORY" src
+          git -C src fetch -q origin "$GITHUB_SHA"
+          git -C src checkout -q "$GITHUB_SHA"
+          previous=
+          for candidate in $(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 100 --json tagName,publishedAt \
+              --jq 'sort_by(.publishedAt) | reverse | .[].tagName' | grep -- '-netplay\.' | grep -vxF "$tag"); do
+            if git -C src merge-base --is-ancestor "$candidate" "$GITHUB_SHA" 2>/dev/null; then
+              previous=$candidate
+              break
+            fi
+          done
           {
             echo "Built from $GITHUB_SHA ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)."
             echo
@@ -321,6 +335,8 @@ jobs:
             echo "pick it in the launcher the first time. Everyone in a match must use the same release."
             echo
             echo "macOS: builds, but netplay on macOS hasn't been played yet."
+            echo
+            sh src/.github/release/netplay-changes.sh src "$previous" "$GITHUB_SHA" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           } > notes.md
           gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest --notes-file notes.md
 
