@@ -9,9 +9,14 @@ name: netplay-server
 on:
   push:
     branches: ['**']
+    # Only what goes into the image: the server, its packets, how they're built.
     paths:
-      - 'host/src/netplay/net/**'
-      - 'tools/netplay/server/**'
+      - 'host/src/netplay/net/signal_server.cpp'
+      - 'host/src/netplay/net/signal_packets.*'
+      - 'host/src/netplay/net/signal_packets_test.cpp'
+      - 'host/src/netplay/net/CMakeLists.txt'
+      - 'tools/netplay/server/Dockerfile'
+      - 'tools/netplay/server/Dockerfile.dockerignore'
       - '.github/workflows/netplay-server.yml'
   workflow_dispatch:
 
