@@ -6,8 +6,9 @@
 # prints, as Markdown, the commits in <repo> from <previous tag> to <commit>, newest first, without merges:
 # the game's changes, then the release builds' own ("Fork releases: ..."), each linked, and a link to the
 # full comparison. A subject is shown as written, but "#<number>" (often upstream's issues, which GitHub
-# would link to this fork's), "@<name>" (a mention) and "<" (a tag) don't become links, mentions or tags. With no previous tag (the first release), or one that isn't an ancestor of <commit> (main
-# was rewritten), it says so instead of listing.
+# would link to this fork's), "@<name>" (a mention) and "<" (a tag) don't become links, mentions or tags.
+# With no previous tag (the first release), or one that isn't an ancestor of <commit> (the branch was
+# rewritten), it says so instead of listing.
 set -eu
 repo=$1
 previous=$2

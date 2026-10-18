@@ -1,4 +1,4 @@
-# This fork's releases (CBFD-Recompiled-Netplay): every push to main builds Windows, Linux and macOS
+# This fork's releases (CBFD-Recompiled-Netplay): every push to netplay builds Windows, Linux and macOS
 # packages with netplay on (CONKER_NETPLAY=ON) and publishes them as a release tagged
 # v<version>-netplay.<run>, e.g. v0.1.6-netplay.12. The version is the one in host/src/main.cpp (mods
 # are checked against it, so it stays upstream's); the run number tells this fork's builds apart.
@@ -11,11 +11,16 @@
 # Like release.yml it reads the ROM from the private repository in the ROM_REPO and ROM_REPO_TOKEN
 # secrets (setup in release.yml), has no pull request trigger, and runs only in this fork: upstream
 # keeps its own release.yml, and this file is never part of a pull request to it.
+#
+# The fork's branches: main mirrors upstream's main (never committed to; only synced), each change for upstream
+# has a branch of its own off it (its pull request's), and netplay, the fork's default branch, is upstream's main
+# plus this workflow plus the changes merged in before upstream takes them: what players get. Upstream's main is
+# merged into netplay as it moves on.
 name: netplay-release
 
 on:
   push:
-    branches: [main]
+    branches: [netplay]
     paths-ignore: ['**.md']
   workflow_dispatch:
 
@@ -315,7 +320,7 @@ jobs:
       - name: Publish the release
         run: |
           tag="${{ needs.prepare.outputs.tag }}"
-          # The history without the files (enough for the log; the commit fetched too, should main have moved on
+          # The history without the files (enough for the log; the commit fetched too, should netplay have moved on
           # since), and the release before this one: the latest published whose commit this one comes from.
           git clone -q --filter=blob:none --no-checkout "https://github.com/$GITHUB_REPOSITORY" src
           git -C src fetch -q origin "$GITHUB_SHA"
