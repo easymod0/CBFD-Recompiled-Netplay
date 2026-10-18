@@ -14,9 +14,10 @@ mkdir -p "$out" && cd "$out" || exit 1
 failed=0
 
 # This machine's address on its network: coturn can't relay on loopback (the library refuses it).
-PUBLIC_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
-export PUBLIC_IP TURN_SECRET=test-only-secret-0123456789
-[ -n "$PUBLIC_IP" ] || { echo "no network address"; exit 1; }
+# The servers look it up by name (PUBLIC_HOST; compose.test.yaml maps it), as they would a real one.
+TEST_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+export TEST_IP PUBLIC_HOST=netplay-test.invalid PUBLIC_IP= TURN_SECRET=test-only-secret-0123456789
+[ -n "$TEST_IP" ] || { echo "no network address"; exit 1; }
 compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/compose.build.yaml -f $here/compose.test.yaml"
 $compose up -d --build --wait > compose.txt 2>&1 || { cat compose.txt; echo "the servers didn't start"; exit 1; }
 sleep 1
@@ -74,6 +75,9 @@ if ! "$probe" join "$room" --reads 60 $ice --turn-password not-the-servers > bad
 kill $host 2>/dev/null
 
 $compose logs > servers.txt 2>&1
+# Both looked the name up.
+if [ "$(grep -c "public address $TEST_IP\$" servers.txt)" = 2 ]; then echo "public-host: passed"; else
+    echo "public-host: FAILED"; failed=1; fi
 $compose down > /dev/null 2>&1
 [ $failed -eq 0 ] && echo "all passed" || echo "FAILED"
 exit $failed

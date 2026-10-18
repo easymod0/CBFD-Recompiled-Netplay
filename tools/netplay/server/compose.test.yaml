@@ -1,13 +1,18 @@
 # For test.sh only: everything on this machine, so the relay may reach private addresses (compose.yaml
-# denies them).
+# denies them); the servers find their address by a made-up name (PUBLIC_HOST), as they would by DNS.
 services:
+  signal:
+    extra_hosts:
+      - "${PUBLIC_HOST}:${TEST_IP}"
   turn:
+    extra_hosts:
+      - "${PUBLIC_HOST}:${TEST_IP}"
     command:
       - -n
       - --log-file=stdout
       - --listening-port=3478
-      - --listening-ip=${PUBLIC_IP}
-      - --relay-ip=${PUBLIC_IP}
+      - --listening-ip=${TEST_IP}
+      - --relay-ip=${TEST_IP}
       - --realm=conker
       - --use-auth-secret
       - --static-auth-secret=${TURN_SECRET}

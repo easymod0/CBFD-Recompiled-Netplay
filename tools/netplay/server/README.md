@@ -25,10 +25,17 @@ from this folder: the server's image is published to GitHub's container registry
 mkdir conker-netplay && cd conker-netplay
 curl -fsSLO https://raw.githubusercontent.com/easymod0/CBFD-Recompiled-Netplay/netplay/tools/netplay/server/compose.yaml
 curl -fsSL https://raw.githubusercontent.com/easymod0/CBFD-Recompiled-Netplay/netplay/tools/netplay/server/.env.example -o .env
-nano .env                 # set PUBLIC_IP, and TURN_SECRET (openssl rand -hex 24)
+nano .env                 # set PUBLIC_HOST (or PUBLIC_IP), and TURN_SECRET (openssl rand -hex 24)
 docker compose up -d
 docker compose logs -f
 ```
+
+**The server's address.** Players connect by name (`PUBLIC_HOST`, e.g. `conker.example.org`; the game's
+Server setting is `conker.example.org:27100`), but the relay has to tell them its IP address: the TURN
+protocol carries an address, not a name. So each container looks `PUBLIC_HOST` up as it starts, unless
+`PUBLIC_IP` is set, which it uses instead (for a name that doesn't point here, or none). If the address
+changes (a home connection), update the DNS record, then `docker compose restart`. Behind Cloudflare, the
+record must be **DNS only** (grey cloud): its proxy carries web traffic, not UDP.
 
 To build the server from a clone of this repository instead:
 `docker compose -f compose.yaml -f compose.build.yaml up -d --build`.
