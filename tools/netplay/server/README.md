@@ -60,12 +60,28 @@ Open in the firewall (all UDP: the game uses TURN over UDP only, and coturn rela
 Both containers use the host's network, as coturn's relay ports are a range that Docker's port mapping
 handles badly.
 
-**Hosting at home**, behind a router: forward those ports to the machine running the containers, at the
-same numbers (don't remap them), and give that machine a fixed address on your network (a DHCP
-reservation). `PUBLIC_HOST`'s record points at your home's public IP; if your provider changes it, update
-the record (a dynamic DNS updater can) and `docker compose restart`. Playing from the same network as the
-server reaches it through the public IP from inside, which needs the router's NAT loopback (hairpinning):
-if players outside can connect and you can't from home, that's why.
+**Hosting behind NAT** (at home behind a router, or a cloud machine whose public address isn't on its
+own network interface, as on AWS or Google Cloud): add to `.env`
+
+```sh
+COMPOSE_PROFILES=home
+HOME_LAN_IP=192.168.1.50      # this machine's address on its network
+```
+
+and forward the ports above to that address, at the same numbers (don't remap them); give the machine a
+fixed address (a DHCP reservation). Why: every relay-only match has both players' relays on this server,
+and relay to relay goes to the public address. Behind NAT, coturn would relay between its LAN addresses
+instead, and the players wouldn't recognise each other's traffic. So `home-net`, a small extra container
+(with network-admin rights, on this machine's network), puts the public address on this machine (on `lo`)
+for the relays, translates between it and `HOME_LAN_IP` for traffic through the router, and lets coturn
+relay to this machine only on the relay ports, never its other services. Its rules are an nftables table
+of their own (`conker_netplay`), and both they and the address go when it stops. Needs Linux with
+nftables, and rootful Docker.
+
+`PUBLIC_HOST`'s record points at your public IP; if your provider changes it, update the record (a
+dynamic DNS updater can) and `docker compose restart`. Playing from the same network as the server reaches
+it through the public IP from inside, which needs the router's NAT loopback (hairpinning); and nobody can
+play on the server machine itself (its relays may only reach their own ports there).
 
 `docker compose pull && docker compose up -d` updates them; `docker compose down` stops them.
 
