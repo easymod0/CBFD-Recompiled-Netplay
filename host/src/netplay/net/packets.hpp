@@ -18,7 +18,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 14;
+    constexpr uint16_t protocol_version = 15;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -113,13 +113,16 @@ namespace conker::netplay {
         Reason reason = Reason::protocol;
         bool operator==(const Refuse&) const = default;
     };
-    // One port's pads and movement for reads first_read to first_read + count - 1.
+    // One port's pads and movement for reads first_read to first_read + count - 1, and for time sync (rollback),
+    // how many reads the sender's game was past each port's latest input it had as it sent them (`gaps`: its own
+    // ports 0, -128 to 127).
     struct Inputs {
         uint8_t port = 0;
         uint32_t first_read = 0;
         uint8_t count = 0;
         std::array<Pad, input_window> pads{};   // the first `count` are used, the rest are zero
         std::array<Motion, input_window> motions{};
+        std::array<int8_t, max_players> gaps{};
         bool operator==(const Inputs&) const = default;
     };
     // The game's memory in regions of this size for the desync check: a Hash names the regions, so a desync
