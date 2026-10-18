@@ -46,6 +46,7 @@ namespace conker::netplay {
         bool own_view = false;  // started: the host's rule that every player sees only their own view
         int delay = 0;          // started: the match's input delay
         uint8_t pairs = 0;      // started: the ports shown two to a window (each machine with two players')
+        int rollback = 0;       // started: the reads every peer predicts ahead (0: off)
         Reason reason = Reason::quit;
         std::string detail;     // the library's account of a closed connection, for the log
         Packet packet;
@@ -92,8 +93,8 @@ namespace conker::netplay {
         bool join(const std::string& code, const Hello& me, std::string& error);
         // Host: once every port is taken (false until then), starts the match: tells the joiners, and
         // refuses any more. `own_view`: every player sees only their own view (the match's rule); `delay`:
-        // the input delay everyone uses.
-        bool start(bool own_view = false, int delay = 2);
+        // the input delay everyone uses; `rollback`: the reads every peer predicts ahead (0: off).
+        bool start(bool own_view = false, int delay = 2, int rollback = 0);
         // Host: the round trip to each joiner, in milliseconds, as the library measures it (none it doesn't
         // know yet), for choosing the input delay.
         std::vector<int> round_trips_ms() const;

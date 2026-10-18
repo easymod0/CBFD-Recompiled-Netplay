@@ -18,7 +18,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 13;
+    constexpr uint16_t protocol_version = 14;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -28,6 +28,8 @@ namespace conker::netplay {
     constexpr size_t max_packet_size = 288;
     // The most reads a peer's own pads are sent ahead of the game (the input delay).
     constexpr int max_delay = 8;
+    // The most reads a peer predicts ahead with rollback (Start).
+    constexpr int max_rollback = 12;
 
     // One controller read of one pad, as the N64 gives it to the game (the harness's 5 bytes).
     struct Pad {
@@ -135,12 +137,14 @@ namespace conker::netplay {
     // Host to everyone, once every port is taken: the match starts, with this many players, whether every
     // player sees only their own view of the split screen (the host's rule for the match: 1) or each chooses
     // (0), the input delay everyone uses (0 to max_delay), and the ports whose views are shown two to a window
-    // (bit n: port n; the ports of each machine with two players), which the culls go by in "my view only".
+    // (bit n: port n; the ports of each machine with two players), which the culls go by in "my view only", and
+    // how many reads every peer predicts the others' inputs ahead (rollback: 0, off, to max_rollback).
     struct Start {
         uint8_t players = 0;
         uint8_t own_view = 0;
         uint8_t delay = 0;
         uint8_t pairs = 0;
+        uint8_t rollback = 0;
         bool operator==(const Start&) const = default;
     };
     // Leaving, and why.

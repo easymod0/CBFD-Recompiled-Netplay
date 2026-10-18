@@ -14,8 +14,8 @@
 //              2^32 - 1
 //   5 Hash     u32 read, u64 hash, 128 u16 region hashes                             273 bytes
 //   6 Bye      u8 reason                                                               6 bytes
-//   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs  9 bytes
-//              (ports below players, an even number of them)
+//   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs 10 bytes
+//              (ports below players, an even number of them), u8 rollback (0 to 12)
 //   8 Gone     u8 port (1 to 3: never the host's 0), u32 from read,                    11 bytes
 //              u8 silent (0 or 1: stopped answering)
 //   9 Delay    u8 delay (0 to 8), u32 from read                                        10 bytes
@@ -41,7 +41,7 @@ namespace conker::netplay {
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size);
                 case hash: return header_size + 12 + 2 * memory_regions;
                 case bye: return header_size + 1;
-                case start: return header_size + 4;
+                case start: return header_size + 5;
                 case gone: return header_size + 6;
                 case delay: return header_size + 5;
             }
@@ -92,7 +92,7 @@ namespace conker::netplay {
         }
         bool valid_fields(const Start& p) {
             return p.players >= 2 && p.players <= max_players && p.own_view <= 1 && p.delay <= max_delay &&
-                (p.pairs >> p.players) == 0 && std::popcount(p.pairs) % 2 == 0;
+                (p.pairs >> p.players) == 0 && std::popcount(p.pairs) % 2 == 0 && p.rollback <= max_rollback;
         }
 
         bool valid_packet(const Packet& packet) {
@@ -207,6 +207,7 @@ namespace conker::netplay {
                 w.u8(p.own_view);
                 w.u8(p.delay);
                 w.u8(p.pairs);
+                w.u8(p.rollback);
             }
         }, packet);
         return (size_t)(w.at - out.data());
@@ -287,6 +288,7 @@ namespace conker::netplay {
                     p.own_view = r.u8();
                     p.delay = r.u8();
                     p.pairs = r.u8();
+                    p.rollback = r.u8();
                     packet = p;
                 }
                 break;

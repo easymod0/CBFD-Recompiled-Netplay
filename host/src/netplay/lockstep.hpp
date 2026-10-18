@@ -34,6 +34,12 @@
 //                                and lag-at=<read>:<ms> (the lag changes), separated by commas. It only makes
 //                                this player's own match worse, so it's in every build, like the above
 //   --netplay-stall-at <read>:<ms>  (a test) the game stops at that read for that long, as on a hitch
+//   --rollback <reads>           (hosting; issue #22) instead of waiting for the others' inputs, every peer
+//                                predicts them (each player's last) up to <reads> reads ahead of the last read
+//                                it has them all for, 0 (the default: they wait) to 12; when one comes that
+//                                isn't what it predicted, the harness goes back to before that read and plays
+//                                on again from there, unpaced, unseen and unheard. The match's, the same for
+//                                everyone: the joiners get it with Start (a joiner can't choose its own)
 //
 // A joiner's machine that leaves (or stops answering) leaves the others playing: the host tells them from which
 // read its ports get no input (Gone), and every machine gives them an idle pad from there. The host leaving
@@ -73,7 +79,8 @@ namespace conker::lockstep {
     bool active();
     // The same as the options, from the menu (frontend's netplay.cpp).
     // `input_delay`: reads, or -1 for auto; `local`: the players on this machine (fewer than `players`).
-    void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1);
+    // `rollback`: the reads every peer predicts ahead (--rollback's), 0 (off) to 12.
+    void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     void set_join(const std::string& where, int local = 1);
     // Checks the options, before the game starts (false: a message was printed).
     bool prepare();
@@ -141,6 +148,16 @@ namespace conker::lockstep {
     // game can't go on.
     bool on_read(uint64_t read, ultramodern::input::Pad* pads, netplay::Motion* motions, const InputSource& source,
         const Memory& memory, uint8_t* rdram);
+    // Rollback (--rollback): its window (0: off); the earliest read the game was given another input than has
+    // come since, for the harness to go back to before (UINT64_MAX: none), as it's taken; and how many reads
+    // from the first are known and were given as they were (the hash of a read up to there is right). A read
+    // the game makes again after going back is given the inputs as they're known then, with nothing sent or
+    // waited for.
+    int rollback_window();
+    uint64_t take_rollback();
+    uint64_t verified_reads();
+    // A replay's last read (the harness's): each input before it is waited for near it, so it ends right.
+    void set_last_read(uint64_t read);
     // How the match goes, for the player to see (netplay/status.cpp draws it), from any thread: lockstep
     // keeps it as the game thread goes, which may be stuck at a read waiting for the others.
     struct Status {
