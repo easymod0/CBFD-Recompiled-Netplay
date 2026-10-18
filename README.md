@@ -65,6 +65,8 @@ yourself instead, read on.
 
 The game is playable, and has been played through to the end. Known issues:
 
+- Widescreen: the pause menu's blurred background is the 4:3 frame scaled up to
+  the full width, so its top and bottom are cropped.
 - Only the US ROM is supported (and ROM hacks that only change its assets: see
   [ROM hacks](#rom-hacks)).
 - Linux: the game is played on Linux with real GPU drivers, the Steam Deck
