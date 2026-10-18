@@ -172,7 +172,7 @@ jobs:
           Copy-Item .github\release\README.txt, LICENSE, .github\release\LICENSES.txt $out
           Copy-Item tools\N64ModernRuntime\COPYING "$out\LICENSE-GPL-3.0.txt"
           Copy-Item "$build\_deps\gamenetworkingsockets-src\LICENSE" "$out\LICENSE-GameNetworkingSockets.txt"
-          Copy-Item "$build\vcpkg_installed\x64-windows-static-md\share\protobuf\copyright" "$out\LICENSE-protobuf.txt"
+          Copy-Item "$build\vcpkg_installed\x64-windows-static-md-release\share\protobuf\copyright" "$out\LICENSE-protobuf.txt"
           Compress-Archive -Path "$out\*" -DestinationPath "package\ConkerRecompiled-Netplay-${{ needs.prepare.outputs.tag }}-Windows.zip"
 
       - name: Upload to the release
