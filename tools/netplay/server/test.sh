@@ -1,5 +1,6 @@
 #!/bin/sh
-# Tests the relay with the real servers: starts compose.yaml (with compose.test.yaml, so coturn relays
+# Tests the relay with the real servers: starts compose.yaml, the server built from here (compose.build.yaml;
+# with compose.test.yaml, so coturn relays
 # between addresses on this machine) as the project conker-netplay-test, then plays matches through it
 # with netplay_probe: two players relay-only (the joiner must be told only relay addresses, never the
 # host's own), and three with 20% of packets lost. Stops the servers after. Linux, with Docker.
@@ -15,7 +16,7 @@ failed=0
 PUBLIC_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 export PUBLIC_IP TURN_USER=conker TURN_PASSWORD=test-only
 [ -n "$PUBLIC_IP" ] || { echo "no network address"; exit 1; }
-compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/compose.test.yaml"
+compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/compose.build.yaml -f $here/compose.test.yaml"
 $compose up -d --build --wait > compose.txt 2>&1 || { cat compose.txt; echo "the servers didn't start"; exit 1; }
 sleep 1
 

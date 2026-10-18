@@ -13,14 +13,21 @@ Anyone can run them. The game will take the server's address as a setting.
 
 ## Running them
 
-On a Linux machine with Docker and a public IP address:
+On a Linux machine with Docker and a public IP address, you need only `compose.yaml` and `.env.example`
+from this folder: the server's image is published to GitHub's container registry
+(`ghcr.io/easymod0/conker-netplay-server`, for amd64 and arm64) by the `netplay-server` workflow.
 
 ```sh
-cd tools/netplay/server
-cp .env.example .env      # set PUBLIC_IP and TURN_PASSWORD
-docker compose up -d --build
+mkdir conker-netplay && cd conker-netplay
+curl -fsSLO https://raw.githubusercontent.com/easymod0/CBFD-Recompiled-Netplay/netplay/tools/netplay/server/compose.yaml
+curl -fsSL https://raw.githubusercontent.com/easymod0/CBFD-Recompiled-Netplay/netplay/tools/netplay/server/.env.example -o .env
+nano .env                 # set PUBLIC_IP and TURN_PASSWORD
+docker compose up -d
 docker compose logs -f
 ```
+
+To build the server from a clone of this repository instead:
+`docker compose -f compose.yaml -f compose.build.yaml up -d --build`.
 
 Open in the firewall:
 
@@ -33,7 +40,7 @@ Open in the firewall:
 Both containers use the host's network, as coturn's relay ports are a range that Docker's port mapping
 handles badly.
 
-`docker compose pull && docker compose up -d --build` updates them; `docker compose down` stops them.
+`docker compose pull && docker compose up -d` updates them; `docker compose down` stops them.
 
 ## What's limited
 

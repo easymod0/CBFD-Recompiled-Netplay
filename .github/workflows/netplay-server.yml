@@ -1,0 +1,90 @@
+# Builds the netplay signalling server's Docker image (tools/netplay/server/Dockerfile) for amd64 and arm64,
+# each on its own kind of runner. From the default branch it also publishes them to GitHub's container
+# registry as ghcr.io/<owner>/conker-netplay-server (:latest and :<commit>, both architectures under one
+# name), for tools/netplay/server/compose.yaml to pull. From other branches it only builds.
+#
+# Like the other workflows, it uses no third-party actions: git and the docker on GitHub's runners.
+name: netplay-server
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'host/src/netplay/net/**'
+      - 'tools/netplay/server/**'
+      - '.github/workflows/netplay-server.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netplay-server-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GIT_TERMINAL_PROMPT: '0'
+  PUBLISH: ${{ github.ref_name == github.event.repository.default_branch }}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        run: |
+          git clone -q --no-checkout "https://github.com/$GITHUB_REPOSITORY" .
+          git checkout -q "$GITHUB_SHA"
+
+      - name: Build
+        run: |
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')/conker-netplay-server"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          docker build -f tools/netplay/server/Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.description=Conker netplay signalling server" \
+            -t "$image:${{ matrix.arch }}-$GITHUB_SHA" .
+
+      # It starts, listens, and stops on SIGTERM as docker stop sends.
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke "$IMAGE:${{ matrix.arch }}-$GITHUB_SHA"
+          sleep 2
+          docker logs smoke | grep -q "listening on UDP port 27100"
+          docker stop -t 5 smoke
+          docker logs smoke | grep -q "stopping"
+          test "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 0
+
+      - name: Publish
+        if: env.PUBLISH == 'true'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:${{ matrix.arch }}-$GITHUB_SHA"
+
+  # Both architectures under :latest and :<commit>.
+  manifest:
+    needs: build
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: Publish
+        run: |
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr 'A-Z' 'a-z')/conker-netplay-server"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for tag in "$GITHUB_SHA" latest; do
+            docker buildx imagetools create -t "$image:$tag" "$image:amd64-$GITHUB_SHA" "$image:arm64-$GITHUB_SHA"
+          done

@@ -2,17 +2,18 @@
 # TURN relay, so players don't see each other's addresses). See README.md.
 #
 #   cp .env.example .env    # then set PUBLIC_IP and TURN_PASSWORD
-#   docker compose up -d --build
+#   docker compose up -d
+#
+# This file and .env are all a host needs: the server's image is published by the netplay-server workflow.
+# To build it from this repository instead, add compose.build.yaml:
+#   docker compose -f compose.yaml -f compose.build.yaml up -d --build
 #
 # Both use the host's network: coturn relays on a range of UDP ports, which Docker's port mapping handles
 # badly. Open in the firewall: UDP 27100 (signalling), UDP and TCP 3478 (TURN), UDP 49160-49659 (relays).
 
 services:
   signal:
-    build:
-      context: ../../..
-      dockerfile: tools/netplay/server/Dockerfile
-    image: conker-netplay-server
+    image: ${IMAGE:-ghcr.io/easymod0/conker-netplay-server:latest}
     network_mode: host
     restart: unless-stopped
     command: ["--port", "${SIGNAL_PORT:-27100}", "--max-per-address", "${MAX_PER_ADDRESS:-8}"]
