@@ -102,9 +102,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: vcpkg-cache
-          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
+          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json', 'host/src/netplay/net/triplets/*') }}-${{ github.run_id }}
           # No dash at the end, so this also finds a cache saved under the plain key.
-          restore-keys: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}
+          restore-keys: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json', 'host/src/netplay/net/triplets/*') }}
 
       - name: Restore ccache's cache
         uses: actions/cache/restore@v5
@@ -131,13 +131,14 @@ jobs:
         run: git clone -q --depth 1 "https://x-access-token:$ROM_REPO_TOKEN@github.com/$ROM_REPO.git" rom-src
 
       # The debug information goes in each object (/Z7) rather than a shared PDB (/Zi), which
-      # ccache can't cache.
+      # ccache can't cache. protobuf and abseil release builds only (the game is RelWithDebInfo):
+      # the triplet in host/src/netplay/net/triplets.
       - name: Build
         shell: cmd
         run: |
           mkdir vcpkg-cache 2>nul
           set VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%
-          set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON %CCACHE_CMAKE_ARGS% -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded
+          set CONKER_CMAKE_ARGS=-DCONKER_NETPLAY=ON %CCACHE_CMAKE_ARGS% -DCMAKE_POLICY_DEFAULT_CMP0141=NEW -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded -DVCPKG_OVERLAY_TRIPLETS=%GITHUB_WORKSPACE%\host\src\netplay\net\triplets -DVCPKG_TARGET_TRIPLET=x64-windows-static-md-release
           ccache -z
           rem Without call, cmd doesn't come back from build.cmd.
           call build.cmd rom-src\baserom.us.z64 || exit /b 1
@@ -151,7 +152,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: vcpkg-cache
-          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json') }}-${{ github.run_id }}
+          key: vcpkg-${{ hashFiles('host/src/netplay/net/vcpkg.json', 'host/src/netplay/net/triplets/*') }}-${{ github.run_id }}
 
       - name: Save ccache's cache
         if: always()
