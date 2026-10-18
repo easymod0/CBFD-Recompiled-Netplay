@@ -50,7 +50,7 @@
 namespace {
     constexpr int default_port = 27015;
     // The netplay server players use unless they set another.
-    constexpr const char* default_server = "";
+    constexpr const char* default_server = "conker.jesp.ca:27100";
 
     // The server settings, kept in netplay.json in the config folder.
     struct ServerSettings {
