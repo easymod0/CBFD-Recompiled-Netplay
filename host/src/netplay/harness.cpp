@@ -739,7 +739,10 @@ namespace {
     // At a safe point (a delivery point, on the idle thread), with a --state-test save or load asked for.
     void on_safe_point(uint8_t* game_rdram) {
         if (rollback_on()) {
-            rollback_safe_point(game_rdram);
+            // (Once the match is over the game may play on, in a menu match: nothing to go back to.)
+            if (!match_over) {
+                rollback_safe_point(game_rdram);
+            }
             return;
         }
         if (state_request == StateRequest::None || !ultramodern::save_states::is_quiet()) {
@@ -1012,7 +1015,10 @@ namespace {
         bool playing = true;
         if (conker::lockstep::active()) {
             if (late_broken && rollback_match()) {
-                conker::lockstep::end(conker::netplay::Reason::desync, "the game couldn't go back to correct a prediction (rollback)");
+                // This machine's game is wrong from there, the others' aren't: it leaves (a joiner's ports go idle
+                // and the others play on; the host leaving ends the match), rather than ending it for everyone as
+                // a desync.
+                conker::lockstep::end(conker::netplay::Reason::quit, "the game couldn't go back to correct a prediction (rollback)");
                 playing = false;
             }
             else {
@@ -1021,11 +1027,10 @@ namespace {
         }
         if (!playing) {
             match_over = true;
-            // No rollback after it (the game plays on, in a menu match), and shown and heard again should it end
-            // partway through one.
+            // No rollback after it (the game plays on, in a menu match). Partway through one, the replaying ends by
+            // itself where the game had got to, so nothing is shown or heard twice.
             rollback_to = UINT64_MAX;
             rerunning = false;
-            ultramodern::timeline::set_replay_until(0);
             for (int i = 0; i < max_pads; i++) {
                 pads[i] = { 0, 0, 0, pads[i].err_no };
                 motions[i] = still();

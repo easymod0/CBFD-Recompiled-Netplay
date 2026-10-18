@@ -68,7 +68,7 @@ PY
 # $OUT/<name>.log and its output in $OUT/<name>.out; its PID is added to $pids.
 # The recording is $OUT/inputs.pads, or $OUT/$pads if that's set; it runs --fast unless $paced is set (on
 # the timeline's real time, as a player would). A copy in a match also gets $MATCH_OPTIONS, and a hosting
-# one $HOST_OPTIONS, if set.
+# one $HOST_OPTIONS, if set, before its own options (so a test's own win over them).
 start() {
     name=$1; shift
     rm -f "$OUT/$name.log" "$OUT/$name.out"
@@ -82,7 +82,7 @@ start() {
     esac
     # shellcheck disable=SC2086
     "$EXE" --headless --rom "$ROM" --data "$OUT/data-$name" $speed --replay "$OUT/${pads:-inputs.pads}" \
-        --hash-log "$OUT/$name.log" "$@" $extra > "$OUT/$name.out" 2>&1 &
+        --hash-log "$OUT/$name.log" $extra "$@" > "$OUT/$name.out" 2>&1 &
     pids="$pids $!"
     procs="$procs $name:$!"
 }
