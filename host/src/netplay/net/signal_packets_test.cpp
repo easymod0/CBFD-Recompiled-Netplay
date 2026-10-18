@@ -42,6 +42,7 @@ int main() {
     CHECK(round_trips(Signal{ 7, { 1, 2, 3 } }, 18));
     CHECK(round_trips(Signal{ 7, std::vector<uint8_t>(max_signal, 0xAB) }, 15 + max_signal));
     CHECK(round_trips(Unreachable{ 9 }, 13));
+    CHECK(round_trips(Registered{ 9 }, 13));
     CHECK(round_trips(Refused{ Refusal::taken }, 6));
     CHECK(round_trips(Refused{ Refusal::last }, 6));
 
@@ -57,6 +58,7 @@ int main() {
     CHECK(bytes_of(Signal{ 1, {} }).empty());
     CHECK(bytes_of(Signal{ 1, std::vector<uint8_t>(max_signal + 1) }).empty());
     CHECK(bytes_of(Unreachable{ 0 }).empty());
+    CHECK(bytes_of(Registered{ 0 }).empty());
     CHECK(bytes_of(Refused{ (Refusal)0 }).empty());
     CHECK(bytes_of(Refused{ (Refusal)((int)Refusal::last + 1) }).empty());
 
@@ -67,7 +69,7 @@ int main() {
     CHECK(!other_version(reg));
     bad = reg; bad[0] = 'X'; CHECK(!decodes(bad));
     bad = reg; bad[4] = 0; CHECK(!decodes(bad));
-    bad = reg; bad[4] = 5; CHECK(!decodes(bad));
+    bad = reg; bad[4] = 6; CHECK(!decodes(bad));
     bad = reg; bad.push_back(0); CHECK(!decodes(bad));
     bad = reg; bad.pop_back(); CHECK(!decodes(bad));
     CHECK(!decodes({}));
@@ -75,6 +77,7 @@ int main() {
     // Id 0.
     bad = reg; for (int i = 5; i < 13; i++) bad[i] = 0; CHECK(!decodes(bad));
     bad = bytes_of(Unreachable{ 1 }); bad[5] = 0; CHECK(!decodes(bad));
+    bad = bytes_of(Registered{ 1 }); bad[5] = 0; CHECK(!decodes(bad));
     // A signal whose size isn't what follows, is 0, or past max_signal.
     bad = sig; bad.push_back(0); CHECK(!decodes(bad));
     bad = sig; bad[13] = 2; CHECK(!decodes(bad));

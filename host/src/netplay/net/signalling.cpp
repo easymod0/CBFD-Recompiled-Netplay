@@ -128,6 +128,7 @@ namespace conker::netplay {
             connection = k_HSteamNetConnection_Invalid;
         }
         current_state = State::failed;
+        registering = false;
         failure = why;
     }
 
@@ -140,8 +141,8 @@ namespace conker::netplay {
             case k_ESteamNetworkingConnectionState_Connected: {
                 uint8_t buffer[signal::max_packet_size];
                 const size_t size = signal::encode(signal::Register{ local_id() }, buffer);
-                SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_Reliable, nullptr);
-                current_state = State::ready;
+                SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
+                registering = true;
                 break;
             }
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
@@ -163,32 +164,30 @@ namespace conker::netplay {
     void Signaller::poll() {
         ISteamNetworkingSockets* sockets = SteamNetworkingSockets();
         sockets->RunCallbacks();
-        if (current_state != State::ready) {
+        if (current_state != State::ready && !registering) {
             return;
-        }
-
-        const std::vector<signal::Signal> sending = out->take();
-        uint8_t buffer[signal::max_packet_size];
-        for (const signal::Signal& s : sending) {
-            const size_t size = signal::encode(s, buffer);
-            if (size != 0) {
-                sockets->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_Reliable, nullptr);
-            }
         }
 
         SteamNetworkingMessage_t* messages[16];
         int count;
-        for (int taken = 0; current_state == State::ready && taken < max_messages_per_poll &&
+        for (int taken = 0; (current_state == State::ready || registering) && taken < max_messages_per_poll &&
             (count = sockets->ReceiveMessagesOnConnection(connection, messages, 16)) > 0; taken += count) {
             for (int i = 0; i < count; i++) {
                 const std::span<const uint8_t> data{ (const uint8_t*)messages[i]->m_pData, (size_t)messages[i]->m_cbSize };
                 const std::optional<signal::Packet> packet = signal::decode(data);
                 messages[i]->Release();
-                if (current_state != State::ready) {
+                if (current_state != State::ready && !registering) {
                     continue;
                 }
                 if (!packet) {
                     fail(signal::other_version(data) ? "the server runs another version" : "the server sent a broken packet");
+                }
+                else if (const signal::Registered* r = std::get_if<signal::Registered>(&*packet); r != nullptr && registering && r->id == local_id()) {
+                    registering = false;
+                    current_state = State::ready;
+                }
+                else if (registering) {
+                    fail("the server sent a packet before taking this one's id");
                 }
                 else if (const signal::Signal* s = std::get_if<signal::Signal>(&*packet)) {
                     incoming.push_back(*s);
@@ -206,6 +205,17 @@ namespace conker::netplay {
                 }
                 else {
                     fail("the server sent a packet a server doesn't");
+                }
+            }
+        }
+
+        // Once registered: what was queued.
+        if (current_state == State::ready) {
+            uint8_t buffer[signal::max_packet_size];
+            for (const signal::Signal& s : out->take()) {
+                const size_t size = signal::encode(s, buffer);
+                if (size != 0) {
+                    sockets->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
                 }
             }
         }
@@ -243,5 +253,6 @@ namespace conker::netplay {
         if (current_state != State::failed) {
             current_state = State::idle;
         }
+        registering = false;
     }
 }

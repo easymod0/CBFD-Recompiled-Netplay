@@ -50,6 +50,7 @@ namespace conker::netplay {
         // (the library must be started).
         bool connect(const std::string& server, std::string& error);
 
+        // ready: the server has taken this process's id (Registered), so others can reach it.
         enum class State { idle, connecting, ready, failed };
         State state() const { return current_state; }
         // Why it failed (or the connection ended), for the player.
@@ -76,6 +77,7 @@ namespace conker::netplay {
 
         uint32_t connection = 0;
         State current_state = State::idle;
+        bool registering = false;   // connected, Register sent, Registered not here yet
         std::string failure;
         std::shared_ptr<SignalOutbox> out = std::make_shared<SignalOutbox>();
         std::vector<signal::Signal> incoming;

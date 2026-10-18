@@ -43,6 +43,11 @@ namespace conker::netplay::signal {
         uint64_t peer = 0;
         bool operator==(const Unreachable&) const = default;
     };
+    // Server to peer: its Register is taken, under `id`; only then can others reach it.
+    struct Registered {
+        uint64_t id = 0;
+        bool operator==(const Registered&) const = default;
+    };
     // Server to peer, before closing its connection: why (the id is taken, a broken packet, too many).
     enum class Refusal : uint8_t { version = 1, taken, protocol, busy, last = busy };
     struct Refused {
@@ -50,7 +55,7 @@ namespace conker::netplay::signal {
         bool operator==(const Refused&) const = default;
     };
 
-    using Packet = std::variant<Register, Signal, Unreachable, Refused>;
+    using Packet = std::variant<Register, Signal, Unreachable, Refused, Registered>;
 
     // The packet's bytes into `out` (max_packet_size): their size, or 0 for a packet that isn't valid.
     size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out);

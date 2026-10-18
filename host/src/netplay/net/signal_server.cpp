@@ -1,5 +1,5 @@
 // netplay_server: the signalling server. Peers connect over GameNetworkingSockets, each registers an id
-// (Register, signal_packets.hpp) and sends the library's ICE signals for another id (Signal); the server
+// (Register, signal_packets.hpp; answered with Registered) and sends the library's ICE signals for another id (Signal); the server
 // passes them on, from the sender's id, or says the other isn't there (Unreachable). It never sees the
 // game's packets, nor the TURN relay's traffic (coturn, beside it: tools/netplay/server/).
 //
@@ -70,7 +70,7 @@ namespace {
             uint8_t buffer[signal::max_packet_size];
             const size_t size = signal::encode(packet, buffer);
             if (size != 0) {
-                SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_Reliable, nullptr);
+                SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
             }
         }
 
@@ -152,6 +152,7 @@ namespace {
                 else {
                     peer.id = r->id;
                     by_id[r->id] = connection;
+                    send(connection, signal::Registered{ r->id });
                 }
                 return;
             }

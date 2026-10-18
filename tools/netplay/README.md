@@ -163,7 +163,7 @@ and, at the read where they first differ, the memory itself:
   each other by id through a signalling server, and the library finds a way: directly through NAT, or
   through a TURN relay. By default it's relay-only, so no peer is told another's address. The servers:
   `tools/netplay/server/` (below).
-- **`signal_packets.cpp`, `signalling.cpp`**: signalling's own packets (Register, Signal, Unreachable,
+- **`signal_packets.cpp`, `signalling.cpp`**: signalling's own packets (Register, Registered, Signal, Unreachable,
   Refused: versioned, each field checked, fuzzed with the others) and a peer's connection to the
   signalling server. It passes the library's ICE signals between peer ids, and never sees the game's
   packets. `netplay_server` (`signal_server.cpp`) is the server: one registration per connection, ids

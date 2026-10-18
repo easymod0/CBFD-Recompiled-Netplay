@@ -6,6 +6,7 @@
 //   2 Signal       u64 peer (not 0), u16 size (1 to max_signal), size bytes     15 + size bytes
 //   3 Unreachable  u64 peer (not 0)                                                13 bytes
 //   4 Refused      u8 reason (1 to Refusal::last)                                   6 bytes
+//   5 Registered   u64 id (not 0)                                                  13 bytes
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
 #include "signal_packets.hpp"
@@ -14,7 +15,7 @@
 
 namespace conker::netplay::signal {
     namespace {
-        enum Kind : uint8_t { register_ = 1, signal, unreachable, refused };
+        enum Kind : uint8_t { register_ = 1, signal, unreachable, refused, registered };
         constexpr size_t header_size = 5;
 
         struct Writer {
@@ -52,6 +53,11 @@ namespace conker::netplay::signal {
             if (p->peer == 0) return 0;
             w.u8(unreachable);
             w.u64(p->peer);
+        }
+        else if (const Registered* p = std::get_if<Registered>(&packet)) {
+            if (p->id == 0) return 0;
+            w.u8(registered);
+            w.u64(p->id);
         }
         else {
             const Refused& r = std::get<Refused>(packet);
@@ -95,6 +101,12 @@ namespace conker::netplay::signal {
                 const uint8_t reason = r.u8();
                 if (reason < 1 || reason > (uint8_t)Refusal::last) return std::nullopt;
                 return Refused{ (Refusal)reason };
+            }
+            case registered: {
+                if (data.size() != header_size + 8) return std::nullopt;
+                Registered p{ r.u64() };
+                if (p.id == 0) return std::nullopt;
+                return p;
             }
             default:
                 return std::nullopt;
