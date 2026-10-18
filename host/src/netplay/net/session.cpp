@@ -499,6 +499,11 @@ namespace conker::netplay {
                 if (!is_host && find(info->m_hConn) != nullptr) {
                     send_to(info->m_hConn, hello);
                 }
+                // The handshake time runs from here: through ICE, finding the way can take longer than
+                // the time itself (the library's own connect timeout covers a way never found).
+                else if (Peer* peer = find(info->m_hConn); is_host && peer != nullptr) {
+                    peer->connected_at = now();
+                }
                 break;
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
