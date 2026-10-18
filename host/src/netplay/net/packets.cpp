@@ -7,11 +7,11 @@
 //   2 Welcome  u8 ports (bits: some, none at or past players, not port 0),             7 bytes
 //              u8 players (2 to 4)
 //   3 Refuse   u8 reason                                                               6 bytes
-//   4 Inputs   u8 port (< 4), u32 first read, u8 count (1 to 8), 8 pads of 5 bytes  155 bytes
+//   4 Inputs   u8 port (< 4), u32 first read, u8 count (1 to 8), 8 pads of 5 bytes  159 bytes
 //              (u16 buttons, s8 stick x, s8 stick y, u8 err_no), then 8 motions of 13
 //              (s16 mouse x, y, s16 gyro x, y, s8 wheel, u32 controls: only
 //              valid_controls: a field of view code up to fov_codes, no bit past 16); the unused ones zero, and the last read not past
-//              2^32 - 1
+//              2^32 - 1; then 4 s8 gaps (time sync: any value)
 //   5 Hash     u32 read, u64 hash, 128 u16 region hashes                             273 bytes
 //   6 Bye      u8 reason                                                               6 bytes
 //   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs 10 bytes
@@ -38,7 +38,7 @@ namespace conker::netplay {
                 case hello: return header_size + 41;
                 case welcome: return header_size + 2;
                 case refuse: return header_size + 1;
-                case inputs: return header_size + 6 + input_window * (pad_size + motion_size);
+                case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players;
                 case hash: return header_size + 12 + 2 * memory_regions;
                 case bye: return header_size + 1;
                 case start: return header_size + 5;
@@ -185,6 +185,9 @@ namespace conker::netplay {
                     w.u8((uint8_t)m.wheel);
                     w.u32(m.controls);
                 }
+                for (int8_t gap : p.gaps) {
+                    w.u8((uint8_t)gap);
+                }
             }
             else if constexpr (std::is_same_v<T, Hash>) {
                 w.u32(p.read);
@@ -264,6 +267,9 @@ namespace conker::netplay {
                     m.gyro_y = (int16_t)r.u16();
                     m.wheel = (int8_t)r.u8();
                     m.controls = r.u32();
+                }
+                for (int8_t& gap : p.gaps) {
+                    gap = (int8_t)r.u8();
                 }
                 packet = p;
                 break;

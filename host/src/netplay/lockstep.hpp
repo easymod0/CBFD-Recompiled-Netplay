@@ -38,7 +38,8 @@
 //                                predicts them (each player's last) up to <reads> reads ahead of the last read
 //                                it has them all for, 0 (the default: they wait) to 12; when one comes that
 //                                isn't what it predicted, the harness goes back to before that read and plays
-//                                on again from there, unpaced, unseen and unheard. The match's, the same for
+//                                on again from there, unpaced, unseen and unheard; time sync slows the machine
+//                                ahead of the others a little, till they're level. The match's, the same for
 //                                everyone: the joiners get it with Start (a joiner can't choose its own)
 //
 // A joiner's machine that leaves (or stops answering) leaves the others playing: the host tells them from which

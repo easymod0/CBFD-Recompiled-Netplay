@@ -155,6 +155,33 @@ namespace {
     uint64_t caught_up_from = 0;
     double catching_up_since = 0;
 
+    // Time sync (#25, with rollback): two machines drift apart a read or two, and the one ahead then predicts every
+    // read while the other never needs to. Each says, with its inputs, how many reads its game is past each port's
+    // latest input it has (its gap: the latency plus how far ahead it is), as measured at its last read once that
+    // read's inputs were in (the same moment on every machine: a gap measured before them is a read too big);
+    // half the difference between this machine's gap to a player and theirs to it is how far ahead of them it
+    // really is, the latency cancelling. A joiner goes by the host alone: the host passes the joiners' inputs on
+    // once a read, which holds them up to a read either way between joiners (so a gap between them says little),
+    // and with each level with the host they're level with each other. The host goes by every joiner.
+    // Averaged over about a second, while it's over half a read the game is paced a little later at each read
+    // (up to 2 ms of 33: it's not seen), till they're level. Only when frames are shown changes, never the game.
+    struct TimeSync {
+        std::array<int, conker::netplay::max_players> my_gap{};      // by port: this machine's, at its last read
+        std::array<int, conker::netplay::max_players> their_gap{};   // by port: their latest gap to this machine
+        std::array<bool, conker::netplay::max_players> heard{};
+        double lead = 0;            // how far ahead of the furthest behind, averaged (reads)
+        double most_lead = 0;
+        uint64_t reads_slowed = 0;
+        uint64_t us_later = 0;
+    } time_sync;
+    constexpr double time_sync_average_reads = 30;
+    constexpr double time_sync_from = 0.1;          // reads ahead before it slows
+    constexpr double time_sync_us_per_read = 4000;  // a read later for each read ahead past that, up to:
+    constexpr uint32_t time_sync_most_us = 2000;
+
+    // This machine's gap to `port`: how many reads its game is past the read `port` sent its latest input at.
+    int gap_to(int port);
+
     void set_catching_up(bool on) {
         catching_up = on;
         ultramodern::timeline::set_catching_up(on);
@@ -277,6 +304,9 @@ namespace {
             std::printf("[netplay] rollback: %llu reads predicted, %llu rollbacks, %llu reads made again, the deepest %llu reads\n",
                 (unsigned long long)rollbacks.predicted, (unsigned long long)rollbacks.count,
                 (unsigned long long)rollbacks.reads_again, (unsigned long long)rollbacks.deepest);
+            std::printf("[netplay] time sync: %llu reads paced later, %.0f ms in all; ahead of the others by %.2f reads at the end, "
+                "%.2f at most\n", (unsigned long long)time_sync.reads_slowed, time_sync.us_later / 1000.0, time_sync.lead,
+                time_sync.most_lead);
         }
         std::printf("[netplay] waits: %llu of %llu reads waited for the others, %.0f ms in all, the longest %.0f ms (read %llu); "
             "%llu reads came over %.0f ms after the one before, the latest %.0f ms (read %llu); input delay %d, changed %llu times; "
@@ -572,6 +602,11 @@ namespace {
                     for (int i = 0; i < inputs->count; i++) {
                         got.push_back({ inputs->pads[i], inputs->motions[i] });
                     }
+                    // Their gap to this machine (to its first port: its players are at the same read).
+                    if (own_ports != 0) {
+                        time_sync.their_gap[inputs->port] = inputs->gaps[std::countr_zero(own_ports)];
+                        time_sync.heard[inputs->port] = true;
+                    }
                 }
                 else if (const Gone* g = std::get_if<Gone>(&event.packet)) {
                     // The host's word that a player left: from the read after the last of their inputs it passed on,
@@ -633,6 +668,9 @@ namespace {
         inputs.count = 1;
         inputs.pads[0] = pad;
         inputs.motions[0] = input.motion;
+        for (int other = 0; other < match_players; other++) {
+            inputs.gaps[other] = (int8_t)std::clamp(time_sync.my_gap[other], -128, 127);
+        }
         session->send(inputs);
         received[port].push_back(input);
     }
@@ -725,6 +763,41 @@ namespace {
         if (last <= from - 1 + delays.before) return last - delays.before;
         if (last >= from + delays.after) return last - delays.after;
         return from - 1;
+    }
+
+    int gap_to(int port) {
+        if ((own_ports & (1u << port)) != 0 || idle_from[port] != never || received[port].empty()) {
+            return 0;
+        }
+        return (int)((int64_t)current_read - read_sending((int64_t)received[port].size() - 1));
+    }
+
+    // Time sync, at a read made for the first time, once its inputs are in: this machine's gaps (sent with its next
+    // inputs), and with rollback, how far ahead of the others it is, and the game paced a little later while
+    // it's too far.
+    void sync_time() {
+        double lead = -1e9;
+        const bool hosting = session->hosting();
+        for (int port = 0; port < match_players; port++) {
+            time_sync.my_gap[port] = gap_to(port);
+            // (Not in the boot's first reads, which wait for everyone, and whose first inputs carry no gaps yet.)
+            if ((hosting || port == 0) && current_read >= rollback_from_read && (own_ports & (1u << port)) == 0 &&
+                idle_from[port] == never && time_sync.heard[port] && !received[port].empty()) {
+                lead = std::max(lead, (time_sync.my_gap[port] - time_sync.their_gap[port]) / 2.0);
+            }
+        }
+        if (rollback_option == 0 || lead == -1e9) {
+            return;
+        }
+        time_sync.lead += (lead - time_sync.lead) / time_sync_average_reads;
+        time_sync.most_lead = std::max(time_sync.most_lead, time_sync.lead);
+        if (catching_up || time_sync.lead <= time_sync_from) {
+            return;
+        }
+        const uint32_t us = std::min(time_sync_most_us, (uint32_t)((time_sync.lead - time_sync_from) * time_sync_us_per_read));
+        ultramodern::timeline::pace_later(us);
+        time_sync.reads_slowed++;
+        time_sync.us_later += us;
     }
 
     bool same_input(const Input& a, const Input& b) {
@@ -1094,6 +1167,7 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     idle_from.fill(never);
     gone_silently = false;
     last_behind = INT64_MIN;
+    time_sync = {};
     round_trips_at = 0;
     {
         std::lock_guard status_lock(status_mutex);
@@ -1462,6 +1536,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
             (unsigned long long)(read - caught_up_from), (now() - catching_up_since) * 1000);
         set_catching_up(false);
     }
+    sync_time();
 
     const double done = now();
     const double waited = done - since;

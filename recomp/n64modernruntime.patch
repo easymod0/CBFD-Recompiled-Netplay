@@ -1083,10 +1083,10 @@ index 0000000..a653fe4
 +#endif
 diff --git a/ultramodern/include/ultramodern/timeline.hpp b/ultramodern/include/ultramodern/timeline.hpp
 new file mode 100644
-index 0000000..317241b
+index 0000000..a0ffef6
 --- /dev/null
 +++ b/ultramodern/include/ultramodern/timeline.hpp
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,72 @@
 +#ifndef __ULTRAMODERN_TIMELINE_HPP__
 +#define __ULTRAMODERN_TIMELINE_HPP__
 +
@@ -1111,6 +1111,10 @@ index 0000000..317241b
 +        // While on, the timeline doesn't wait for real time either, as `fast`: a game that fell behind (netplay,
 +        // behind the other players) catches up. Once off, it's paced again from where it is (any game thread).
 +        void set_catching_up(bool on);
++        // Paces the game `us` microseconds later from now on: it runs that much behind where it would have been,
++        // as a netplay machine that's ahead of the others slows down to them (time sync). Taken at the next
++        // paced delivery (not while catching up or replaying). Any thread.
++        void pace_later(uint32_t us);
 +        // Replaying: the game plays again what it has played already (netplay's rollback, after loading a state),
 +        // up to `ticks`, the time it had reached (delivery_time() before the load). Till the timeline passes it,
 +        // it doesn't wait for real time, a load doesn't move its pacing (it's paced on from where it was before
@@ -2081,10 +2085,10 @@ index 6e3ed18..221ad3d 100644
  
 diff --git a/ultramodern/src/timeline.cpp b/ultramodern/src/timeline.cpp
 new file mode 100644
-index 0000000..802362e
+index 0000000..ebf7321
 --- /dev/null
 +++ b/ultramodern/src/timeline.cpp
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,251 @@
 +#include <algorithm>
 +#include <atomic>
 +#include <chrono>
@@ -2115,6 +2119,8 @@ index 0000000..802362e
 +    std::atomic_bool pace_from_now = false;
 +    // Replaying till the timeline passes this (0: not).
 +    std::atomic<uint64_t> replay_end = 0;
++    // Pacing put off by pace_later, not yet taken (microseconds).
++    std::atomic<uint64_t> later_us = 0;
 +    // The time of the last delivery, and the next VI's number (VI k is at k × ticks_per_vi).
 +    uint64_t now = 0;
 +    uint64_t next_vi = 1;
@@ -2177,6 +2183,7 @@ index 0000000..802362e
 +        if (pace_from_now.exchange(false)) {
 +            real_start = real_now - ticks_to_duration(ticks);
 +        }
++        real_start += std::chrono::microseconds{ later_us.exchange(0) };
 +        const auto target = real_start + ticks_to_duration(ticks);
 +        if (real_now < target) {
 +            ultramodern::sleep_until(target);
@@ -2203,6 +2210,10 @@ index 0000000..802362e
 +        pace_from_now = true;
 +    }
 +    catching_up = on;
++}
++
++void ultramodern::timeline::pace_later(uint32_t us) {
++    later_us += us;
 +}
 +
 +void ultramodern::timeline::set_replay_until(uint64_t ticks) {
