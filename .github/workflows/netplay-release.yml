@@ -224,14 +224,17 @@ jobs:
           key: ccache-linux-${{ github.run_id }}
 
       - name: Check the same inputs give the same game
+        timeout-minutes: 30
         run: tools/netplay/check.sh --rom rom-src/baserom.us.z64 --out netplay-check
 
       # Rollback (issue #22): about 4 minutes here; a runner has fewer cores than they were timed on, so the
       # waits are longer.
       - name: Check rollback in matches
+        timeout-minutes: 30
         run: tools/netplay/rollback.sh --rom rom-src/baserom.us.z64 --timeout 900 --out netplay-rollback
 
       - name: Check rollback across every mode
+        timeout-minutes: 30
         run: tools/netplay/rollback-modes.sh --rom rom-src/baserom.us.z64 --timeout 900 --out netplay-rollback-modes
 
       # A check that fails keeps its logs (hash logs, each copy's output, desync reports) with the run.

@@ -51,7 +51,7 @@ if [ "$game" -eq 0 ] && [ "$builds" -eq 0 ]; then
 else
     if [ "$game" -gt 0 ]; then
         list -v
-        [ "$game" -gt "$most" ] && echo "- ...and $((game - most)) more"
+        if [ "$game" -gt "$most" ]; then echo "- ...and $((game - most)) more"; fi
     else
         echo "No changes to the game."
     fi
@@ -60,7 +60,7 @@ else
         echo "Release builds:"
         echo
         list -e
-        [ "$builds" -gt "$most" ] && echo "- ...and $((builds - most)) more"
+        if [ "$builds" -gt "$most" ]; then echo "- ...and $((builds - most)) more"; fi
     fi
 fi
 echo
