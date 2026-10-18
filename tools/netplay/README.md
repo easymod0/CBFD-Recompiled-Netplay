@@ -335,7 +335,7 @@ only once every input before it is known and was given as it came, so peers comp
 went, and the hash log does the same. It's the match's, the same for everyone: the host sends it with
 `Start` (a joiner's own `--rollback` is refused). The boot's first 30 reads aren't predicted (the game
 changes its main loop there), and near a replay's end every input is waited for, so it ends right. The
-host's `Delay` comes 12 reads further ahead, as a joiner that predicts can be that much further on. The
+host's `Delay` comes the rollback window further ahead, as a joiner that predicts can be that much further on. The
 reads played again are replayed (the runtime's `timeline::set_replay_until`, up to the time the game had
 reached): they don't wait for real time and the load doesn't move the pacing, so the game is back where it
 was on time; their graphics tasks aren't drawn, their VIs show no frame and do no host work (rumble), and

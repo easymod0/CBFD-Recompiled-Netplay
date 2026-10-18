@@ -715,8 +715,8 @@ namespace {
     // The host, with auto, at read `read` (every hash_every reads): changes the delay if the round trips have
     // wanted another for long enough. From the read after the furthest a joiner can send its pads at before
     // it hears: a joiner is at most the delay ahead (it needs the host's pads, sent the delay ahead), and
-    // can make the read after its last of the host's pads before the Delay (sent after them) arrives; a joiner
-    // that predicts (rollback) up to most_rollback_window reads further.
+    // can make the read after its last of the host's pads before the Delay (sent after them) arrives; with
+    // rollback (the match's, the same for everyone), a joiner predicts up to its window further.
     void adapt_delay(uint64_t read) {
         const std::vector<int> trips = session->round_trips_ms();
         if (trips.empty() || trips.size() < (size_t)session->joiners() || read < delays.from + settle_reads) {
@@ -751,7 +751,7 @@ namespace {
         }
         std::printf("[netplay] round trips to the players: %s ms; %llu reads late from waiting since the last check\n",
             trips_text(trips).c_str(), (unsigned long long)late);
-        change_delay(to, read + delay + 2 + most_rollback_window);
+        change_delay(to, read + delay + 2 + rollback_option);
         session->send(Delay{ (uint8_t)to, (uint32_t)delays.from });
         wanted_higher = 0;
         wanted_lower = 0;
