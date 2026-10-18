@@ -1,0 +1,15 @@
+# The GitHub Actions the workflows use, kept up to date (the game's own dependencies are submodules and
+# CMake downloads, which Dependabot doesn't follow). Updates come as one pull request a month, against
+# netplay; merging it makes a release, like any push to netplay.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: netplay
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "Fork releases:"

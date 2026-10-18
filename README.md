@@ -1,5 +1,19 @@
 <img width="1360" height="768" alt="image" src="https://github.com/user-attachments/assets/abb979d7-24a5-44f8-98d3-088ba2054a74" />
 
+> **This is the netplay fork** of [sciaschi/CBFD-Recompiled](https://github.com/sciaschi/CBFD-Recompiled):
+> the same game with **online multiplayer**, built for every push to this fork's `netplay` branch.
+> Download the [latest release](https://github.com/easymod0/CBFD-Recompiled-Netplay/releases/latest) (Windows, Linux, macOS); you still need your own US ROM.
+> Everyone in a match must use the **same release**.
+>
+> **To play online:** in the launcher pick **Netplay**. One player hosts (**Host a match**: their address and
+> UDP port, 27015 by default, forwarded on their router for players outside their home; the input delay;
+> **Rollback**, which hides lag by predicting the others' input and correcting it), then sends the **join code**
+> it shows; the others paste it under **Join a match**. Share the code only with people you trust: it holds
+> the host's address.
+>
+> Netplay problems: [report them here](https://github.com/easymod0/CBFD-Recompiled-Netplay/issues/new?template=netplay_report.yml) with the log lines the
+> template asks for. Everything else about the game: [upstream](https://github.com/sciaschi/CBFD-Recompiled/issues).
+
 # Conker's Bad Fur Day: Recompiled
 
 A native PC port of **Conker's Bad Fur Day** (N64, US version). It's built by

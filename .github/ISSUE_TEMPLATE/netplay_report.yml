@@ -1,0 +1,53 @@
+name: Netplay report
+description: How an online match went (a playtest), or something wrong in one (a desync, a stutter, a disconnect).
+labels: ["netplay"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for playing. A report from **each** machine in the match helps most: the numbers below show how the
+        network and the game behaved on that side.
+
+        **Don't attach a ROM or any files from the game.** A desync report (a `.json` in `netplay-desyncs` in the
+        data folder) is fine to attach; its `.bin` memory dump is game data, so leave that out unless asked.
+  - type: input
+    id: release
+    attributes:
+      label: Release
+      description: The release every player used (e.g. v0.1.6-netplay.8). Everyone in a match must use the same one.
+    validations:
+      required: true
+  - type: textarea
+    id: players
+    attributes:
+      label: The machines
+      description: For each machine, its system (Windows, Linux, macOS), how many players on it, who hosted, and where (same house, same city, far away).
+      placeholder: |
+        Host: Linux, 2 players, home
+        Joiner: Windows 11, 1 player, ~300 km away, Wi-Fi
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: The match's settings
+      description: The host's Input delay and Rollback (Off, 4, 8 or 12), the mode played, and how long.
+      placeholder: Input delay Auto, Rollback 8, Deathmatch, about 10 minutes
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: How it felt, and anything wrong (players jumping, stutters, sounds repeating, a desync, a disconnect), and when.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: The end-of-match lines
+      description: |
+        From the console (Linux/macOS: start it from a terminal; Windows: in a command prompt in its folder, start it
+        with `ConkerRecomp.exe > netplay-log.txt 2>&1` and look in netplay-log.txt after), the lines starting with `[netplay] the match`, `[netplay] rollback:`, `[netplay] time sync:`, `[netplay] waits:` and
+        `[harness]   played again, a read:`, from each machine you can.
+      render: text
