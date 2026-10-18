@@ -6,10 +6,15 @@
 // A match started from here doesn't quit when it ends (a desync, the host leaving): the game stops taking
 // input and a prompt says why, with Quit.
 //
-// The host's join code is made, once hosting, from the address the host gives and the match's random key:
-// the game can't know its public address without a server to ask, so the host looks it up (or gives its
-// local one, for a match at home). The code is the host's address, so the menu says to share it only with
-// people the host trusts. The input delay is lockstep's default, the same on every machine.
+// By default a match goes through a room on a netplay server (tools/netplay/server/): the server gives the
+// host a room code, with no address in it, and the players reach each other through its relay, so nobody
+// sees another's address (unless direct connections are allowed) and no port needs forwarding. The server's
+// address and that choice are settings of their own, kept in netplay.json in the config folder.
+//
+// Or directly: the host's join code is made, once hosting, from the address the host gives and the match's
+// random key: the game can't know its public address without a server to ask, so the host looks it up (or
+// gives its local one, for a match at home). The code is the host's address, so the menu says to share it
+// only with people the host trusts. The input delay is lockstep's default, the same on every machine.
 //
 // Rollback (--rollback) is the host's choice too, the same for everyone in the match.
 
@@ -32,16 +37,54 @@
 #include "elements/ui_scroll_container.h"
 #include "elements/ui_tab_set.h"
 #include "elements/ui_text_input.h"
+#include "json/json.hpp"
 #include "librecomp/game.hpp"
 #include "ultramodern/ultramodern.hpp"
 
 #include "../conker.hpp"
 #include "hello.hpp"
 #include "lockstep.hpp"
+#include "net/join_code.hpp"
 #include "net/session.hpp"
 
 namespace {
     constexpr int default_port = 27015;
+    // The netplay server players use unless they set another.
+    constexpr const char* default_server = "conker.jesp.ca:27100";
+
+    // The server settings, kept in netplay.json in the config folder.
+    struct ServerSettings {
+        std::string server = default_server;
+        bool allow_direct = false;
+    };
+
+    std::filesystem::path settings_path() {
+        return recomp::get_config_path() / "netplay.json";
+    }
+
+    ServerSettings load_settings() {
+        ServerSettings settings;
+        std::ifstream file(settings_path());
+        const nlohmann::json json = file ? nlohmann::json::parse(file, nullptr, false) : nlohmann::json();
+        if (json.is_object()) {
+            if (json.contains("server") && json["server"].is_string()) settings.server = json["server"].get<std::string>();
+            if (json.contains("allow_direct") && json["allow_direct"].is_boolean()) settings.allow_direct = json["allow_direct"].get<bool>();
+        }
+        return settings;
+    }
+
+    void save_settings(const ServerSettings& settings) {
+        std::ofstream file(settings_path(), std::ios::trunc);
+        if (file) {
+            file << nlohmann::json{ { "server", settings.server }, { "allow_direct", settings.allow_direct } }.dump(4) << "\n";
+        }
+    }
+
+    std::string trimmed(std::string text) {
+        while (!text.empty() && text.back() == ' ') text.pop_back();
+        while (!text.empty() && text.front() == ' ') text.erase(text.begin());
+        return text;
+    }
 
     std::u8string game_id;
     std::filesystem::path stored_rom;
@@ -63,6 +106,7 @@ namespace {
         std::string shown_code;             // the join code on show, for Copy
         recompui::Element* status_row = nullptr;   // hidden while there's nothing to say
         recompui::Label* status_label = nullptr;
+        recompui::Element* direct_rows = nullptr;  // hosting directly: the port and address
         recompui::Element* host_section = nullptr; // one at a time, by the Host and Join tabs
         recompui::Element* join_section = nullptr;
         recompui::Button* host_button = nullptr;
@@ -71,6 +115,8 @@ namespace {
         int players = 2;
         int local_players = 1;              // the players on this computer, hosting or joining
         bool hosting = false;               // a match is hosted (connecting, as the host)
+        bool host_directly = false;         // hosting: by a join code (a port), not a room on the server
+        ServerSettings settings = load_settings();
         bool own_view_for_everyone = true;  // hosting: the match's screens rule
         int input_delay = -1;               // hosting: reads, or -1 for auto
         int rollback = 0;                   // hosting: reads predicted, 0 (off) to 12
@@ -116,16 +162,21 @@ namespace {
             return field;
         }
 
-        // The join code, once hosting (it holds the match's key, new each time).
+        // The room code, or the join code (it holds the match's key, new each time), once hosting.
         void show_code() {
             const bool blank = address_text.find_first_not_of(' ') == std::string::npos;
-            const std::string code = hosting ? conker::lockstep::join_code(address_text) : std::string();
+            const std::string code = !hosting ? std::string() :
+                host_directly ? conker::lockstep::join_code(address_text) : conker::lockstep::room_code();
             if (code != shown_code) {
                 copy_button->set_text("Copy");
             }
             shown_code = code;
             copy_button->set_display(code.empty() ? recompui::Display::None : recompui::Display::Flex);
-            if (blank) {
+            if (!host_directly) {
+                code_label->set_text(!hosting ? "Press Host: the room code to send the others appears here." :
+                    code.empty() ? "Making a room..." : "Room code: " + code);
+            }
+            else if (blank) {
                 code_label->set_text("Enter your address to get a join code.");
             }
             else if (!hosting) {
@@ -170,14 +221,29 @@ namespace {
             set_state(State::connecting, "Connecting...");
         }
 
+        // Through the server: false (and says why) if none is set.
+        bool use_server() {
+            settings.server = trimmed(settings.server);
+            if (settings.server.empty()) {
+                set_state(State::idle, "Set a netplay server first (Server, above).");
+                return false;
+            }
+            save_settings(settings);
+            conker::lockstep::set_server(settings.server, settings.allow_direct);
+            return true;
+        }
+
         void on_host() {
-            const int port = std::atoi(port_text.c_str());
-            if (port < 1 || port > 65535) {
+            const int port = host_directly ? std::atoi(port_text.c_str()) : 0;
+            if (host_directly && (port < 1 || port > 65535)) {
                 set_state(State::idle, "The port is a number from 1 to 65535.");
                 return;
             }
-            if (address_text.find_first_not_of(' ') == std::string::npos) {
+            if (host_directly && address_text.find_first_not_of(' ') == std::string::npos) {
                 set_state(State::idle, "Give your address first: the join code is made from it.");
+                return;
+            }
+            if (!host_directly && !use_server()) {
                 return;
             }
             if (local_players >= players) {
@@ -193,7 +259,15 @@ namespace {
 
         void on_join() {
             if (join_text.find_first_not_of(' ') == std::string::npos) {
-                set_state(State::idle, "Type the host's join code first.");
+                set_state(State::idle, "Type the host's room code or join code first.");
+                return;
+            }
+            const bool room = conker::netplay::decode_room_code(join_text).has_value();
+            if (room && !use_server()) {
+                return;
+            }
+            if (!room && !conker::netplay::decode_join_code(join_text)) {
+                set_state(State::idle, "That isn't a room code (8 characters) or a join code (24 or 44): check it.");
                 return;
             }
             conker::lockstep::set_join(join_text, local_players);
@@ -218,6 +292,9 @@ namespace {
                 switch (conker::lockstep::poll_connect(status)) {
                     case conker::lockstep::Progress::waiting:
                         status_label->set_text(status);
+                        if (hosting && shown_code.empty()) {
+                            show_code();    // the room code, once the server has made it
+                        }
                         break;
                     case conker::lockstep::Progress::failed:
                         conker::lockstep::set_host(-1, players);
@@ -278,6 +355,29 @@ namespace {
             text(here, "One controller each, in the order they first press a button. The first player also has the "
                 "keyboard, mouse and gyro.", Typography::Body, color::TextDim);
 
+            // The netplay server, for rooms.
+            recompui::Element* server = column(this, 12.0f);
+            recompui::Element* server_row = row(server);
+            text(server_row, "Server", Typography::LabelMD);
+            recompui::TextInput* server_input = input(server_row, settings.server, 320.0f);
+            server_input->add_text_changed_callback([this](const std::string& value) {
+                settings.server = value;
+                save_settings(settings);
+            });
+            text(server_row, "Connections", Typography::LabelMD);
+            recompui::Radio* direct_radio = context.create_element<recompui::Radio>(server_row);
+            direct_radio->add_option("Relay only");
+            direct_radio->add_option("Allow direct");
+            direct_radio->set_index(settings.allow_direct ? 1 : 0);
+            direct_radio->add_index_changed_callback([this](uint32_t index) {
+                settings.allow_direct = index == 1;
+                save_settings(settings);
+            });
+            text(server, "Rooms are made on a netplay server (its address and port). Relay only: your game reaches the "
+                "others through the server's relay, so nobody sees your address. Allow direct: straight to each "
+                "other when your networks allow it, which can be quicker, but the others see your address.",
+                Typography::Body, color::TextDim);
+
             // Hosting or joining: a tab each, so only the one chosen's settings show.
             recompui::TabSet* tabs = context.create_element<recompui::TabSet>(this);
             tabs->set_flex_shrink(0.0f);
@@ -295,11 +395,24 @@ namespace {
             }
             count_radio->set_index(0);
             count_radio->add_index_changed_callback([this](uint32_t index) { players = 2 + (int)index; });
-            text(host_row, "UDP port", Typography::LabelMD);
-            port_input = input(host_row, port_text, 120.0f);
+            text(host_row, "Through", Typography::LabelMD);
+            recompui::Radio* through_radio = context.create_element<recompui::Radio>(host_row);
+            through_radio->add_option("A room on the server");
+            through_radio->add_option("Directly");
+            through_radio->set_index(0);
+            through_radio->add_index_changed_callback([this](uint32_t index) {
+                host_directly = index == 1;
+                direct_rows->set_display(host_directly ? recompui::Display::Flex : recompui::Display::None);
+                show_code();
+                queue_update();
+            });
+            direct_rows = column(host, 12.0f);
+            recompui::Element* direct_row = row(direct_rows);
+            text(direct_row, "UDP port", Typography::LabelMD);
+            port_input = input(direct_row, port_text, 120.0f);
             port_input->add_text_changed_callback([this](const std::string& value) { port_text = value; });
-            text(host_row, "Your address", Typography::LabelMD);
-            address_input = input(host_row, "", 320.0f);
+            text(direct_row, "Your address", Typography::LabelMD);
+            address_input = input(direct_row, "", 320.0f);
             address_input->add_text_changed_callback([this](const std::string& value) {
                 address_text = value;
                 show_code();
@@ -345,9 +458,10 @@ namespace {
                     queue_update();
                 }
             });
-            text(host, "For players outside your home, forward the UDP port on your router and use your public "
-                "address (any \"what is my IP\" site). The join code contains your IP address: share it only with "
-                "people you trust.", Typography::Body, color::TextDim);
+            text(direct_rows, "Directly, with no server: for players outside your home, forward the UDP port on your "
+                "router and use your public address (any \"what is my IP\" site). The join code contains your IP "
+                "address: share it only with people you trust.", Typography::Body, color::TextDim);
+            direct_rows->set_display(recompui::Display::None);
             host_button = context.create_element<recompui::Button>(host, "Host", recompui::ButtonStyle::Primary);
             host_button->add_pressed_callback([this]() { on_host(); });
 
@@ -355,7 +469,7 @@ namespace {
             recompui::Element* join = column(this, 12.0f);
             join_section = join;
             recompui::Element* join_row = row(join);
-            text(join_row, "Join code", Typography::LabelMD);
+            text(join_row, "Room or join code", Typography::LabelMD);
             join_input = input(join_row, "", 520.0f);
             join_input->add_text_changed_callback([this](const std::string& value) { join_text = value; });
             recompui::Button* paste_button = context.create_element<recompui::Button>(join_row, "Paste", recompui::ButtonStyle::Tertiary);

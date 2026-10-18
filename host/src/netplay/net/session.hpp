@@ -5,8 +5,13 @@
 // (resent until they arrive, in order); the library closes a connection that sends a bigger message, and
 // buffers little from each peer.
 //
+// Or through ICE (signalling.hpp): the host listens for peer-to-peer connections, reached by its id
+// (local_id()) through a signalling server, and the library finds a way between them: directly through
+// NAT, or relayed by a TURN server (Ice), so neither sees the other's address. Everything after that is the
+// same. The host keeps its listen socket and its signaller for as long as the session lasts.
+//
 // The handshake: a joiner sends Hello (the match's key, then build, ROM, settings profile and mods
-// hashes) within 3 s. The host closes a wrong key at once, telling it nothing
+// hashes) within 3 s of its connection coming up. The host closes a wrong key at once, telling it nothing
 // else; then it refuses any other difference, or a full or started match, and otherwise gives it the
 // lowest free ports, one for each player on its machine (the Hello says how many; the host's players have
 // the first ports, from 0), with Welcome. Once every port is taken, the host starts the match
@@ -22,11 +27,16 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
 
 #include "packets.hpp"
+
+namespace conker::netplay {
+    class Signaller;
+}
 
 namespace conker::netplay {
     struct Event {
@@ -49,6 +59,8 @@ namespace conker::netplay {
         int rollback = 0;       // started: the reads every peer predicts ahead (0: off)
         Reason reason = Reason::quit;
         std::string detail;     // the library's account of a closed connection, for the log
+        bool by_signalling = false; // ended: the signalling server's word (the host isn't there, or the
+                                    // server's gone), and `detail` says it for the player
         Packet packet;
     };
 
@@ -56,9 +68,27 @@ namespace conker::netplay {
     // empty if it isn't an address and port.
     std::string join_code_for(const std::string& address, uint64_t key);
 
-    // Starts and stops the library, once per process, around any sessions.
+    // Starts and stops the library, once per process, around any sessions. Starting makes this process's
+    // id: random, for the library's identity and to be reached by through a signalling server.
     bool startup(std::string& error);
     void shutdown();
+    // This process's id (never 0, once started).
+    uint64_t local_id();
+    // Gives this process a new id (and the library that identity), closing every connection: for each new
+    // match through a signalling server, which doesn't give an id out again for an hour after it's left.
+    bool new_id(std::string& error);
+
+    // How ICE connections find their way: the servers the library asks (STUN for this machine's public
+    // address, TURN to relay), as "host:port" lists separated by commas (empty: none), and which ways are
+    // allowed. `relay_only`: only through a TURN server, so no peer is told another's address (and without
+    // one there is no way); otherwise directly too, when the networks allow it, the relay if not.
+    struct Ice {
+        std::string stun;
+        std::string turn;
+        std::string turn_user;
+        std::string turn_password;
+        bool relay_only = true;
+    };
 
     // A bad network, faked by the library for tests (lockstep's --netplay-fake-network): what this process
     // sends is held back `lag_ms`, plus jitter (an average of `jitter_ms`, at most 4 times that), `loss`% of
@@ -91,6 +121,13 @@ namespace conker::netplay {
         std::string join_code(const std::string& address) const;
         // Joins the host by its join code (`me`'s key is the code's; its players, this machine's).
         bool join(const std::string& code, const Hello& me, std::string& error);
+        // The same through ICE: hosts, reached by local_id() through `signaller` (connected, or connecting),
+        // or joins the host with id `host_id` and the match's `key`. The signaller must outlive the session;
+        // poll() polls it too.
+        bool host(Signaller& signaller, const Ice& ice, int players, const Hello& me, std::string& error, int local = 1);
+        bool join(Signaller& signaller, const Ice& ice, uint64_t host_id, uint64_t key, const Hello& me, std::string& error);
+        // Host: the match's key, for a joiner through ICE (with local_id()).
+        uint64_t key() const { return is_host ? hello.key : 0; }
         // Host: once every port is taken (false until then), starts the match: tells the joiners, and
         // refuses any more. `own_view`: every player sees only their own view (the match's rule); `delay`:
         // the input delay everyone uses; `rollback`: the reads every peer predicts ahead (0: off).
@@ -102,6 +139,9 @@ namespace conker::netplay {
         // another machine's port): the host's to every joiner's ports; a joiner's to the host, on port 0 (it
         // can't tell which other ports are the host's, and the other joiners' pads come through the host).
         std::array<int, max_players> round_trips_by_port() const;
+        // How the connection to `port`'s machine goes, for the log: the address this end sends to (not through
+        // ICE, where it may be the peer's own) and the library's description. A joiner's only peer is the host.
+        std::string route(int port) const;
         // Host: the joiners in (machines, not players: one may have several ports).
         int joiners() const;
         // Host: the ports whose views are shown two to a window (each machine with two players', the host's too),
@@ -136,7 +176,8 @@ namespace conker::netplay {
             uint32_t connection = 0;
             int port = -1;          // its first port; -1 until the handshake is done
             uint8_t ports = 0;      // all of them (bit n: port n)
-            double connected_at = 0;
+            double connected_at = 0;   // host: when its connection came up (Connected)
+            bool up = false;            // host: it has (the handshake time runs from then)
             int64_t last_hash = -1; // the read of the last Hash from it (one per read, in order)
         };
 
@@ -153,6 +194,15 @@ namespace conker::netplay {
         Peer* find(uint32_t connection);
         friend void status_changed_callback(void* info);
 
+        // Hosting: the key, the poll group and the joiners' ports; listening is the caller's.
+        bool begin_hosting(int players, const Hello& me, std::string& error, int local);
+        // Passes the signaller's news to the library: signals, and a host that isn't there.
+        void take_signals(std::vector<Event>& events);
+
+        Signaller* signaller = nullptr;
+        struct IceContext;
+        std::unique_ptr<IceContext> ice_context;
+        uint64_t ice_host = 0;      // joiner through ICE: the host's id
         bool is_host = false;
         bool entry_open = true;
         bool started = false;       // joiner: Start has arrived

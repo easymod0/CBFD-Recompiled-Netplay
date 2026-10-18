@@ -6,6 +6,8 @@
 //   netplay_probe join <join code> [options]
 //   netplay_probe join <address:port> --silent | --oversize
 //   netplay_probe code <address:port> <key, hex>
+//   netplay_probe host room --signal <server:port> [--direct 1] [options]   (prints its room code)
+//   netplay_probe join <room code> --signal <server:port> [--direct 1] [options]
 //     --reads <n>        how many reads each peer sends (300: 10 s)
 //     --local <n>        players on this peer, each with a port (1 by default)
 //     --loss <percent>   the library drops this share of the packets sent (they're resent)
@@ -17,6 +19,12 @@
 //     --hostile far      (joining) send Inputs far beyond the reads it could have got to: dropped too
 //     --hostile port     (joining) send Inputs for the host's port 0 once the match starts: dropped too
 //     --hostile hash     (joining) send the same Hash twice once the match starts: dropped too
+//     --signal           connect through ICE, by a room on the server netplay_server at this address (which
+//                        offers its TURN relay, if it has one)
+//     --direct 1         allow direct connections too, not only through the TURN relay
+//     --turn-password <p>  (a test) use the server's relay with this password instead of the one it gave
+//     --again 1          (a test, hosting a room) make a room and leave first, then host with a new id, as
+//                        the game does when a player tries again
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
@@ -35,7 +43,9 @@
 #include <steam/isteamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 
+#include "join_code.hpp"
 #include "session.hpp"
+#include "signalling.hpp"
 
 using namespace conker::netplay;
 
@@ -64,6 +74,8 @@ namespace {
 
     int usage() {
         std::fprintf(stderr, "usage: netplay_probe host <port> [--players 2] | join <code> | join <address:port> --silent|--oversize\n"
+                             "       netplay_probe host room | join <room code>, with --signal <server:port> [--direct 1]\n"
+                             "       [--turn-password <p>] (a test: not the server's)\n"
                              "       [--reads 300] [--loss <percent>] [--build <hex>] [--rom <hex>] [--profile <hex>] [--mods <hex>]\n"
                              "       netplay_probe code <address:port> <key, hex>\n");
         return 2;
@@ -144,6 +156,10 @@ int main(int argc, char** argv) {
     std::string hostile;
     bool own_view = false;
     int local = 1;
+    std::string signal_server;
+    bool relay_only = true;
+    std::string turn_password;
+    bool again = false;
     for (int i = 3; i + 1 < argc; i += 2) {
         const std::string option = argv[i];
         const char* value = argv[i + 1];
@@ -157,6 +173,10 @@ int main(int argc, char** argv) {
         else if (option == "--mods") me.mods = std::strtoull(value, nullptr, 16);
         else if (option == "--hostile") hostile = value;
         else if (option == "--own-view") own_view = std::atoi(value) != 0;
+        else if (option == "--signal") signal_server = value;
+        else if (option == "--direct") relay_only = std::atoi(value) == 0;
+        else if (option == "--turn-password") turn_password = value;
+        else if (option == "--again") again = std::atoi(value) != 0;
         else return usage();
     }
     const bool oversize = !hosting && argc == 4 && std::strcmp(argv[3], "--oversize") == 0;
@@ -180,18 +200,86 @@ int main(int argc, char** argv) {
     }
     int result = 1;
     {
+        // Through a room on the server: registered there first, then the host makes its room and a joiner
+        // looks it up.
+        Signaller signaller;
         Session session;
-        const bool started = hosting ? session.host((uint16_t)std::atoi(where.c_str()), players, me, error, local)
-                                     : session.join(where, me, error);
+        bool started = false;
+        uint64_t room = 0;
+        const auto wait = [&signaller](auto done) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (!done() && signaller.state() != Signaller::State::failed && std::chrono::steady_clock::now() < until) {
+                signaller.poll();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            return done();
+        };
+        if (again && hosting && !signal_server.empty()) {
+            if (!signaller.connect(signal_server, error) || !wait([&] { return signaller.state() == Signaller::State::ready; })) {
+                std::fprintf(stderr, "the first time: %s\n", signaller.error().c_str());
+            }
+            else {
+                signaller.create_room(1);
+                wait([&] { return signaller.room() != 0; });
+                std::printf("left room %s\n", encode_room_code(signaller.room()).c_str());
+            }
+            signaller.close();
+            if (!new_id(error)) {
+                std::fprintf(stderr, "%s\n", error.c_str());
+            }
+        }
+        if (signal_server.empty()) {
+            started = hosting ? session.host((uint16_t)std::atoi(where.c_str()), players, me, error, local) : session.join(where, me, error);
+        }
+        else if (!hosting && !decode_room_code(where)) {
+            error = "\"" + where + "\" isn't a room code";
+        }
+        else if (!signaller.connect(signal_server, error)) {
+            error = "signalling: " + error;
+        }
+        else if (!wait([&] { return signaller.state() == Signaller::State::ready; })) {
+            error = "signalling: " + (signaller.state() == Signaller::State::failed ? signaller.error() : std::string("no answer"));
+        }
+        else if (relay_only && !signaller.turn()) {
+            error = "the server offers no TURN relay: only --direct 1 can connect through it";
+        }
+        else {
+            std::printf("registered with %s as %016llx%s\n", signal_server.c_str(), (unsigned long long)local_id(),
+                signaller.turn() ? (", relay " + signaller.turn()->servers).c_str() : "");
+            Ice ice = signaller.ice(relay_only);
+            if (!turn_password.empty()) ice.turn_password = turn_password;
+            if (hosting) {
+                started = session.host(signaller, ice, players, me, error, local);
+                if (started) {
+                    signaller.create_room(session.key());
+                    started = wait([&] { return signaller.room() != 0; });
+                    room = signaller.room();
+                    if (!started) error = "no room: " + signaller.error();
+                }
+            }
+            else {
+                signaller.find_room(*decode_room_code(where));
+                wait([&] { return signaller.lookup() == Signaller::Lookup::found || signaller.lookup() == Signaller::Lookup::missing; });
+                if (signaller.lookup() == Signaller::Lookup::found) {
+                    started = session.join(signaller, ice, signaller.found().host, signaller.found().key, me, error);
+                }
+                else {
+                    error = signaller.lookup() == Signaller::Lookup::missing ? "no room " + where + " on the server" : "no answer: " + signaller.error();
+                }
+            }
+        }
         if (!started) {
             std::fprintf(stderr, "%s\n", error.c_str());
         }
         else {
-            std::printf("%s %s\n", hosting ? "hosting on port" : "joining", where.c_str());
-            if (hosting) {
+            std::printf("%s %s%s\n", hosting ? "hosting" : "joining", signal_server.empty() && hosting ? "on port " : "", where.c_str());
+            if (hosting && signal_server.empty()) {
                 std::printf("join code %s\n", session.join_code("127.0.0.1:" + where).c_str());
-                std::fflush(stdout);
             }
+            else if (hosting) {
+                std::printf("room %s\n", encode_room_code(room).c_str());
+            }
+            std::fflush(stdout);
             std::map<int, Received> received;   // by port
             int joined = local;                 // the host counts its own
             bool playing = false;               // started: all the ports are taken
@@ -205,7 +293,7 @@ int main(int argc, char** argv) {
                     switch (event.type) {
                         case Event::Type::joined:
                             joined += std::popcount(event.ports);
-                            std::printf("ports %x joined (%d of %d)\n", event.ports, joined, players);
+                            std::printf("ports %x joined (%d of %d) by %s\n", event.ports, joined, players, session.route(event.port).c_str());
                             if (joined == players && session.start(own_view)) {
                                 playing = true;
                                 std::printf("started%s\n", own_view ? " (own view)" : "");
@@ -213,7 +301,7 @@ int main(int argc, char** argv) {
                             break;
                         case Event::Type::welcomed:
                             players = event.players;
-                            std::printf("welcomed: ports %x of %d\n", event.ports, event.players);
+                            std::printf("welcomed: ports %x of %d, the host by %s\n", event.ports, event.players, session.route(0).c_str());
                             if (hostile == "early") {
                                 session.send(inputs_for(event.port, 0));
                                 std::printf("sent Inputs before the start\n");

@@ -1,0 +1,12 @@
+# For test.sh only: everything on this machine. coturn runs with compose.yaml's own options, plus where to
+# listen and relay and leave to relay to this machine's address (allowed over the denied private ones);
+# the servers find their address by a made-up name (PUBLIC_HOST), as they would by DNS.
+services:
+  signal:
+    extra_hosts:
+      - "${PUBLIC_HOST}:${TEST_IP}"
+  turn:
+    extra_hosts:
+      - "${PUBLIC_HOST}:${TEST_IP}"
+    environment:
+      TURN_TEST_ARGS: "--listening-ip=${TEST_IP} --relay-ip=${TEST_IP} --allowed-peer-ip=${TEST_IP}"

@@ -2,12 +2,14 @@
 
 #include "session.hpp"
 #include "join_code.hpp"
+#include "signalling.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <chrono>
 #include <thread>
 #include <cstdio>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -19,6 +21,7 @@
 #endif
 
 #include <steam/isteamnetworkingutils.h>
+#include <steam/steamnetworkingcustomsignaling.h>
 #include <steam/steamnetworkingsockets.h>
 
 namespace conker::netplay {
@@ -36,14 +39,24 @@ namespace conker::netplay {
         // The most messages one poll() takes: a flood can't hold the game's thread there.
         constexpr int max_messages_per_poll = 256;
 
-        // The options for every connection, as the host's listen socket or a joiner's connection.
+        // The options for every connection, as the host's listen socket or a joiner's connection, and how an
+        // ICE one finds its way (the strings stay `ice`'s, which must outlive the call they're given to).
         struct ConnectionOptions {
-            SteamNetworkingConfigValue_t values[4];
-            ConnectionOptions(void (*status_changed)(SteamNetConnectionStatusChangedCallback_t*)) {
+            SteamNetworkingConfigValue_t values[10];
+            int count = 4;
+            ConnectionOptions(void (*status_changed)(SteamNetConnectionStatusChangedCallback_t*), const Ice* ice = nullptr) {
                 values[0].SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)status_changed);
                 values[1].SetInt32(k_ESteamNetworkingConfig_RecvMaxMessageSize, (int32_t)max_packet_size);
                 values[2].SetInt32(k_ESteamNetworkingConfig_RecvBufferSize, recv_buffer_bytes);
                 values[3].SetInt32(k_ESteamNetworkingConfig_RecvBufferMessages, recv_buffer_messages);
+                if (ice != nullptr) {
+                    values[count++].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, ice->relay_only
+                        ? k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Relay : k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_All);
+                    values[count++].SetString(k_ESteamNetworkingConfig_P2P_STUN_ServerList, ice->relay_only ? "" : ice->stun.c_str());
+                    values[count++].SetString(k_ESteamNetworkingConfig_P2P_TURN_ServerList, ice->turn.c_str());
+                    values[count++].SetString(k_ESteamNetworkingConfig_P2P_TURN_UserList, ice->turn_user.c_str());
+                    values[count++].SetString(k_ESteamNetworkingConfig_P2P_TURN_PassList, ice->turn_password.c_str());
+                }
             }
         };
 
@@ -74,6 +87,40 @@ namespace conker::netplay {
         }
 
         Session* current = nullptr;
+        uint64_t process_id = 0;
+
+        // The library's identity for a process's id, and back (0: not one of ours).
+        SteamNetworkingIdentity identity_of(uint64_t id) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "conker-%016llx", (unsigned long long)id);
+            SteamNetworkingIdentity identity;
+            identity.SetGenericString(text);
+            return identity;
+        }
+        uint64_t id_of(const SteamNetworkingIdentity& identity) {
+            const char* text = identity.GetGenericString();
+            unsigned long long id = 0;
+            char end = 0;
+            if (text == nullptr || std::strlen(text) != 23 || std::sscanf(text, "conker-%16llx%c", &id, &end) != 1) {
+                return 0;
+            }
+            return id;
+        }
+
+        // A connection's signals, to its peer's id through the signaller's outbox (which it keeps, as the
+        // library may send one after the session has gone).
+        class ConnectionSignals : public ISteamNetworkingConnectionSignaling {
+        public:
+            ConnectionSignals(std::shared_ptr<SignalOutbox> outbox, uint64_t peer) : outbox(std::move(outbox)), peer(peer) {}
+            bool SendSignal(HSteamNetConnection, const SteamNetConnectionInfo_t&, const void* data, int size) override {
+                outbox->push(peer, { (const uint8_t*)data, (size_t)size });
+                return true;
+            }
+            void Release() override { delete this; }
+        private:
+            std::shared_ptr<SignalOutbox> outbox;
+            uint64_t peer;
+        };
 
         double now() {
             using namespace std::chrono;
@@ -93,6 +140,22 @@ namespace conker::netplay {
             return info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally ? Reason::timeout : Reason::quit;
         }
     }
+
+    // Signals that arrive for this process: someone connecting to the host (each gets its own
+    // ConnectionSignals), or a refusal to send back. A joiner takes no new connections.
+    struct Session::IceContext : ISteamNetworkingSignalingRecvContext {
+        std::shared_ptr<SignalOutbox> outbox;
+        bool accepting = false;
+        ISteamNetworkingConnectionSignaling* OnConnectRequest(HSteamNetConnection, const SteamNetworkingIdentity& peer, int) override {
+            const uint64_t id = id_of(peer);
+            return accepting && id != 0 ? new ConnectionSignals(outbox, id) : nullptr;
+        }
+        void SendRejectionSignal(const SteamNetworkingIdentity& peer, const void* data, int size) override {
+            if (const uint64_t id = id_of(peer); id != 0) {
+                outbox->push(id, { (const uint8_t*)data, (size_t)size });
+            }
+        }
+    };
 
     void status_changed_callback(void* info) {
         if (current != nullptr) {
@@ -126,12 +189,33 @@ namespace conker::netplay {
     }
 
     bool startup(std::string& error) {
+        if (!random_key(process_id)) {
+            error = "couldn't make this process's id (no random source)";
+            return false;
+        }
+        const SteamNetworkingIdentity identity = identity_of(process_id);
         SteamNetworkingErrMsg message;
-        if (!GameNetworkingSockets_Init(nullptr, message)) {
+        if (!GameNetworkingSockets_Init(&identity, message)) {
             error = message;
             return false;
         }
         SteamNetworkingUtils()->SetDebugOutputFunction(k_ESteamNetworkingSocketsDebugOutputType_Msg, debug_output);
+        return true;
+    }
+
+    uint64_t local_id() {
+        return process_id;
+    }
+
+    bool new_id(std::string& error) {
+        uint64_t id = 0;
+        if (!random_key(id)) {
+            error = "couldn't make a new id (no random source)";
+            return false;
+        }
+        process_id = id;
+        const SteamNetworkingIdentity identity = identity_of(process_id);
+        SteamNetworkingSockets()->ResetIdentity(&identity);
         return true;
     }
 
@@ -170,7 +254,7 @@ namespace conker::netplay {
         current = nullptr;
     }
 
-    bool Session::host(uint16_t port, int players, const Hello& me, std::string& error, int local) {
+    bool Session::begin_hosting(int players, const Hello& me, std::string& error, int local) {
         if (players < 2 || players > max_players) {
             error = "a match is 2 to 4 players";
             return false;
@@ -184,19 +268,43 @@ namespace conker::netplay {
             error = "couldn't make the match's key (no random source)";
             return false;
         }
-        SteamNetworkingIPAddr address;
-        address.Clear();
-        address.m_port = port;
-        ConnectionOptions options(status_changed);
-        listen_socket = SteamNetworkingSockets()->CreateListenSocketIP(address, 4, options.values);
-        if (listen_socket == k_HSteamListenSocket_Invalid) {
-            error = "couldn't listen on UDP port " + std::to_string(port);
-            return false;
-        }
         poll_group = SteamNetworkingSockets()->CreatePollGroup();
         is_host = true;
         own_ports = (uint8_t)((1u << local) - 1);
         match_players = players;
+        return true;
+    }
+
+    bool Session::host(uint16_t port, int players, const Hello& me, std::string& error, int local) {
+        if (!begin_hosting(players, me, error, local)) {
+            return false;
+        }
+        SteamNetworkingIPAddr address;
+        address.Clear();
+        address.m_port = port;
+        ConnectionOptions options(status_changed);
+        listen_socket = SteamNetworkingSockets()->CreateListenSocketIP(address, options.count, options.values);
+        if (listen_socket == k_HSteamListenSocket_Invalid) {
+            error = "couldn't listen on UDP port " + std::to_string(port);
+            return false;
+        }
+        return true;
+    }
+
+    bool Session::host(Signaller& through, const Ice& ice, int players, const Hello& me, std::string& error, int local) {
+        if (!begin_hosting(players, me, error, local)) {
+            return false;
+        }
+        ConnectionOptions options(status_changed, &ice);
+        listen_socket = SteamNetworkingSockets()->CreateListenSocketP2P(0, options.count, options.values);
+        if (listen_socket == k_HSteamListenSocket_Invalid) {
+            error = "couldn't listen for peer-to-peer connections";
+            return false;
+        }
+        signaller = &through;
+        ice_context = std::make_unique<IceContext>();
+        ice_context->outbox = through.outbox();
+        ice_context->accepting = true;
         return true;
     }
 
@@ -215,7 +323,7 @@ namespace conker::netplay {
             host_address.SetIPv4((uint32_t)ip[0] << 24 | ip[1] << 16 | ip[2] << 8 | ip[3], endpoint->port);
         }
         ConnectionOptions options(status_changed);
-        const HSteamNetConnection connection = SteamNetworkingSockets()->ConnectByIPAddress(host_address, 4, options.values);
+        const HSteamNetConnection connection = SteamNetworkingSockets()->ConnectByIPAddress(host_address, options.count, options.values);
         if (connection == k_HSteamNetConnection_Invalid) {
             error = "couldn't connect to the host";
             return false;
@@ -227,6 +335,63 @@ namespace conker::netplay {
         hello.key = endpoint->key;
         peers.push_back({ connection, 0, 0, now() });  // the host, from port 0
         return true;
+    }
+
+    bool Session::join(Signaller& through, const Ice& ice, uint64_t host_id, uint64_t key, const Hello& me, std::string& error) {
+        if (host_id == 0 || host_id == process_id) {
+            error = "that isn't another host's id";
+            return false;
+        }
+        signaller = &through;
+        ice_context = std::make_unique<IceContext>();
+        ice_context->outbox = through.outbox();
+        const SteamNetworkingIdentity host_identity = identity_of(host_id);
+        ConnectionOptions options(status_changed, &ice);
+        const HSteamNetConnection connection = SteamNetworkingSockets()->ConnectP2PCustomSignaling(
+            new ConnectionSignals(through.outbox(), host_id), &host_identity, 0, options.count, options.values);
+        if (connection == k_HSteamNetConnection_Invalid) {
+            error = "couldn't connect to the host";
+            return false;
+        }
+        poll_group = SteamNetworkingSockets()->CreatePollGroup();
+        SteamNetworkingSockets()->SetConnectionPollGroup(connection, poll_group);
+        is_host = false;
+        ice_host = host_id;
+        hello = me;
+        hello.key = key;
+        peers.push_back({ connection, 0, 0, now() });  // the host, from port 0
+        return true;
+    }
+
+    void Session::take_signals(std::vector<Event>& events) {
+        if (signaller == nullptr) {
+            return;
+        }
+        signaller->poll();
+        for (const signal::Signal& s : signaller->received()) {
+            SteamNetworkingSockets()->ReceivedP2PCustomSignal(s.data.data(), (int)s.data.size(), ice_context.get());
+        }
+        // A joiner still finding its way to the host: ended if the host isn't on the server, or the server
+        // can't be reached. (Once connected, the signaller doesn't matter to it.)
+        const std::vector<uint64_t> gone = signaller->unreachable();
+        if (!is_host && !peers.empty() && own_ports == 0) {
+            std::string why;
+            if (std::find(gone.begin(), gone.end(), ice_host) != gone.end()) {
+                why = "the host isn't on the signalling server";
+            }
+            else if (signaller->state() == Signaller::State::failed) {
+                why = "signalling: " + signaller->error();
+            }
+            if (!why.empty()) {
+                SteamNetworkingSockets()->CloseConnection(peers[0].connection, 0, nullptr, false);
+                peers.clear();
+                Event event{ Event::Type::ended };
+                event.reason = Reason::timeout;
+                event.detail = why;
+                event.by_signalling = true;
+                events.push_back(std::move(event));
+            }
+        }
     }
 
     bool Session::start(bool own_view, int delay, int rollback) {
@@ -289,6 +454,26 @@ namespace conker::netplay {
         return out;
     }
 
+    std::string Session::route(int port) const {
+        for (const Peer& peer : peers) {
+            if (is_host ? (peer.ports & (1u << port)) == 0 : port != 0) {
+                continue;
+            }
+            SteamNetConnectionInfo_t info;
+            if (!SteamNetworkingSockets()->GetConnectionInfo(peer.connection, &info)) {
+                return "?";
+            }
+            // Through ICE, not the address (the library gives the peer's own on a direct route: not for logs).
+            if (signaller != nullptr || info.m_addrRemote.IsIPv6AllZeros()) {
+                return info.m_szConnectionDescription;
+            }
+            char address[SteamNetworkingIPAddr::k_cchMaxString];
+            info.m_addrRemote.ToString(address, sizeof(address), true);
+            return std::string(address) + " (" + info.m_szConnectionDescription + ")";
+        }
+        return "?";
+    }
+
     int Session::joiners() const {
         return (int)std::count_if(peers.begin(), peers.end(), [](const Peer& p) { return p.port >= 0; });
     }
@@ -327,6 +512,12 @@ namespace conker::netplay {
                 if (!is_host && find(info->m_hConn) != nullptr) {
                     send_to(info->m_hConn, hello);
                 }
+                // The handshake time runs from here: through ICE, finding the way can take longer than
+                // the time itself (the library's own connect timeout covers a way never found).
+                else if (Peer* peer = find(info->m_hConn); is_host && peer != nullptr) {
+                    peer->connected_at = now();
+                    peer->up = true;
+                }
                 break;
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
@@ -361,9 +552,12 @@ namespace conker::netplay {
 
     std::vector<Event> Session::poll() {
         ISteamNetworkingSockets* sockets = SteamNetworkingSockets();
+        std::vector<Event> signal_events;
+        take_signals(signal_events);
         sockets->RunCallbacks();
         std::vector<Event> events = std::move(pending_events);
         pending_events.clear();
+        events.insert(events.end(), signal_events.begin(), signal_events.end());
 
         if (poll_group != k_HSteamNetPollGroup_Invalid) {
             SteamNetworkingMessage_t* messages[32];
@@ -382,7 +576,7 @@ namespace conker::netplay {
         // Joiners that never said Hello.
         const double t = now();
         for (size_t i = 0; i < peers.size();) {
-            if (is_host && peers[i].port < 0 && t - peers[i].connected_at > handshake_seconds) {
+            if (is_host && peers[i].port < 0 && peers[i].up && t - peers[i].connected_at > handshake_seconds) {
                 drop(peers[i], Reason::timeout, &events);
             }
             else {

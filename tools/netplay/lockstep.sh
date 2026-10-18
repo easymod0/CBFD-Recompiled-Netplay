@@ -23,6 +23,9 @@
 #   tall       a 2-player Deathmatch (make_match.py --mouse): the split screen's two views are drawn taller in
 #              "my view only", the match's rule, so every copy widens each camera's culls up and down: both copies
 #              of a match of two must match its solo replay
+#   room       the match through a room on a netplay server (netplay_server, beside the game's build, on
+#              loopback): the host makes the room, the joiner joins by its code (direct connections: there's
+#              no relay here, tools/netplay/server/test.sh tests that); both must match solo's
 #   jittery    the same with input delay 0 and random sleeps (--jitter 500) on the joiner, so the two
 #              are out of step and wait for each other all the time
 #   leave      the mouse match, the second joiner quitting at read 1500: the host and the first joiner play on,
@@ -41,7 +44,7 @@
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
-# 27310 to 27319 on 127.0.0.1.
+# 27310 to 27320 on 127.0.0.1.
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -63,7 +66,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift 2 ;;
         --match-options) MATCH_OPTIONS=$2; shift 2 ;;
         --host-options) HOST_OPTIONS=$2; shift 2 ;;
-        -h|--help) sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -117,6 +120,23 @@ if finish "was the last: quitting" match-host match-join; then
 else
     failed=1
 fi
+
+echo "room"
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27320 > "$OUT/room-server.out" 2>&1 &
+server=$!
+pids="$pids $server"
+room="--netplay-server 127.0.0.1:27320 --netplay-direct"
+# shellcheck disable=SC2086
+pads=1.pads start room-host --netplay-host room $room --players 2 --input-delay 2
+# shellcheck disable=SC2086
+pads=2.pads start room-join --netplay-join "$(room_of room-host)" $room
+if finish "was the last: quitting" room-host room-join; then
+    same room-host || failed=1
+    same room-join || failed=1
+else
+    failed=1
+fi
+kill $server 2>/dev/null
 
 echo "jittery"
 start jittery-host --netplay-host 27311 --netplay-address 127.0.0.1 --players 2 --input-delay 0
@@ -250,8 +270,12 @@ pads=couch-12.pads start couch-host2 --netplay-host 27314 --netplay-address 127.
 pads=couch-3.pads start couch-join1 --netplay-join "$(code_of couch-host2)"
 if finish "was the last: quitting" couch-host2 couch-join1; then
     grep -q "this is ports 1 and 2" "$OUT/couch-host2.out" || { echo "  couch-host2 isn't on ports 1 and 2"; failed=1; }
-    # The automatic delay counts the joining machine's round trip (one, on loopback: 0), not its players.
-    grep -q "this is ports 1 and 2, input delay 0" "$OUT/couch-host2.out" || { echo "  couch-host2's automatic input delay isn't 0"; failed=1; }
+    # The automatic delay counts the joining machine's round trip (one, on loopback: 0), not its players
+    # (unless --match-options fakes a slower network).
+    case " $MATCH_OPTIONS " in
+        *" --netplay-fake-network "*) ;;
+        *) grep -q "this is ports 1 and 2, input delay 0" "$OUT/couch-host2.out" || { echo "  couch-host2's automatic input delay isn't 0"; failed=1; } ;;
+    esac
     for name in couch-host2 couch-join1; do
         same $name couch-solo12 "$MOUSE_READS" || failed=1
     done

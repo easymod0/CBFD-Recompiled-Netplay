@@ -16,7 +16,14 @@
 //                                sees only their own view of the split screen (the match's rule, for all)
 //   --netplay-address <address>  (hosting) this computer's address as the others reach it: the join code
 //                                is made from it and printed (it holds the match's random key)
-//   --netplay-join <code>        joins the host by its join code
+//   --netplay-join <code>        joins the host by its join code, or by its room code (on --netplay-server)
+//   --netplay-host room          hosts through a room on the netplay server instead (--netplay-server): the
+//                                server gives a room code to pass on (printed), which has no address in it;
+//                                no port to forward, and by default the players only reach each other through
+//                                the server's relay, so nobody sees another's address
+//   --netplay-server <host:port> the netplay server, for rooms (tools/netplay/server/)
+//   --netplay-direct             (through a room) allow direct connections too, when the networks allow it
+//                                (the relay if not): quicker, but the players see each other's addresses
 //   --local-players <n>          (hosting or joining) players on this machine, 1 to 3 (1 by default): each
 //                                has a port of their own (the lowest free ones), and plays with this
 //                                machine's controller of the same number (the first has the keyboard, mouse
@@ -81,14 +88,19 @@ namespace conker::lockstep {
     // The same as the options, from the menu (frontend's netplay.cpp).
     // `input_delay`: reads, or -1 for auto; `local`: the players on this machine (fewer than `players`).
     // `rollback`: the reads every peer predicts ahead (--rollback's), 0 (off) to 12.
+    // `port` 0: through a room on the netplay server (set_server); -1: not hosting.
     void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     void set_join(const std::string& where, int local = 1);
+    // The netplay server ("host:port") for rooms, and whether direct connections are allowed through it.
+    void set_server(const std::string& server, bool allow_direct);
     // Checks the options, before the game starts (false: a message was printed).
     bool prepare();
     // Hosting: the join code for this match at `address` (this computer's, as the others reach it; the
     // port is added if it hasn't one), or empty if it isn't an address or nothing is hosted yet. It holds
     // the match's key, which is new each time a match is hosted.
     std::string join_code(std::string address);
+    // Hosting through a room: its code, once the server has made it (empty until then).
+    std::string room_code();
 
     // Connecting, a step at a time, so a menu can show how it goes (and the networking is started the
     // first time): begin hosts or joins (false: `error` says why), then poll_connect until every player
