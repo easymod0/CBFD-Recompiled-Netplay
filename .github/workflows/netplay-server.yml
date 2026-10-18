@@ -74,6 +74,9 @@ jobs:
           docker stop -t 5 smoke
           docker logs smoke | grep -q "stopping"
           test "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 0
+          # compose.yaml's net runs nft and ip from this image.
+          docker run --rm --entrypoint nft "$IMAGE:${{ matrix.arch }}-$GITHUB_SHA" --version
+          docker run --rm --entrypoint ip "$IMAGE:${{ matrix.arch }}-$GITHUB_SHA" -V
           # With a relay to offer, as compose.yaml runs it.
           docker run -d --name smoke-turn -e TURN_SECRET=smoke-test-secret-0123 "$IMAGE:${{ matrix.arch }}-$GITHUB_SHA" --turn 203.0.113.7:3478
           sleep 2

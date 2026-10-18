@@ -12,10 +12,11 @@
 #        LAN address on a relay port; that the servers looked the name up; and that the public address is
 #        gone from this machine once they stop.
 #   vps  the public address already this machine's (put on lo by the test), as on a server with its
-#        public address: no translation, only the guard. A match of two, and the guard.
+#        public address: no translation, only the guard. A match of two, the guard, and the guard still
+#        there with net stopped and coturn running.
 #
 # Linux, with Docker (rootful) and nftables, python3 and openssl. It adds and removes TEST_PUBLIC_IP on lo,
-# and replaces any conker_netplay nftables table: don't run it on a machine that hosts the servers.
+# and replaces (then removes) the conker_netplay_* nftables tables: don't run it on a machine that hosts.
 #   sh tools/netplay/server/test.sh <build folder of host/src/netplay/net> [output folder]
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -34,8 +35,9 @@ compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/co
 image=conker-netplay-server:local
 # A command as root, with network-admin rights, on this machine's network (the vps pass's address).
 as_admin() { command=$1; shift; docker run --rm --network host --cap-add NET_ADMIN --user 0 --entrypoint "$command" "$image" "$@"; }
-# However it ends, the servers stop and the vps pass's address goes.
-trap '$compose down -v > /dev/null 2>&1; as_admin ip addr del "$TEST_PUBLIC_IP/32" dev lo > /dev/null 2>&1' EXIT
+# However it ends, the servers stop, and the vps pass's address and net's guard (which it leaves) go.
+trap '$compose down -v > /dev/null 2>&1; if docker image inspect "$image" > /dev/null 2>&1; then
+    as_admin ip addr del "$TEST_PUBLIC_IP/32" dev lo > /dev/null 2>&1; as_admin nft delete table ip conker_netplay_guard > /dev/null 2>&1; fi' EXIT
 trap 'exit 130' INT TERM
 $compose build > build.txt 2>&1 || { cat build.txt; echo "the image didn't build"; exit 1; }
 
@@ -107,17 +109,20 @@ uclient() {
         -u "$user" -w "$password" -p 3478 -e "$1" -r "$2" -n 3 -m 1 "$TEST_IP" > /dev/null 2>&1
 }
 
-# listen <address> <port> <file>: in the background, waits 12 s for a packet at the first free port from
-# <port> down (a relay may have one), and says "received" or "nothing" in <file>. Prints the port.
+# listen <address> <port> <file>: in the background (its pid in $listener), waits 12 s for a packet at the
+# first port from <port> down that's free (a relay may have one), and says "received" or "nothing" in
+# <file>; sets $port to the port.
 listen() {
-    python3 -c 'import socket, sys
+    python3 -c 'import errno, socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 port = int(sys.argv[2])
 while True:
     try:
         s.bind((sys.argv[1], port))
         break
-    except OSError:
+    except OSError as e:
+        if e.errno != errno.EADDRINUSE or port <= int(sys.argv[2]) - 50:
+            raise
         port -= 1
 print("port", port, flush=True)
 s.settimeout(12)
@@ -126,20 +131,21 @@ try:
     print("received")
 except socket.timeout:
     print("nothing")' "$1" "$2" > "$3" 2>&1 &
+    listener=$!
     i=0
     until grep -q '^port' "$3" 2> /dev/null || [ $i -ge 50 ]; do sleep 0.1; i=$((i + 1)); done
-    sed -n 's/^port //p' "$3"
+    port=$(sed -n 's/^port //p' "$3")
 }
 
 # guard <pass>: relayed to this machine (its public address), a port outside the relay range gets
 # nothing; one inside it does.
 guard() {
-    port=$(listen "$TEST_PUBLIC_IP" 39999 "$1.outside.txt")
+    listen "$TEST_PUBLIC_IP" 39999 "$1.outside.txt"
     uclient "$TEST_PUBLIC_IP" "$port"
-    wait
-    port=$(listen "$TEST_PUBLIC_IP" 49659 "$1.inside.txt")
+    wait "$listener"
+    listen "$TEST_PUBLIC_IP" 49659 "$1.inside.txt"
     uclient "$TEST_PUBLIC_IP" "$port"
-    wait
+    wait "$listener"
     ok=0
     grep -q nothing "$1.outside.txt" && grep -q received "$1.inside.txt" && ok=1
     [ $ok -eq 1 ] || echo "  outside the relay range: $(tail -n 1 "$1.outside.txt"); inside: $(tail -n 1 "$1.inside.txt")"
@@ -177,9 +183,9 @@ guard nat
 
 # net's translation: a packet from outside (a container on Docker's bridge) to the LAN address on a relay
 # port arrives at the public address.
-port=$(listen "$TEST_PUBLIC_IP" 49658 nat.inbound.txt)
-docker run --rm busybox:1.36 sh -c "echo x | nc -u -w 1 $TEST_IP $port" > /dev/null 2>&1
-wait
+listen "$TEST_PUBLIC_IP" 49658 nat.inbound.txt
+docker run --rm --entrypoint bash "$image" -c "echo x > /dev/udp/$TEST_IP/$port" > /dev/null 2>&1
+wait "$listener"
 ok=0
 grep -q received nat.inbound.txt && ok=1
 check nat-inbound $ok
@@ -208,6 +214,14 @@ $compose logs net 2>&1 | grep -q "public address $TEST_PUBLIC_IP is this machine
 check vps-no-nat $ok
 relay vps-two 2 --reads 150
 guard vps
+# net stopped (as while it's recreated) with coturn still running: the guard stays.
+$compose stop net > /dev/null 2>&1
+listen "$TEST_PUBLIC_IP" 39999 vps.lapse.txt
+uclient "$TEST_PUBLIC_IP" "$port"
+wait "$listener"
+ok=0
+grep -q nothing vps.lapse.txt && $compose ps --status running turn 2>&1 | grep -q turn && ok=1
+check vps-guard-stays $ok
 stop vps
 # net leaves an address it didn't add.
 ok=0

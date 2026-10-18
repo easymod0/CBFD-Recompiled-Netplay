@@ -37,8 +37,13 @@ docker compose up -d
 docker compose logs -f    # each says "public address <ip>": check it's this server's
 ```
 
-**Updating:** the fixes are in `compose.yaml` as well as the image, so download it again (the same `curl`
-line), check `.env.example` for new settings, then `docker compose pull && docker compose up -d`.
+**Updating:** the fixes are in `compose.yaml` as well as the image, and each needs the other as of the
+same commit: download `compose.yaml` again (the same `curl` line), check `.env.example` for new settings,
+then `docker compose pull && docker compose up -d`, and check `docker compose logs net` says `ready`.
+
+**Stopping:** `docker compose down -v`. `net`'s guard stays (a firewall rule that only affects coturn's
+user); to remove it too, `sudo nft delete table ip conker_netplay_guard`. If `net` was killed rather than
+stopped, also `sudo nft delete table ip conker_netplay_nat` and `sudo ip addr del <public IP>/32 dev lo`.
 
 `TURN_SECRET` is 48 random hex characters (any 16 or more letters and digits will do). Only coturn and the
 signalling server use it; players never see it, and nobody needs it to play. Without `openssl`:
@@ -66,23 +71,31 @@ Open in the firewall (all UDP: the game uses TURN over UDP only, and coturn rela
 All use the host's network, as coturn's relay ports are a range that Docker's port mapping handles
 badly. Relays are IPv4 only.
 
-**`net`**, the third container (the server's image, as root with network-admin rights), sets up this
-machine's network for the relay, in an nftables table of its own (`conker_netplay`) that goes when it
-stops; coturn starts once it's ready:
-- **A guard**, always: coturn may relay to the public address (this machine's) only on the relay ports,
-  i.e. to other players' relays, never to its other services. (Its other addresses are private ones,
-  which coturn denies; a second public address on the machine isn't guarded.) So nobody can play on the
+**`net`**, the third container (the server's image, as root with network-admin rights only), sets up
+this machine's network for the relay, in nftables tables of its own; coturn starts once it's ready, and
+restarts with it:
+- **A guard** (`conker_netplay_guard`), always: coturn may relay to the public address (this machine's)
+  only on the relay ports, i.e. to other players' relays, never to its other services. (Its other
+  addresses are private ones, which coturn denies; a second public address on the machine isn't
+  guarded.) It stays when `net` stops, so it never lapses while coturn runs. So nobody can play on the
   server machine itself.
 - **Behind NAT** (at home behind a router, or a cloud machine whose public address isn't on its own
   network interface, as on AWS or Google Cloud), which it notices itself: every relay-only match has both
   players' relays on this server, and relay to relay goes to the public address; with coturn's usual
   setup it would go between LAN addresses instead, and the players wouldn't recognise each other's
   traffic. So `net` puts the public address on this machine (on `lo`) for the relays, and translates
-  between it and the machine's LAN address (the one its default route goes from, or `HOME_LAN_IP` in
-  `.env`) for traffic through the router. It says `behind NAT: ...` in its log.
+  (`conker_netplay_nat`) between it and the machine's LAN address (the one its default route goes from,
+  or `HOME_LAN_IP` in `.env`) for traffic through the router. Its log says `behind NAT: public address
+  <public> ... to and from <LAN address> (on <interface>)`: check that's the address your router
+  forwards to, or set `HOME_LAN_IP` and `docker compose up -d`. A VPN as the machine's default route
+  isn't supported (the relays' replies would go out through it). While it runs, this machine reaches its
+  public address on itself, not through the router (say, a port forward of it to another machine).
 
-Host firewalls (firewalld, ufw) must let the ports above in; after the translation, they arrive for the
-public address, not the LAN one.
+`net` needs a kernel with nf_tables (most Linux distributions; some NAS systems lack it, and then `net`
+says `couldn't set up nftables` and coturn doesn't start). Host firewalls (firewalld, ufw) must let the
+ports above in; after the translation, they arrive for the public address, not the LAN one. The relay
+ports are in Linux's range for other programs' outgoing ports too: to keep them for the relay,
+`sudo sysctl -w net.ipv4.ip_local_reserved_ports=49160-49659` (and in `/etc/sysctl.d/` to keep it).
 
 **Hosting behind a router** (at home): forward the ports above to the server machine, at the same
 numbers (don't remap them), and give it a fixed address on your network (a DHCP reservation); `net` does
@@ -90,8 +103,8 @@ the rest.
 
 `PUBLIC_HOST`'s record points at your public IP; if your provider changes it, update the record (a
 dynamic DNS updater can) and `docker compose restart`. Playing from the same network as the server reaches
-it through the public IP from inside, which needs the router's NAT loopback (hairpinning) (or set the
-game's Server to the server's LAN address, for signalling).
+it through the public IP from inside, which needs the router's NAT loopback (hairpinning): the relay
+is always given out at the public address.
 
 `docker compose down` stops them.
 
@@ -136,4 +149,4 @@ sh tools/netplay/server/test.sh build-net /tmp/relay-test
 
 It needs Linux with rootful Docker, nftables, python3 and openssl. It uses the project name
 `conker-netplay-test` but the same ports (27100, 3478, 49160-49659), adds and removes `5.5.5.5` on `lo`
-and replaces any `conker_netplay` nftables table, so don't run it on a machine that is hosting.
+and replaces, then removes, the `conker_netplay_*` nftables tables, so don't run it on a machine that is hosting.
