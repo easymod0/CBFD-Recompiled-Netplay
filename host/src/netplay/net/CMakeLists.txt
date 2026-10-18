@@ -48,10 +48,14 @@ endif()
 include(FetchContent)
 # v1.6.1. Its submodules (abseil, WebRTC, vjson) are only for WebRTC's ICE and its tests: its own ICE
 # client needs none.
+# Patched (patches/): relay-only ICE checks only from relay candidates (gns-relay-only-checks.patch).
 FetchContent_Declare(GameNetworkingSockets
     GIT_REPOSITORY https://github.com/ValveSoftware/GameNetworkingSockets.git
     GIT_TAG d534c19aa760df3fb75fd20db13ba1932b8a5463
     GIT_SUBMODULES ""
+    PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/patches/gns-relay-only-checks.patch
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/patches/apply.cmake
+    UPDATE_DISCONNECTED TRUE
     EXCLUDE_FROM_ALL)
 set(BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)

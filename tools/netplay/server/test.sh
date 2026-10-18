@@ -15,6 +15,9 @@
 #        public address: no translation, only the guard. A match of two, the guard, and the guard still
 #        there with net stopped and coturn running.
 #
+# Like a real relay server, the relays here only take packets from other relays (see start), so the
+# matches must go relay to relay.
+#
 # Linux, with Docker (rootful) and nftables, python3 and openssl. It adds and removes TEST_PUBLIC_IP on lo,
 # and replaces (then removes) the conker_netplay_* nftables tables: don't run it on a machine that hosts.
 #   sh tools/netplay/server/test.sh <build folder of host/src/netplay/net> [output folder]
@@ -34,15 +37,22 @@ export TEST_PUBLIC_IP=5.5.5.5 PUBLIC_HOST=netplay-test.invalid PUBLIC_IP= HOME_L
 compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/compose.build.yaml -f $here/compose.test.yaml"
 image=conker-netplay-server:local
 # A command as root, with network-admin rights, on this machine's network (the vps pass's address).
-as_admin() { command=$1; shift; docker run --rm --network host --cap-add NET_ADMIN --user 0 --entrypoint "$command" "$image" "$@"; }
+as_admin() { command=$1; shift; docker run -i --rm --network host --cap-add NET_ADMIN --user 0 --entrypoint "$command" "$image" "$@"; }
 # However it ends, the servers stop, and the vps pass's address and net's guard (which it leaves) go.
 trap '$compose down -v > /dev/null 2>&1; if docker image inspect "$image" > /dev/null 2>&1; then
-    as_admin ip addr del "$TEST_PUBLIC_IP/32" dev lo > /dev/null 2>&1; as_admin nft delete table ip conker_netplay_guard > /dev/null 2>&1; fi' EXIT
+    as_admin ip addr del "$TEST_PUBLIC_IP/32" dev lo > /dev/null 2>&1; as_admin nft delete table ip conker_netplay_guard > /dev/null 2>&1
+    as_admin nft delete table ip conker_netplay_test > /dev/null 2>&1; fi' EXIT
 trap 'exit 130' INT TERM
 $compose build > build.txt 2>&1 || { cat build.txt; echo "the image didn't build"; exit 1; }
 
-# start <pass>: starts the servers, and waits for coturn (which waits for net).
+# start <pass>: starts the servers, and waits for coturn (which waits for net). The players here are on the
+# server's own machine, where the relays' address is local too: a check sent straight from a player's
+# socket to a relay could come from that address, and pass as the other relay. A real relay server drops
+# every packet a relay gets but from another relay, so this does too (conker_netplay_test: those on lo,
+# that is from this machine, from other ports than the relays'), and the matches must go relay to relay.
 start() {
+    printf 'table ip conker_netplay_test {\n chain input {\n  type filter hook input priority -10; policy accept;\n  iifname "lo" ip daddr %s udp dport 49160-49659 udp sport != 49160-49659 drop\n }\n}\n' "$TEST_PUBLIC_IP" |
+        as_admin nft -f - || { echo "couldn't set up nftables"; exit 1; }
     $compose up -d --wait > "$1.compose.txt" 2>&1 || { cat "$1.compose.txt"; echo "the servers didn't start"; exit 1; }
     i=0
     until $compose logs turn 2>&1 | grep -q "Total auth threads"; do
@@ -55,6 +65,7 @@ start() {
 stop() {
     $compose logs > "$1.servers.txt" 2>&1
     $compose down -v > /dev/null 2>&1
+    as_admin nft delete table ip conker_netplay_test > /dev/null 2>&1
 }
 check() { if [ "$2" -eq 1 ]; then echo "$1: passed"; else echo "$1: FAILED"; failed=1; fi; }
 
