@@ -1,6 +1,7 @@
 # Netplay's servers
 
-Players who play through a room (rather than by a join code with the host's address) need two servers:
+Players who play through a room (rather than by a join code with the host's address) need two servers
+(and a third container sets up the machine's network for the relay):
 
 - **The signalling server** (`netplay_server`, from `host/src/netplay/net/signal_server.cpp`): players
   register a random id with it. A host makes a room there and gets a room code (`7KQ2-M9XD`, no address
@@ -17,7 +18,9 @@ Server, or `--netplay-server`.
 
 ## Running them
 
-On a Linux machine with Docker and a public IP address, you need only `compose.yaml` and `.env.example`
+On a Linux machine with Docker (rootful: not rootless, nor with user namespace remapping) and nftables,
+with a public IPv4 address (on the machine, as on most VPSes, or forwarded to it by a router: below),
+you need only `compose.yaml` and `.env.example`
 from this folder: the server's image is published to GitHub's container registry
 (`ghcr.io/easymod0/conker-netplay-server`, for amd64 and arm64) by the `netplay-server` workflow. (A
 new package on GHCR is private: after its first publish, its owner makes it public once, in the
@@ -33,6 +36,9 @@ nano .env                 # set PUBLIC_HOST, e.g. conker.example.org (or PUBLIC_
 docker compose up -d
 docker compose logs -f    # each says "public address <ip>": check it's this server's
 ```
+
+**Updating:** the fixes are in `compose.yaml` as well as the image, so download it again (the same `curl`
+line), check `.env.example` for new settings, then `docker compose pull && docker compose up -d`.
 
 `TURN_SECRET` is 48 random hex characters (any 16 or more letters and digits will do). Only coturn and the
 signalling server use it; players never see it, and nobody needs it to play. Without `openssl`:
@@ -57,33 +63,37 @@ Open in the firewall (all UDP: the game uses TURN over UDP only, and coturn rela
 | UDP 3478 | TURN: players get their relays here |
 | UDP 49160-49659 | the relays themselves (one per player and network interface while they play) |
 
-Both containers use the host's network, as coturn's relay ports are a range that Docker's port mapping
-handles badly.
+All use the host's network, as coturn's relay ports are a range that Docker's port mapping handles
+badly. Relays are IPv4 only.
 
-**Hosting behind NAT** (at home behind a router, or a cloud machine whose public address isn't on its
-own network interface, as on AWS or Google Cloud): add to `.env`
+**`net`**, the third container (the server's image, as root with network-admin rights), sets up this
+machine's network for the relay, in an nftables table of its own (`conker_netplay`) that goes when it
+stops; coturn starts once it's ready:
+- **A guard**, always: coturn may relay to the public address (this machine's) only on the relay ports,
+  i.e. to other players' relays, never to its other services. (Its other addresses are private ones,
+  which coturn denies; a second public address on the machine isn't guarded.) So nobody can play on the
+  server machine itself.
+- **Behind NAT** (at home behind a router, or a cloud machine whose public address isn't on its own
+  network interface, as on AWS or Google Cloud), which it notices itself: every relay-only match has both
+  players' relays on this server, and relay to relay goes to the public address; with coturn's usual
+  setup it would go between LAN addresses instead, and the players wouldn't recognise each other's
+  traffic. So `net` puts the public address on this machine (on `lo`) for the relays, and translates
+  between it and the machine's LAN address (the one its default route goes from, or `HOME_LAN_IP` in
+  `.env`) for traffic through the router. It says `behind NAT: ...` in its log.
 
-```sh
-COMPOSE_PROFILES=home
-HOME_LAN_IP=192.168.1.50      # this machine's address on its network
-```
+Host firewalls (firewalld, ufw) must let the ports above in; after the translation, they arrive for the
+public address, not the LAN one.
 
-and forward the ports above to that address, at the same numbers (don't remap them); give the machine a
-fixed address (a DHCP reservation). Why: every relay-only match has both players' relays on this server,
-and relay to relay goes to the public address. Behind NAT, coturn would relay between its LAN addresses
-instead, and the players wouldn't recognise each other's traffic. So `home-net`, a small extra container
-(with network-admin rights, on this machine's network), puts the public address on this machine (on `lo`)
-for the relays, translates between it and `HOME_LAN_IP` for traffic through the router, and lets coturn
-relay to this machine only on the relay ports, never its other services. Its rules are an nftables table
-of their own (`conker_netplay`), and both they and the address go when it stops. Needs Linux with
-nftables, and rootful Docker.
+**Hosting behind a router** (at home): forward the ports above to the server machine, at the same
+numbers (don't remap them), and give it a fixed address on your network (a DHCP reservation); `net` does
+the rest.
 
 `PUBLIC_HOST`'s record points at your public IP; if your provider changes it, update the record (a
 dynamic DNS updater can) and `docker compose restart`. Playing from the same network as the server reaches
-it through the public IP from inside, which needs the router's NAT loopback (hairpinning); and nobody can
-play on the server machine itself (its relays may only reach their own ports there).
+it through the public IP from inside, which needs the router's NAT loopback (hairpinning) (or set the
+game's Server to the server's LAN address, for signalling).
 
-`docker compose pull && docker compose up -d` updates them; `docker compose down` stops them.
+`docker compose down` stops them.
 
 ## What's limited
 
@@ -94,12 +104,12 @@ play on the server machine itself (its relays may only reach their own ports the
   aren't there, then one each 6 s, so codes can't be guessed (a code is one of a trillion, and isn't
   given out again for an hour after its room closes). Anything else closes the connection. The server
   logs counts, never addresses or codes.
-- **coturn:** only the signalling server's credentials; UDP relays only (no TCP relay, which could open
-  connections anywhere); at most 200 KB/s per relay, `TURN_USER_QUOTA` relays per player (32: one per
+- **coturn:** only the signalling server's credentials; UDP only (no TCP listener, and no TCP relay,
+  which could open connections anywhere); IPv4 relays only; at most 200 KB/s per relay, `TURN_USER_QUOTA` relays per player (32: one per
   network interface and other player) and `TURN_TOTAL_QUOTA` in all (400); and never into private,
   loopback, link-local (cloud metadata), multicast, documentation or IPv6-to-IPv4 ranges, so it can't be
-  used to reach the server's own network. Its secret is in a file only it can read, not on its command
-  line.
+  used to reach the server's own network; to the server itself, only on the relay ports (`net`'s
+  guard). Its secret is in a file only it can read, not on its command line.
 
 ## The relay's credentials
 
@@ -111,15 +121,19 @@ relay, and only for a while. Changing the secret stops every credential given ou
 
 ## Testing
 
-`test.sh` starts these servers on this machine (with `compose.test.yaml`, which lets the relay reach
-local addresses), plays relay-only matches through a room with `netplay_probe` (with the credentials
-the server hands out), checks that no player is told an address but the relay's and that coturn refuses
-a password the server didn't make, and stops them:
+`test.sh` starts these servers on this machine, built from here, twice: behind NAT (a made-up public
+address, which `net` puts on this machine, as it would a router's) and as on a VPS (that address already
+on this machine). It plays relay-only matches through a room with `netplay_probe` (with the credentials
+the server hands out) and checks that no player is told an address but the relay's; that coturn refuses
+a password the server didn't make, and denies private addresses, the machine's LAN one and cloud
+metadata; `net`'s guard and its translation (a packet from a container on Docker's bridge); and that the
+address is gone once they stop:
 
 ```sh
 cmake -S host/src/netplay/net -B build-net -G Ninja && cmake --build build-net
 sh tools/netplay/server/test.sh build-net /tmp/relay-test
 ```
 
-It uses the project name `conker-netplay-test` but the same ports (27100, 3478, 49160-49659), so don't
-run it on a machine that is already hosting.
+It needs Linux with rootful Docker, nftables, python3 and openssl. It uses the project name
+`conker-netplay-test` but the same ports (27100, 3478, 49160-49659), adds and removes `5.5.5.5` on `lo`
+and replaces any `conker_netplay` nftables table, so don't run it on a machine that is hosting.

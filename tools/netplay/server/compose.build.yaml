@@ -5,3 +5,8 @@ services:
     build:
       context: ../../..
       dockerfile: tools/netplay/server/Dockerfile
+  net:
+    image: conker-netplay-server:local
+    build:
+      context: ../../..
+      dockerfile: tools/netplay/server/Dockerfile

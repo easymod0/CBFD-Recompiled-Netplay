@@ -13,7 +13,8 @@ RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && /build/signal_packets_test && /build/turn_credentials_test
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32 libssl3 \
+# nftables and iproute2 for compose.yaml's net service (as root), which uses this image too.
+RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32 libssl3 nftables iproute2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/netplay_server /usr/local/bin/netplay_server
 USER nobody

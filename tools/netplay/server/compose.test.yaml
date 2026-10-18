@@ -1,14 +1,12 @@
-# For test.sh only: everything on this machine, behind NAT as at home (test.sh sets HOME_LAN_IP, this
-# machine's address, and the home profile). The public address is a made-up one (TEST_PUBLIC_IP) that
-# home-net puts on this machine, as it does a real one; the servers find it by a made-up name
-# (PUBLIC_HOST), as they would by DNS.
+# For test.sh only: the servers find the public address, a made-up one (TEST_PUBLIC_IP), by a made-up
+# name (PUBLIC_HOST), as they would a real one by DNS.
 services:
   signal:
     extra_hosts:
       - "${PUBLIC_HOST}:${TEST_PUBLIC_IP}"
-  turn:
+  net:
     extra_hosts:
       - "${PUBLIC_HOST}:${TEST_PUBLIC_IP}"
-  home-net:
+  turn:
     extra_hosts:
       - "${PUBLIC_HOST}:${TEST_PUBLIC_IP}"
