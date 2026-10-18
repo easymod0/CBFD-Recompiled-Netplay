@@ -29,4 +29,15 @@ namespace conker::netplay {
     // The endpoint in `code`, or nothing if it isn't one (wrong length or characters, or a typo the
     // check caught).
     std::optional<Endpoint> decode_join_code(std::string_view code);
+
+    // Room codes: a room on a netplay server (signal_packets.hpp), which the server gives the host and a
+    // joiner looks up there. No address in it: a random number from 1 to max_room, as 8 characters of the
+    // same alphabet, in two groups of 4 ("7KQ2-M9XD"), read the same way. No check: a typo is a room that
+    // isn't there (a lookup the server counts), or, at worst, one of the few thousand there are among a
+    // trillion.
+    constexpr uint64_t max_room = (1ull << 40) - 1;
+    // The code for `room`, or empty if it's 0 or past max_room.
+    std::string encode_room_code(uint64_t room);
+    // The room in `code`, or nothing if it isn't one.
+    std::optional<uint64_t> decode_room_code(std::string_view code);
 }

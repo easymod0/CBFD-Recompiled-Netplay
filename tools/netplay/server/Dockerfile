@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY host/src/netplay/net /src
 RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /build --target netplay_server signal_packets_test \
-    && /build/signal_packets_test
+    && cmake --build /build --target netplay_server signal_packets_test turn_credentials_test \
+    && /build/signal_packets_test && /build/turn_credentials_test
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32 libssl3 \

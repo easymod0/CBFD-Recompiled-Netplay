@@ -1,7 +1,7 @@
-# Netplay's servers: the signalling server (players find each other's way through it) and coturn (the
-# TURN relay, so players don't see each other's addresses). See README.md.
+# Netplay's servers: the signalling server (rooms and room codes; players find each other's way through
+# it) and coturn (the TURN relay, so players don't see each other's addresses). See README.md.
 #
-#   cp .env.example .env    # then set PUBLIC_IP and TURN_PASSWORD
+#   cp .env.example .env    # then set PUBLIC_IP and TURN_SECRET
 #   docker compose up -d
 #
 # This file and .env are all a host needs: the server's image is published by the netplay-server workflow.
@@ -16,7 +16,11 @@ services:
     image: ${IMAGE:-ghcr.io/easymod0/conker-netplay-server:latest}
     network_mode: host
     restart: unless-stopped
-    command: ["--port", "${SIGNAL_PORT:-27100}", "--max-per-address", "${MAX_PER_ADDRESS:-8}"]
+    # It hands each player TURN credentials of their own, made from the secret it shares with coturn.
+    environment:
+      TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
+    command: ["--port", "${SIGNAL_PORT:-27100}", "--max-per-address", "${MAX_PER_ADDRESS:-8}",
+              "--turn", "${PUBLIC_IP:?set PUBLIC_IP in .env}:3478", "--turn-hours", "${TURN_HOURS:-12}"]
 
   turn:
     image: coturn/coturn:4.6.3
@@ -28,8 +32,9 @@ services:
       - --listening-port=3478
       - --external-ip=${PUBLIC_IP:?set PUBLIC_IP in .env}
       - --realm=${TURN_REALM:-conker}
-      - --lt-cred-mech
-      - --user=${TURN_USER:-conker}:${TURN_PASSWORD:?set TURN_PASSWORD in .env}
+      # Only the signalling server's credentials (turn_credentials.hpp), each for a while.
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET in .env}
       - --min-port=49160
       - --max-port=49659
       - --fingerprint

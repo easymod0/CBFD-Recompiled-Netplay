@@ -5,9 +5,10 @@
 # also lossy; a joiner with more players than ports left, which must be refused), joiners with another match's key, another ROM or
 # other mods, which must be refused, joiners sending Inputs early or far ahead or a Hash twice, which
 # must be dropped, as must one sending Inputs for a port that isn't its own, one that never says Hello, which must be dropped too, and one sending a message bigger
-# than any packet, which the library must close. Then matches through ICE, by the signalling server
-# netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh), and a
-# joiner whose host isn't on the server.
+# than any packet, which the library must close. Then a match through ICE, by a room on the signalling
+# server netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh);
+# a room gone with its host, a relay-only host on a server without one, and guessing room codes, which
+# the server stops.
 #   sh host/src/netplay/net/test.sh <build folder>
 set -u
 bin=$1
@@ -17,6 +18,7 @@ failed=0
 "$bin/packets_test" || failed=1
 "$bin/join_code_test" || failed=1
 "$bin/signal_packets_test" || failed=1
+"$bin/turn_credentials_test" || failed=1
 
 # The join code a host printed in <file> (its key is random), once it has.
 code_of() {
@@ -159,23 +161,23 @@ raw() {
 raw silent 27203 --silent
 raw oversize 27209 --oversize
 
-# Through ICE: the server, then a host and two joiners by its ticket (its id and the key), lossy.
+# Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
 "$bin/netplay_server" --port 27220 > ice.server.txt 2>&1 &
 server=$!
-ticket_of() {
+room_of() {
     i=0
     while [ $i -lt 100 ]; do
-        ticket=$(sed -n 's/^ticket //p' "$1")
-        [ -n "$ticket" ] && { echo "$ticket"; return; }
+        room=$(sed -n 's/^room //p' "$1")
+        [ -n "$room" ] && { echo "$room"; return; }
         sleep 0.1
         i=$((i + 1))
     done
 }
-"$probe" host ice --players 3 --signal 127.0.0.1:27220 --direct 1 --reads 150 --loss 20 > ice.host.txt 2>&1 &
+"$probe" host room --players 3 --signal 127.0.0.1:27220 --direct 1 --reads 150 --loss 20 > ice.host.txt 2>&1 &
 pids=$!
-ticket=$(ticket_of ice.host.txt)
+room=$(room_of ice.host.txt)
 for i in 1 2; do
-    "$probe" join "$ticket" --signal 127.0.0.1:27220 --direct 1 --reads 150 --loss 20 > "ice.join$i.txt" 2>&1 &
+    "$probe" join "$room" --signal 127.0.0.1:27220 --direct 1 --reads 150 --loss 20 > "ice.join$i.txt" 2>&1 &
     pids="$pids $!"
     sleep 0.5
 done
@@ -188,10 +190,24 @@ for f in ice.host.txt ice.join*.txt; do
     grep -v '^\[netplay\]' "$f"
 done
 if [ $ok -eq 1 ] && grep -q "P2P ICE" ice.join1.txt; then echo "ice: passed"; else echo "ice: FAILED"; failed=1; fi
-# A host nobody registered: the joiner hears so at once.
-"$probe" join 0123456789abcdef-0123456789abcdef --signal 127.0.0.1:27220 --direct 1 > ice-nohost.join.txt 2>&1
-if grep -q "the host isn't on the signalling server" ice-nohost.join.txt; then echo "ice-nohost: passed"; else
-    echo "ice-nohost: FAILED"; cat ice-nohost.join.txt; failed=1; fi
+# expect <name> <text> <probe options...>: the probe fails, saying <text>.
+expect() {
+    name=$1; text=$2; shift 2
+    if ! "$probe" "$@" > "$name.txt" 2>&1 && grep -q "$text" "$name.txt"; then echo "$name: passed"; else
+        echo "$name: FAILED"; cat "$name.txt"; failed=1; fi
+}
+# The room closed with its host: the code finds nothing now.
+expect ice-closed "no room $room on the server" join "$room" --signal 127.0.0.1:27220 --direct 1
+# Relay-only, but this server has no relay.
+expect ice-norelay "offers no TURN relay" host room --signal 127.0.0.1:27220
+# Guessing codes: after 10 that aren't there (one above), the server closes the connection.
+i=0
+while [ $i -lt 10 ]; do
+    "$probe" join "ZZZZ-ZZZ$i" --signal 127.0.0.1:27220 --direct 1 > "ice-guess$i.txt" 2>&1
+    i=$((i + 1))
+done
+if grep -q "no room ZZZZ-ZZZ8" ice-guess8.txt && grep -q "too many room codes" ice-guess9.txt; then echo "ice-guess: passed"; else
+    echo "ice-guess: FAILED"; cat ice-guess8.txt ice-guess9.txt; failed=1; fi
 kill $server 2>/dev/null
 
 [ $failed -eq 0 ] && echo "all passed" || echo "FAILED"

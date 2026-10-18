@@ -5,8 +5,10 @@
 #include <vector>
 
 #include "signal_packets.hpp"
+#include "join_code.hpp"
 
 using namespace conker::netplay::signal;
+using conker::netplay::max_room;
 
 namespace {
     int failures = 0;
@@ -45,6 +47,13 @@ int main() {
     CHECK(round_trips(Registered{ 9 }, 13));
     CHECK(round_trips(Refused{ Refusal::taken }, 6));
     CHECK(round_trips(Refused{ Refusal::last }, 6));
+    CHECK(round_trips(CreateRoom{ 0xFEDCBA9876543210ull }, 13));
+    CHECK(round_trips(RoomCreated{ max_room }, 13));
+    CHECK(round_trips(FindRoom{ 1 }, 13));
+    CHECK(round_trips(RoomFound{ 5, 6, 7 }, 29));
+    CHECK(round_trips(NoRoom{ 5 }, 13));
+    CHECK(round_trips(Turn{ "203.0.113.7:3478", "1700000000:0123456789abcdef", "pass/word+=" }, 8 + 16 + 27 + 11));
+    CHECK(round_trips(Turn{ std::string(max_text, 'a'), "u", std::string(max_text, '~') }, 8 + 2 * max_text + 1));
 
     // The layout: "CS", the version, the kind, little-endian fields.
     const std::vector<uint8_t> reg = bytes_of(Register{ 0x0102030405060708ull });
@@ -61,6 +70,18 @@ int main() {
     CHECK(bytes_of(Registered{ 0 }).empty());
     CHECK(bytes_of(Refused{ (Refusal)0 }).empty());
     CHECK(bytes_of(Refused{ (Refusal)((int)Refusal::last + 1) }).empty());
+    CHECK(bytes_of(CreateRoom{ 0 }).empty());
+    CHECK(bytes_of(RoomCreated{ 0 }).empty());
+    CHECK(bytes_of(RoomCreated{ max_room + 1 }).empty());
+    CHECK(bytes_of(FindRoom{ max_room + 1 }).empty());
+    CHECK(bytes_of(NoRoom{ 0 }).empty());
+    CHECK(bytes_of(RoomFound{ 1, 0, 1 }).empty());
+    CHECK(bytes_of(RoomFound{ 1, 1, 0 }).empty());
+    CHECK(bytes_of(RoomFound{ 0, 1, 1 }).empty());
+    CHECK(bytes_of(Turn{ "", "u", "p" }).empty());
+    CHECK(bytes_of(Turn{ "s", "u", std::string(max_text + 1, 'p') }).empty());
+    CHECK(bytes_of(Turn{ "s", "a user", "p" }).empty());
+    CHECK(bytes_of(Turn{ "s", "u", "p\x7F" }).empty());
 
     // Refused: another version, magic or kind; a size other than the kind's.
     std::vector<uint8_t> bad = reg;
@@ -69,7 +90,7 @@ int main() {
     CHECK(!other_version(reg));
     bad = reg; bad[0] = 'X'; CHECK(!decodes(bad));
     bad = reg; bad[4] = 0; CHECK(!decodes(bad));
-    bad = reg; bad[4] = 6; CHECK(!decodes(bad));
+    bad = reg; bad[4] = 12; CHECK(!decodes(bad));
     bad = reg; bad.push_back(0); CHECK(!decodes(bad));
     bad = reg; bad.pop_back(); CHECK(!decodes(bad));
     CHECK(!decodes({}));
@@ -88,6 +109,28 @@ int main() {
     // A reason out of range.
     bad = bytes_of(Refused{ Refusal::busy }); bad[5] = 0; CHECK(!decodes(bad));
     bad[5] = (uint8_t)Refusal::last + 1; CHECK(!decodes(bad));
+
+    // Rooms out of range.
+    bad = bytes_of(FindRoom{ 1 }); bad[10] = 1; CHECK(!decodes(bad));   // past max_room
+    bad = bytes_of(RoomCreated{ 1 }); bad[5] = 0; CHECK(!decodes(bad));
+    const std::vector<uint8_t> found = bytes_of(RoomFound{ 1, 2, 3 });
+    bad = found; bad[13] = 0; CHECK(!decodes(bad));                      // host 0
+    bad = found; bad[21] = 0; CHECK(!decodes(bad));                      // key 0
+    bad = found; bad.pop_back(); CHECK(!decodes(bad));
+    bad = bytes_of(CreateRoom{ 1 }); bad[5] = 0; CHECK(!decodes(bad));
+    // Turn: a size past what follows, 0 or past max_text, a character out of range, anything after.
+    const std::vector<uint8_t> turn = bytes_of(Turn{ "s:1", "u", "p" });
+    CHECK(turn.size() == 13 && turn[4] == 11 && turn[5] == 3 && turn[9] == 1 && turn[11] == 1);
+    bad = turn; bad.push_back('x'); CHECK(!decodes(bad));
+    bad = turn; bad.pop_back(); CHECK(!decodes(bad));
+    bad = turn; bad[11] = 2; CHECK(!decodes(bad));
+    bad = turn; bad[9] = 0; CHECK(!decodes(bad));
+    bad = turn; bad[6] = ' '; CHECK(!decodes(bad));
+    bad = turn; bad[6] = 0x80; CHECK(!decodes(bad));
+    bad = turn; bad.resize(6); CHECK(!decodes(bad));
+    bad = { 'C', 'S', (uint8_t)version, (uint8_t)(version >> 8), 11 }; CHECK(!decodes(bad));
+    bad = bytes_of(Turn{ std::string(max_text, 'a'), "u", "p" }); bad[5] = (uint8_t)(max_text + 1); bad.insert(bad.begin() + 6, 'a');
+    CHECK(!decodes(bad));
 
     if (failures == 0) {
         std::printf("signal_packets_test: all passed\n");

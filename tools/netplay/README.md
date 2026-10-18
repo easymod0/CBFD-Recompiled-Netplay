@@ -159,15 +159,19 @@ and, at the read where they first differ, the memory itself:
 
 - **GameNetworkingSockets** (v1.6.1, downloaded while configuring): encrypted UDP connections, direct by
   address, or through its own ICE client. The host listens; the others connect to it, and it passes
-  their inputs on. Direct by address, the host may have to forward the port. Through ICE, the peers find
-  each other by id through a signalling server, and the library finds a way: directly through NAT, or
-  through a TURN relay. By default it's relay-only, so no peer is told another's address. The servers:
-  `tools/netplay/server/` (below).
+  their inputs on. Direct by address, the host may have to forward the port. Through ICE, the host makes
+  a room on a signalling server and the others join it by its room code; the peers find each other by id
+  there, and the library finds a way: directly through NAT, or through the server's TURN relay. By default
+  it's relay-only, so no peer is told another's address. The servers: `tools/netplay/server/` (below).
 - **`signal_packets.cpp`, `signalling.cpp`**: signalling's own packets (Register, Registered, Signal, Unreachable,
-  Refused: versioned, each field checked, fuzzed with the others) and a peer's connection to the
-  signalling server. It passes the library's ICE signals between peer ids, and never sees the game's
-  packets. `netplay_server` (`signal_server.cpp`) is the server: one registration per connection, ids
-  not reused for an hour, limits per address and per second, and it logs counts only.
+  Refused, CreateRoom, RoomCreated, FindRoom, RoomFound, NoRoom, Turn: versioned, each field checked,
+  fuzzed with the others) and a peer's connection to the signalling server. It keeps rooms (a host's,
+  for as long as it stays connected: the whole match) and passes the library's ICE signals between peer
+  ids, and never sees the game's packets. `netplay_server` (`signal_server.cpp`) is the server: one
+  registration per connection, ids and room codes not reused for an hour, limits per address and per
+  second, at most 10 lookups of rooms that aren't there from an address (then one each 6 s), and it logs
+  counts only. With `--turn`, it hands each peer TURN credentials of its own that expire
+  (`turn_credentials.cpp`: coturn's shared-secret scheme, HMAC-SHA1), so the relay isn't open to anyone.
 - **`packets.cpp`**: every packet (Hello, Welcome, Refuse, Start, Inputs, Hash, Bye), fixed-size and
   versioned, each field checked; the only code that reads from the network. `packets_test.cpp` tests
   it and `fuzz_packets.cpp` fuzzes it.
@@ -182,26 +186,30 @@ and, at the read where they first differ, the memory itself:
   a peer could have reached, or a hash repeated, drop the peer. The library closes a connection that
   sends a message bigger than the largest packet, and buffers little from each peer.
 - **`join_code.cpp`**: the host's address, port and the match's key as a code with a typo check
-  (`SC07-21V9-GW0J-6HB7-H6NW-VVTT`); joining needs it.
+  (`SC07-21V9-GW0J-6HB7-H6NW-VVTT`), to join directly; and room codes (`7KQ2-M9XD`: a room's random
+  number, 40 bits, with no address in it), to join through a server.
 - **What players should know:** the join code is the host's IP address and port, so it's for people the
-  host trusts, and joining shows the host the joiner's IP address (the menu says so). The connections
+  host trusts, and joining shows the host the joiner's IP address (the menu says so). A room code holds
+  no address, and relay-only (the default) nobody learns another's address; with direct connections
+  allowed, the players may. The connections
   are encrypted, but not authenticated: there's no certificate authority, so someone on the network path
   between two players could pose as the host. Joining by a code from someone you know keeps that to
   people who can already see your traffic.
 - **`netplay_probe`**: two or more copies play a made-up match (`host <port>`, which prints its join
   code for 127.0.0.1, `join <code>`, `--loss <percent>`) and check every pad arrived right; `--hostile`
   joiners must be dropped, `join --silent` checks a joiner that never says Hello is dropped and `join
-  --oversize` one that sends too big a message; `code <address:port> <key>` prints a code. Through ICE:
-  `host ice --signal <server:port>` prints a ticket (its id and the key), `join <ticket> --signal ...`,
-  with `--turn`, `--turn-user`, `--turn-password`, `--stun` and `--direct 1`. `test.sh` runs
-  the tests and a few matches (also through ICE, directly); `tools/netplay/server/test.sh` plays
-  relay-only matches through the servers' Docker setup and checks no peer is told an address but the
-  relay's. `.github/workflows/netplay-transport.yml` runs them on Windows, Linux and macOS (the relay on
+  --oversize` one that sends too big a message; `code <address:port> <key>` prints a code. Through a
+  room: `host room --signal <server:port>` prints its room code, `join <room code> --signal ...`, with
+  `--direct 1` to allow direct connections. `test.sh` runs the tests and a few matches (also through a
+  room, directly), and checks a closed room, a relay-only host on a server without a relay and guessed
+  codes; `tools/netplay/server/test.sh` plays relay-only matches through the servers' Docker setup,
+  checks no peer is told an address but the relay's, and that coturn refuses a password the server
+  didn't make. `.github/workflows/netplay-transport.yml` runs them on Windows, Linux and macOS (the relay on
   Linux; no ROM needed).
 
 ## The servers
 
-`tools/netplay/server/`: the signalling server and coturn (the TURN relay) in one `docker compose`
+`tools/netplay/server/`: the signalling server (rooms) and coturn (the TURN relay) in one `docker compose`
 file, for anyone to host. See its README.
 
 ## Lockstep
@@ -235,7 +243,11 @@ and the player whose game went another way.
     ConkerRecomp --netplay-join SC07-21V9-GW0J-6HB7-H6NW-VVTT                    (the host's code)
 
 The game waits at its start for every player. The host has to forward its UDP port if it's behind a
-router.
+router. Or through a room on a netplay server, with no port to forward (relay-only unless
+`--netplay-direct`):
+
+    ConkerRecomp --netplay-host room --netplay-server play.example.org:27100 --players 2   (prints the room code)
+    ConkerRecomp --netplay-join 7KQ2-M9XD --netplay-server play.example.org:27100
 
 **More than one player on a machine.** `--local-players <n>` (1 to 3, hosting or joining; the menu's
 Players on this computer) puts n players on this machine, each with a port of their own: the lowest free
@@ -248,8 +260,9 @@ one across the top half of the window and one across the bottom, like the game's
 with three, the whole split screen is shown.
 
 In a window, the launcher's **Netplay** menu (`host/src/netplay/menu.cpp`, #9) does the same: host
-(players, port, input delay, and the host's own address, from which it shows the join code to send once hosting) or
-join by code. It says how the connecting goes and why a peer was refused, and the game starts on every
+through a room on the server (its address and Relay only / Allow direct are settings, kept in `netplay.json`
+in the config folder), which shows the room code to send once hosting, or directly (port and the host's own
+address, from which it shows the join code); players, input delay; or join by either code. It says how the connecting goes and why a peer was refused, and the game starts on every
 machine once all are in. When a match started there ends (a desync, the host gone), a prompt says why
 instead of the game quitting.
 

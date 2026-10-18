@@ -4,8 +4,12 @@
 // Sessions that connect through ICE (Session::host or join with a Signaller) use it to find a way to each
 // other: directly through NAT, or through a TURN relay so neither sees the other's address.
 //
-// A host keeps it connected for as long as its match lasts, so that someone can still reach it then (a
-// player rejoining, later).
+// Through it, a host creates a room for its match and gets the room code to pass on (join_code.hpp), and a
+// joiner looks the code up to learn the host's id and the match's key. The server may offer its TURN relay
+// too, with credentials for this process: ice() makes the session's Ice from them.
+//
+// A host keeps it connected for as long as its match lasts, so that its room stays open and someone can
+// still reach it then (a player rejoining, later).
 //
 // Single-threaded like the session, except the outbox: the library sends signals from its own thread, so
 // they're only queued, and poll() sends them.
@@ -15,10 +19,12 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
+#include "session.hpp"
 #include "signal_packets.hpp"
 
 namespace conker::netplay {
@@ -67,12 +73,30 @@ namespace conker::netplay {
         // The peers the server said aren't there, since the last call.
         std::vector<uint64_t> unreachable();
 
+        // The TURN relay the server offered as this process registered, with its credentials (none: it
+        // has none).
+        const std::optional<signal::Turn>& turn() const { return offered_turn; }
+        // The Ice for sessions through this server: its relay, and only that if `relay_only`; otherwise
+        // directly too (with the relay's server for STUN, to learn this machine's public address).
+        Ice ice(bool relay_only) const;
+
+        // Once ready: creates a room for this process's match, whose key is `key` (one each); room() is
+        // its number once the server has made it (0 until then; join_code.hpp: encode_room_code).
+        void create_room(uint64_t key);
+        uint64_t room() const { return created_room; }
+        // Once ready: looks up `room`'s host. lookup() says how it went, and found() what it found.
+        enum class Lookup { none, waiting, found, missing };
+        void find_room(uint64_t room);
+        Lookup lookup() const { return room_lookup; }
+        const signal::RoomFound& found() const { return found_room; }
+
         // Closes the connection.
         void close();
 
     private:
         void on_status_changed(const void* info);
         void fail(const std::string& why);
+        void send_now(const signal::Packet& packet);
         friend void signaller_status_changed(void* info);
 
         uint32_t connection = 0;
@@ -82,5 +106,11 @@ namespace conker::netplay {
         std::shared_ptr<SignalOutbox> out = std::make_shared<SignalOutbox>();
         std::vector<signal::Signal> incoming;
         std::vector<uint64_t> gone;
+        std::optional<signal::Turn> offered_turn;
+        bool creating_room = false;     // CreateRoom sent, RoomCreated not here yet
+        uint64_t asked_room = 0;        // the room looked up
+        uint64_t created_room = 0;
+        Lookup room_lookup = Lookup::none;
+        signal::RoomFound found_room;
     };
 }

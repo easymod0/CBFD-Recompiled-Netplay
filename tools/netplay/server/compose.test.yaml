@@ -9,8 +9,8 @@ services:
       - --listening-ip=${PUBLIC_IP}
       - --relay-ip=${PUBLIC_IP}
       - --realm=conker
-      - --lt-cred-mech
-      - --user=${TURN_USER:-conker}:${TURN_PASSWORD}
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
       - --min-port=49160
       - --max-port=49659
       - --fingerprint

@@ -1,9 +1,10 @@
 #!/bin/sh
 # Tests the relay with the real servers: starts compose.yaml, the server built from here (compose.build.yaml;
-# with compose.test.yaml, so coturn relays
-# between addresses on this machine) as the project conker-netplay-test, then plays matches through it
-# with netplay_probe: two players relay-only (the joiner must be told only relay addresses, never the
-# host's own), and three with 20% of packets lost. Stops the servers after. Linux, with Docker.
+# with compose.test.yaml, so coturn relays between addresses on this machine) as the project
+# conker-netplay-test, then plays matches through a room with netplay_probe, relay-only with the TURN
+# credentials the server hands out: two players (the joiner must be told only relay addresses, never the
+# host's own), and three with 20% of packets lost. Then a credential coturn must refuse. Stops the servers
+# after. Linux, with Docker.
 #   sh tools/netplay/server/test.sh <build folder of host/src/netplay/net> [output folder]
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
@@ -14,19 +15,19 @@ failed=0
 
 # This machine's address on its network: coturn can't relay on loopback (the library refuses it).
 PUBLIC_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
-export PUBLIC_IP TURN_USER=conker TURN_PASSWORD=test-only
+export PUBLIC_IP TURN_SECRET=test-only-secret-0123456789
 [ -n "$PUBLIC_IP" ] || { echo "no network address"; exit 1; }
 compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/compose.build.yaml -f $here/compose.test.yaml"
 $compose up -d --build --wait > compose.txt 2>&1 || { cat compose.txt; echo "the servers didn't start"; exit 1; }
 sleep 1
 
-ice="--signal 127.0.0.1:27100 --turn $PUBLIC_IP:3478 --turn-user conker --turn-password test-only"
+ice="--signal 127.0.0.1:27100"
 
-ticket_of() {
+room_of() {
     i=0
     while [ $i -lt 100 ]; do
-        ticket=$(sed -n 's/^ticket //p' "$1")
-        [ -n "$ticket" ] && { echo "$ticket"; return; }
+        room=$(sed -n 's/^room //p' "$1")
+        [ -n "$room" ] && { echo "$room"; return; }
         sleep 0.1
         i=$((i + 1))
     done
@@ -35,12 +36,12 @@ ticket_of() {
 # relay <name> <players> [probe options...]: a host and players - 1 joiners, relay-only; all must succeed.
 relay() {
     name=$1; players=$2; shift 2
-    "$probe" host ice --players "$players" $ice "$@" > "$name.host.txt" 2>&1 &
+    "$probe" host room --players "$players" $ice "$@" > "$name.host.txt" 2>&1 &
     pids=$!
-    ticket=$(ticket_of "$name.host.txt")
+    room=$(room_of "$name.host.txt")
     i=1
     while [ $i -lt "$players" ]; do
-        "$probe" join "$ticket" $ice "$@" > "$name.join$i.txt" 2>&1 &
+        "$probe" join "$room" $ice "$@" > "$name.join$i.txt" 2>&1 &
         pids="$pids $!"
         sleep 0.5
         i=$((i + 1))
@@ -63,6 +64,14 @@ relay() {
 }
 relay relay-two 2 --reads 150
 relay relay-three-lossy 3 --reads 150 --loss 20
+
+# A joiner with a password the server didn't make: coturn refuses it, and relay-only it can't connect.
+"$probe" host room --reads 60 $ice > bad-password.host.txt 2>&1 &
+host=$!
+room=$(room_of bad-password.host.txt)
+if ! "$probe" join "$room" --reads 60 $ice --turn-password not-the-servers > bad-password.join.txt 2>&1 &&
+    grep -q "rendezvous" bad-password.join.txt; then echo "bad-password: passed"; else echo "bad-password: FAILED"; failed=1; fi
+kill $host 2>/dev/null
 
 $compose logs > servers.txt 2>&1
 $compose down > /dev/null 2>&1

@@ -14,6 +14,8 @@ on:
       - 'host/src/netplay/net/signal_server.cpp'
       - 'host/src/netplay/net/signal_packets.*'
       - 'host/src/netplay/net/signal_packets_test.cpp'
+      - 'host/src/netplay/net/join_code.*'
+      - 'host/src/netplay/net/turn_credentials*'
       - 'host/src/netplay/net/CMakeLists.txt'
       - 'tools/netplay/server/Dockerfile'
       - 'tools/netplay/server/Dockerfile.dockerignore'
@@ -70,6 +72,11 @@ jobs:
           docker stop -t 5 smoke
           docker logs smoke | grep -q "stopping"
           test "$(docker inspect -f '{{.State.ExitCode}}' smoke)" = 0
+          # With a relay to offer, as compose.yaml runs it.
+          docker run -d --name smoke-turn -e TURN_SECRET=smoke-test-secret-0123 "$IMAGE:${{ matrix.arch }}-$GITHUB_SHA" --turn 203.0.113.7:3478
+          sleep 2
+          docker logs smoke-turn | grep -q "offering a TURN relay"
+          docker stop -t 5 smoke-turn
 
       - name: Publish
         if: env.PUBLISH == 'true'

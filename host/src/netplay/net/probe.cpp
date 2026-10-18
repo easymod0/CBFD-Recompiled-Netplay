@@ -6,9 +6,8 @@
 //   netplay_probe join <join code> [options]
 //   netplay_probe join <address:port> --silent | --oversize
 //   netplay_probe code <address:port> <key, hex>
-//   netplay_probe host ice --signal <server:port> [--turn <host:port> --turn-user <u> --turn-password <p>]
-//                 [--stun <host:port>] [--direct 1] [options]   (prints its ticket: its id and the key)
-//   netplay_probe join <ticket> --signal <server:port> [the same ICE options]
+//   netplay_probe host room --signal <server:port> [--direct 1] [options]   (prints its room code)
+//   netplay_probe join <room code> --signal <server:port> [--direct 1] [options]
 //     --reads <n>        how many reads each peer sends (300: 10 s)
 //     --local <n>        players on this peer, each with a port (1 by default)
 //     --loss <percent>   the library drops this share of the packets sent (they're resent)
@@ -20,9 +19,10 @@
 //     --hostile far      (joining) send Inputs far beyond the reads it could have got to: dropped too
 //     --hostile port     (joining) send Inputs for the host's port 0 once the match starts: dropped too
 //     --hostile hash     (joining) send the same Hash twice once the match starts: dropped too
-//     --signal           connect through ICE, by the signalling server netplay_server at this address
-//     --turn, --turn-user, --turn-password, --stun   the ICE servers (Ice in session.hpp)
+//     --signal           connect through ICE, by a room on the server netplay_server at this address (which
+//                        offers its TURN relay, if it has one)
 //     --direct 1         allow direct connections too, not only through the TURN relay
+//     --turn-password <p>  (a test) use the server's relay with this password instead of the one it gave
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
@@ -41,6 +41,7 @@
 #include <steam/isteamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 
+#include "join_code.hpp"
 #include "session.hpp"
 #include "signalling.hpp"
 
@@ -71,8 +72,8 @@ namespace {
 
     int usage() {
         std::fprintf(stderr, "usage: netplay_probe host <port> [--players 2] | join <code> | join <address:port> --silent|--oversize\n"
-                             "       netplay_probe host ice | join <ticket>, with --signal <server:port> [--turn <host:port>]\n"
-                             "       [--turn-user <u>] [--turn-password <p>] [--stun <host:port>] [--direct 1]\n"
+                             "       netplay_probe host room | join <room code>, with --signal <server:port> [--direct 1]\n"
+                             "       [--turn-password <p>] (a test: not the server's)\n"
                              "       [--reads 300] [--loss <percent>] [--build <hex>] [--rom <hex>] [--profile <hex>] [--mods <hex>]\n"
                              "       netplay_probe code <address:port> <key, hex>\n");
         return 2;
@@ -154,7 +155,8 @@ int main(int argc, char** argv) {
     bool own_view = false;
     int local = 1;
     std::string signal_server;
-    Ice ice;
+    bool relay_only = true;
+    std::string turn_password;
     for (int i = 3; i + 1 < argc; i += 2) {
         const std::string option = argv[i];
         const char* value = argv[i + 1];
@@ -169,11 +171,8 @@ int main(int argc, char** argv) {
         else if (option == "--hostile") hostile = value;
         else if (option == "--own-view") own_view = std::atoi(value) != 0;
         else if (option == "--signal") signal_server = value;
-        else if (option == "--turn") ice.turn = value;
-        else if (option == "--turn-user") ice.turn_user = value;
-        else if (option == "--turn-password") ice.turn_password = value;
-        else if (option == "--stun") ice.stun = value;
-        else if (option == "--direct") ice.relay_only = std::atoi(value) == 0;
+        else if (option == "--direct") relay_only = std::atoi(value) == 0;
+        else if (option == "--turn-password") turn_password = value;
         else return usage();
     }
     const bool oversize = !hosting && argc == 4 && std::strcmp(argv[3], "--oversize") == 0;
@@ -197,37 +196,60 @@ int main(int argc, char** argv) {
     }
     int result = 1;
     {
-        // Through ICE: registered with the signalling server first (the joiners look the host up there).
+        // Through a room on the server: registered there first, then the host makes its room and a joiner
+        // looks it up.
         Signaller signaller;
-        if (!signal_server.empty()) {
-            if (!signaller.connect(signal_server, error)) {
-                std::fprintf(stderr, "%s\n", error.c_str());
-                shutdown();
-                return 1;
-            }
+        Session session;
+        bool started = false;
+        uint64_t room = 0;
+        const auto wait = [&signaller](auto done) {
             const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-            while (signaller.state() == Signaller::State::connecting && std::chrono::steady_clock::now() < until) {
+            while (!done() && signaller.state() != Signaller::State::failed && std::chrono::steady_clock::now() < until) {
                 signaller.poll();
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            if (signaller.state() != Signaller::State::ready) {
-                std::fprintf(stderr, "signalling: %s\n", signaller.state() == Signaller::State::failed ? signaller.error().c_str() : "no answer");
-                shutdown();
-                return 1;
+            return done();
+        };
+        if (signal_server.empty()) {
+            started = hosting ? session.host((uint16_t)std::atoi(where.c_str()), players, me, error, local) : session.join(where, me, error);
+        }
+        else if (!hosting && !decode_room_code(where)) {
+            error = "\"" + where + "\" isn't a room code";
+        }
+        else if (!signaller.connect(signal_server, error)) {
+            error = "signalling: " + error;
+        }
+        else if (!wait([&] { return signaller.state() == Signaller::State::ready; })) {
+            error = "signalling: " + (signaller.state() == Signaller::State::failed ? signaller.error() : std::string("no answer"));
+        }
+        else if (relay_only && !signaller.turn()) {
+            error = "the server offers no TURN relay: only --direct 1 can connect through it";
+        }
+        else {
+            std::printf("registered with %s as %016llx%s\n", signal_server.c_str(), (unsigned long long)local_id(),
+                signaller.turn() ? (", relay " + signaller.turn()->servers).c_str() : "");
+            Ice ice = signaller.ice(relay_only);
+            if (!turn_password.empty()) ice.turn_password = turn_password;
+            if (hosting) {
+                started = session.host(signaller, ice, players, me, error, local);
+                if (started) {
+                    signaller.create_room(session.key());
+                    started = wait([&] { return signaller.room() != 0; });
+                    room = signaller.room();
+                    if (!started) error = "no room: " + signaller.error();
+                }
             }
-            std::printf("registered with %s as %016llx\n", signal_server.c_str(), (unsigned long long)local_id());
+            else {
+                signaller.find_room(*decode_room_code(where));
+                wait([&] { return signaller.lookup() == Signaller::Lookup::found || signaller.lookup() == Signaller::Lookup::missing; });
+                if (signaller.lookup() == Signaller::Lookup::found) {
+                    started = session.join(signaller, ice, signaller.found().host, signaller.found().key, me, error);
+                }
+                else {
+                    error = signaller.lookup() == Signaller::Lookup::missing ? "no room " + where + " on the server" : "no answer: " + signaller.error();
+                }
+            }
         }
-        unsigned long long ticket_id = 0, ticket_key = 0;
-        if (!signal_server.empty() && !hosting && std::sscanf(where.c_str(), "%16llx-%16llx", &ticket_id, &ticket_key) != 2) {
-            std::fprintf(stderr, "a ticket is <id>-<key>, in hex\n");
-            shutdown();
-            return 2;
-        }
-
-        Session session;
-        const bool started = !signal_server.empty()
-            ? (hosting ? session.host(signaller, ice, players, me, error, local) : session.join(signaller, ice, ticket_id, ticket_key, me, error))
-            : (hosting ? session.host((uint16_t)std::atoi(where.c_str()), players, me, error, local) : session.join(where, me, error));
         if (!started) {
             std::fprintf(stderr, "%s\n", error.c_str());
         }
@@ -237,7 +259,7 @@ int main(int argc, char** argv) {
                 std::printf("join code %s\n", session.join_code("127.0.0.1:" + where).c_str());
             }
             else if (hosting) {
-                std::printf("ticket %016llx-%016llx\n", (unsigned long long)local_id(), (unsigned long long)session.key());
+                std::printf("room %s\n", encode_room_code(room).c_str());
             }
             std::fflush(stdout);
             std::map<int, Received> received;   // by port

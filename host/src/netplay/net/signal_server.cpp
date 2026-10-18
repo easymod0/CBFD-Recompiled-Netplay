@@ -1,14 +1,23 @@
 // netplay_server: the signalling server. Peers connect over GameNetworkingSockets, each registers an id
-// (Register, signal_packets.hpp; answered with Registered) and sends the library's ICE signals for another id (Signal); the server
-// passes them on, from the sender's id, or says the other isn't there (Unreachable). It never sees the
-// game's packets, nor the TURN relay's traffic (coturn, beside it: tools/netplay/server/).
+// (Register, signal_packets.hpp; answered with Registered) and sends the library's ICE signals for another
+// id (Signal); the server passes them on, from the sender's id, or says the other isn't there
+// (Unreachable). It keeps rooms too: a host creates one for its match (CreateRoom, with the match's key)
+// and gets a room code to pass on; a joiner looks it up (FindRoom) and gets the host's id and the key. A
+// room lasts as long as its host's connection. It never sees the game's packets, nor the TURN relay's
+// traffic (coturn, beside it: tools/netplay/server/).
 //
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096]
+//                  [--turn <host:port> [--turn-hours 12]]   (with the secret in TURN_SECRET)
+//
+// With --turn, each peer is offered that TURN relay as it registers (Turn), with credentials of its own
+// made from the secret it shares with coturn (turn_credentials.hpp), which expire after --turn-hours.
 //
 // Limits: a peer must register within 5 s, once, with an id nobody else has (nor had in the last hour, so
 // a peer that leaves can't be posed as straight away); at most --max-per-address connections from one IP
-// address and --max-peers in all; at most 20 signals a second from each (bursts of 60). Anything broken
-// or past a limit closes the connection, after Refused. It logs counts, never addresses or signals.
+// address and --max-peers in all; at most 20 packets a second from each (bursts of 60); one room each;
+// from each IP address, at most 10 lookups of rooms that aren't there (then one each 6 s), so codes can't
+// be guessed. A room's code isn't given out again for an hour after it closes. Anything broken or past a
+// limit closes the connection, after Refused. It logs counts, never addresses, codes or signals.
 //
 // It runs until SIGINT or SIGTERM (docker stop).
 
@@ -18,7 +27,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <map>
+#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -28,7 +39,9 @@
 #include <steam/isteamnetworkingutils.h>
 #include <steam/steamnetworkingsockets.h>
 
+#include "join_code.hpp"
 #include "signal_packets.hpp"
+#include "turn_credentials.hpp"
 
 using namespace conker::netplay;
 
@@ -38,6 +51,8 @@ namespace {
     constexpr double signals_per_second = 20.0;
     constexpr double signal_burst = 60.0;
     constexpr int max_messages_per_loop = 1024;
+    constexpr double misses_per_second = 1.0 / 6.0;
+    constexpr double miss_burst = 10.0;
 
     volatile std::sig_atomic_t stopping = 0;
     void on_signal(int) { stopping = 1; }
@@ -47,12 +62,27 @@ namespace {
         return duration<double>(steady_clock::now().time_since_epoch()).count();
     }
 
+    // A rate: `tokens` that come back at `per_second`, up to `burst`.
+    struct Bucket {
+        double tokens = 0;
+        double at = 0;
+        // Takes one, if there is one.
+        bool take(double t, double per_second, double burst) {
+            tokens = std::min(burst, tokens + (t - at) * per_second);
+            at = t;
+            if (tokens < 1) return false;
+            tokens -= 1;
+            return true;
+        }
+    };
+
     struct Peer {
         uint64_t id = 0;           // 0 until it registers
-        std::string address;       // its IP, for the per-address limit only
+        std::string address;       // its IP, for the per-address limits only
         double connected_at = 0;
-        double tokens = signal_burst;
-        double tokens_at = 0;
+        Bucket packets;
+        uint64_t room = 0;         // the room it hosts, if any
+        uint64_t room_key = 0;
     };
 
     struct Server {
@@ -61,10 +91,22 @@ namespace {
         std::unordered_map<HSteamNetConnection, Peer> peers;
         std::unordered_map<uint64_t, HSteamNetConnection> by_id;
         std::unordered_map<uint64_t, double> released;    // id -> when its peer left
+        std::unordered_map<uint64_t, HSteamNetConnection> rooms;
+        std::unordered_map<uint64_t, double> closed_rooms; // room -> when it closed
         std::map<std::string, int> per_address;
+        // Each IP address's lookups of rooms that weren't there, kept after its peers leave (until it's
+        // full again), so reconnecting doesn't refill it.
+        std::unordered_map<std::string, Bucket> misses;
         int max_per_address = 8;
         size_t max_peers = 4096;
+        std::string turn;           // the TURN relay offered, if any
+        std::string turn_secret;
+        double turn_hours = 12;
+        std::random_device random;
         uint64_t signals_passed = 0;
+        uint64_t rooms_created = 0;
+        uint64_t rooms_found = 0;
+        uint64_t rooms_missed = 0;
 
         void send(HSteamNetConnection connection, const signal::Packet& packet) {
             uint8_t buffer[signal::max_packet_size];
@@ -82,6 +124,10 @@ namespace {
             if (it->second.id != 0) {
                 by_id.erase(it->second.id);
                 released[it->second.id] = now();
+            }
+            if (it->second.room != 0) {
+                rooms.erase(it->second.room);
+                closed_rooms[it->second.room] = now();
             }
             if (--per_address[it->second.address] <= 0) {
                 per_address.erase(it->second.address);
@@ -102,13 +148,12 @@ namespace {
                     char ip[SteamNetworkingIPAddr::k_cchMaxString];
                     info->m_info.m_addrRemote.ToString(ip, sizeof(ip), false);
                     const std::string address = ip;
-                    if (peers.size() >= max_peers || per_address[address] >= max_per_address) {
-                        if (per_address[address] == 0) per_address.erase(address);
+                    const auto known = per_address.find(address);
+                    if (peers.size() >= max_peers || (known != per_address.end() && known->second >= max_per_address)) {
                         sockets->CloseConnection(info->m_hConn, k_ESteamNetConnectionEnd_App_Min + (int)signal::Refusal::busy, "busy", false);
                         return;
                     }
                     if (sockets->AcceptConnection(info->m_hConn) != k_EResultOK) {
-                        if (per_address[address] == 0) per_address.erase(address);
                         sockets->CloseConnection(info->m_hConn, 0, nullptr, false);
                         return;
                     }
@@ -116,7 +161,8 @@ namespace {
                     per_address[address]++;
                     Peer peer;
                     peer.address = address;
-                    peer.connected_at = peer.tokens_at = now();
+                    peer.connected_at = now();
+                    peer.packets = { signal_burst, peer.connected_at };
                     peers[info->m_hConn] = peer;
                     break;
                 }
@@ -152,30 +198,70 @@ namespace {
                 else {
                     peer.id = r->id;
                     by_id[r->id] = connection;
+                    // The relay first: once registered, a peer may connect at once.
+                    if (!turn.empty()) {
+                        const uint64_t expires = (uint64_t)std::time(nullptr) + (uint64_t)(turn_hours * 3600);
+                        const TurnCredentials credentials = turn_credentials(turn_secret, r->id, expires);
+                        send(connection, signal::Turn{ turn, credentials.user, credentials.password });
+                    }
                     send(connection, signal::Registered{ r->id });
                 }
                 return;
             }
-            const signal::Signal* s = std::get_if<signal::Signal>(&*packet);
-            if (s == nullptr || peer.id == 0) {
+            if (peer.id == 0) {
                 refuse(connection, signal::Refusal::protocol);
                 return;
             }
             const double t = now();
-            peer.tokens = std::min(signal_burst, peer.tokens + (t - peer.tokens_at) * signals_per_second);
-            peer.tokens_at = t;
-            if (peer.tokens < 1) {
+            if (!peer.packets.take(t, signals_per_second, signal_burst)) {
                 refuse(connection, signal::Refusal::busy);
                 return;
             }
-            peer.tokens -= 1;
-            const auto to = by_id.find(s->peer);
-            if (to == by_id.end()) {
-                send(connection, signal::Unreachable{ s->peer });
-                return;
+            if (const signal::Signal* s = std::get_if<signal::Signal>(&*packet)) {
+                const auto to = by_id.find(s->peer);
+                if (to == by_id.end()) {
+                    send(connection, signal::Unreachable{ s->peer });
+                    return;
+                }
+                send(to->second, signal::Signal{ peer.id, s->data });
+                signals_passed++;
             }
-            send(to->second, signal::Signal{ peer.id, s->data });
-            signals_passed++;
+            else if (const signal::CreateRoom* c = std::get_if<signal::CreateRoom>(&*packet)) {
+                if (peer.room != 0) {
+                    refuse(connection, signal::Refusal::protocol);
+                    return;
+                }
+                // A random code, not one open now or lately.
+                uint64_t room = 0;
+                while (room == 0 || rooms.contains(room) || closed_rooms.contains(room)) {
+                    room = ((uint64_t)random() << 32 | random()) & max_room;
+                }
+                peer.room = room;
+                peer.room_key = c->key;
+                rooms[room] = connection;
+                rooms_created++;
+                send(connection, signal::RoomCreated{ room });
+            }
+            else if (const signal::FindRoom* f = std::get_if<signal::FindRoom>(&*packet)) {
+                const auto found = rooms.find(f->room);
+                if (found != rooms.end()) {
+                    const Peer& host = peers[found->second];
+                    rooms_found++;
+                    send(connection, signal::RoomFound{ f->room, host.id, host.room_key });
+                    return;
+                }
+                rooms_missed++;
+                auto bucket = misses.try_emplace(peer.address, Bucket{ miss_burst, t }).first;
+                if (!bucket->second.take(t, misses_per_second, miss_burst)) {
+                    refuse(connection, signal::Refusal::busy);
+                    return;
+                }
+                send(connection, signal::NoRoom{ f->room });
+            }
+            else {
+                // A server's packet.
+                refuse(connection, signal::Refusal::protocol);
+            }
         }
 
         // Peers that never registered, and ids released long enough ago to be forgotten.
@@ -189,6 +275,8 @@ namespace {
                 refuse(connection, signal::Refusal::protocol);
             }
             std::erase_if(released, [t](const auto& entry) { return t - entry.second >= id_reuse_seconds; });
+            std::erase_if(closed_rooms, [t](const auto& entry) { return t - entry.second >= id_reuse_seconds; });
+            std::erase_if(misses, [t](const auto& entry) { return entry.second.tokens + (t - entry.second.at) * misses_per_second >= miss_burst; });
         }
     };
 
@@ -198,7 +286,8 @@ namespace {
     }
 
     int usage() {
-        std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096]\n");
+        std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096]\n"
+                             "                      [--turn <host:port> [--turn-hours 12]]   (the secret in TURN_SECRET)\n");
         return 2;
     }
 }
@@ -209,11 +298,30 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         const std::string arg = argv[i];
         if (i + 1 >= argc) return usage();
+        if (arg == "--turn") {
+            state.turn = argv[++i];
+            continue;
+        }
         const int value = std::atoi(argv[++i]);
         if (arg == "--port" && value > 0 && value < 65536) port = value;
+        else if (arg == "--turn-hours" && value > 0 && value <= 48) state.turn_hours = value;
         else if (arg == "--max-per-address" && value > 0) state.max_per_address = value;
         else if (arg == "--max-peers" && value > 0) state.max_peers = (size_t)value;
         else return usage();
+    }
+
+    if (!state.turn.empty()) {
+        const char* secret = std::getenv("TURN_SECRET");
+        state.turn_secret = secret != nullptr ? secret : "";
+        if (state.turn_secret.size() < 16) {
+            std::fprintf(stderr, "netplay_server: --turn needs the secret it shares with the TURN server in TURN_SECRET (16 characters or more)\n");
+            return 2;
+        }
+        static uint8_t buffer[signal::max_packet_size];
+        if (signal::encode(signal::Turn{ state.turn, "u", "p" }, buffer) == 0) {
+            std::fprintf(stderr, "netplay_server: --turn takes host:port, separated by commas (no spaces, %zu characters at most)\n", signal::max_text);
+            return 2;
+        }
     }
 
     std::signal(SIGINT, on_signal);
@@ -241,7 +349,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     state.group = SteamNetworkingSockets()->CreatePollGroup();
-    std::printf("netplay_server: listening on UDP port %d (signalling version %u)\n", port, (unsigned)signal::version);
+    std::printf("netplay_server: listening on UDP port %d (signalling version %u)%s\n", port, (unsigned)signal::version,
+        state.turn.empty() ? ", no TURN relay" : ", offering a TURN relay");
     std::fflush(stdout);
 
     double next_report = now() + 600;
@@ -258,7 +367,9 @@ int main(int argc, char** argv) {
         }
         state.expire();
         if (now() >= next_report) {
-            std::printf("netplay_server: %zu peers, %llu signals passed\n", state.peers.size(), (unsigned long long)state.signals_passed);
+            std::printf("netplay_server: %zu peers, %zu rooms; %llu signals passed, rooms %llu created, %llu found, %llu missed\n",
+                state.peers.size(), state.rooms.size(), (unsigned long long)state.signals_passed, (unsigned long long)state.rooms_created,
+                (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed);
             std::fflush(stdout);
             next_report = now() + 600;
         }

@@ -1,7 +1,6 @@
 // A peer's side of signalling: see signalling.hpp.
 
 #include "signalling.hpp"
-#include "session.hpp"
 
 #include <utility>
 
@@ -119,6 +118,10 @@ namespace conker::netplay {
         }
         current_state = State::connecting;
         failure.clear();
+        offered_turn.reset();
+        creating_room = false;
+        asked_room = created_room = 0;
+        room_lookup = Lookup::none;
         return true;
     }
 
@@ -186,6 +189,9 @@ namespace conker::netplay {
                     registering = false;
                     current_state = State::ready;
                 }
+                else if (const signal::Turn* t = std::get_if<signal::Turn>(&*packet); t != nullptr && registering && !offered_turn) {
+                    offered_turn = *t;
+                }
                 else if (registering) {
                     fail("the server sent a packet before taking this one's id");
                 }
@@ -195,11 +201,24 @@ namespace conker::netplay {
                 else if (const signal::Unreachable* u = std::get_if<signal::Unreachable>(&*packet)) {
                     gone.push_back(u->peer);
                 }
+                else if (const signal::RoomCreated* c = std::get_if<signal::RoomCreated>(&*packet); c != nullptr && creating_room) {
+                    creating_room = false;
+                    created_room = c->room;
+                }
+                else if (const signal::RoomFound* f = std::get_if<signal::RoomFound>(&*packet);
+                    f != nullptr && room_lookup == Lookup::waiting && f->room == asked_room) {
+                    found_room = *f;
+                    room_lookup = Lookup::found;
+                }
+                else if (const signal::NoRoom* n = std::get_if<signal::NoRoom>(&*packet);
+                    n != nullptr && room_lookup == Lookup::waiting && n->room == asked_room) {
+                    room_lookup = Lookup::missing;
+                }
                 else if (const signal::Refused* r = std::get_if<signal::Refused>(&*packet)) {
                     switch (r->reason) {
                         case signal::Refusal::version: fail("the server runs another version"); break;
                         case signal::Refusal::taken: fail("the server refused this id (try again)"); break;
-                        case signal::Refusal::busy: fail("the server is busy"); break;
+                        case signal::Refusal::busy: fail("the server is busy (or too many room codes were wrong: wait a minute)"); break;
                         default: fail("the server refused a packet"); break;
                     }
                 }
@@ -219,6 +238,49 @@ namespace conker::netplay {
                 }
             }
         }
+    }
+
+    void Signaller::send_now(const signal::Packet& packet) {
+        uint8_t buffer[signal::max_packet_size];
+        const size_t size = signal::encode(packet, buffer);
+        if (size != 0 && current_state == State::ready) {
+            SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
+        }
+    }
+
+    void Signaller::create_room(uint64_t key) {
+        if (current_state != State::ready || created_room != 0 || creating_room) {
+            return;
+        }
+        creating_room = true;
+        send_now(signal::CreateRoom{ key });
+    }
+
+    void Signaller::find_room(uint64_t room) {
+        if (current_state != State::ready || room_lookup == Lookup::waiting) {
+            return;
+        }
+        asked_room = room;
+        room_lookup = Lookup::waiting;
+        send_now(signal::FindRoom{ room });
+    }
+
+    Ice Signaller::ice(bool relay_only) const {
+        Ice ice;
+        ice.relay_only = relay_only;
+        if (offered_turn) {
+            // The library wants a user and password for each server, or takes none.
+            ice.turn = ice.stun = offered_turn->servers;
+            ice.turn_user = offered_turn->user;
+            ice.turn_password = offered_turn->password;
+            for (char c : offered_turn->servers) {
+                if (c == ',') {
+                    ice.turn_user += "," + offered_turn->user;
+                    ice.turn_password += "," + offered_turn->password;
+                }
+            }
+        }
+        return ice;
     }
 
     void SignalOutbox::push(uint64_t peer, std::span<const uint8_t> data) {

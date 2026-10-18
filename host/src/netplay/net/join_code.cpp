@@ -106,4 +106,31 @@ namespace conker::netplay {
         }
         return endpoint;
     }
+
+    std::string encode_room_code(uint64_t room) {
+        if (room == 0 || room > max_room) {
+            return {};
+        }
+        std::string code;
+        for (int c = 0; c < 8; c++) {
+            if (c == 4) code += '-';
+            code += alphabet[(room >> (35 - 5 * c)) & 31];
+        }
+        return code;
+    }
+
+    std::optional<uint64_t> decode_room_code(std::string_view code) {
+        uint64_t room = 0;
+        int characters = 0;
+        for (char c : code) {
+            if (c == '-' || c == ' ') continue;
+            const int value = value_of(c);
+            if (value < 0 || ++characters > 8) return std::nullopt;
+            room = room << 5 | (uint64_t)value;
+        }
+        if (characters != 8 || room == 0) {
+            return std::nullopt;
+        }
+        return room;
+    }
 }
