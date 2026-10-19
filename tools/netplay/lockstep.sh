@@ -24,8 +24,9 @@
 #              "my view only", the match's rule, so every copy widens each camera's culls up and down: both copies
 #              of a match of two must match its solo replay
 #   room       the match through a room on a netplay server (netplay_server, beside the game's build, on
-#              loopback): the host makes the room, the joiner joins by its code (direct connections: there's
-#              no relay here, tools/netplay/server/test.sh tests that); both must match solo's
+#              loopback): the host makes the room, public, which the server must list for the game's hashes;
+#              the joiner joins by its code (direct connections: there's no relay here,
+#              tools/netplay/server/test.sh tests that); both must match solo's
 #   jittery    the same with input delay 0 and random sleeps (--jitter 500) on the joiner, so the two
 #              are out of step and wait for each other all the time
 #   leave      the mouse match, the second joiner quitting at read 1500: the host and the first joiner play on,
@@ -127,9 +128,16 @@ server=$!
 pids="$pids $server"
 room="--netplay-server 127.0.0.1:27320 --netplay-direct"
 # shellcheck disable=SC2086
-pads=1.pads start room-host --netplay-host room $room --players 2 --input-delay 2
+pads=1.pads start room-host --netplay-host room --netplay-public $room --players 2 --input-delay 2
 # shellcheck disable=SC2086
-pads=2.pads start room-join --netplay-join "$(room_of room-host)" $room
+code=$(room_of room-host)
+# The host listed it in public: the server lists it for a game of the same hashes (the harness prints them).
+hashes=$(sed -n 's/^\[harness\] build .*: build \([0-9a-f]*\), ROM \([0-9a-f]*\), profile \([0-9a-f]*\)$/--build \1 --rom \2 --profile \3/p' "$OUT/room-host.out")
+# shellcheck disable=SC2086
+"$(dirname "$EXE")/src/netplay/net/netplay_probe" list --signal 127.0.0.1:27320 $hashes --mods 0 > "$OUT/room-list.out" 2>&1
+grep -q "^listed $code 1/2" "$OUT/room-list.out" || { echo "room: FAILED (not in the public list)"; cat "$OUT/room-list.out"; failed=1; }
+# shellcheck disable=SC2086
+pads=2.pads start room-join --netplay-join "$code" $room
 if finish "was the last: quitting" room-host room-join; then
     same room-host || failed=1
     same room-join || failed=1

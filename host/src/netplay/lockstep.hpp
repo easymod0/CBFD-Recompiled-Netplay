@@ -24,6 +24,8 @@
 //   --netplay-server <host:port> the netplay server, for rooms (tools/netplay/server/)
 //   --netplay-direct             (through a room) allow direct connections too, when the networks allow it
 //                                (the relay if not): quicker, but the players see each other's addresses
+//   --netplay-public             (hosting through a room) list it in the server's public room list, where
+//                                players of the same build, ROM, settings and mods find it by its name
 //   --local-players <n>          (hosting or joining) players on this machine, 1 to 3 (1 by default): each
 //                                has a port of their own (the lowest free ones), and plays with this
 //                                machine's controller of the same number (the first has the keyboard, mouse
@@ -91,8 +93,9 @@ namespace conker::lockstep {
     // `port` 0: through a room on the netplay server (set_server); -1: not hosting.
     void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     void set_join(const std::string& where, int local = 1);
-    // The netplay server ("host:port") for rooms, and whether direct connections are allowed through it.
-    void set_server(const std::string& server, bool allow_direct);
+    // The netplay server ("host:port") for rooms, whether direct connections are allowed through it, and
+    // (hosting) whether the room is in its public list.
+    void set_server(const std::string& server, bool allow_direct, bool listed = false);
     // Checks the options, before the game starts (false: a message was printed).
     bool prepare();
     // Hosting: the join code for this match at `address` (this computer's, as the others reach it; the
@@ -110,6 +113,30 @@ namespace conker::lockstep {
     bool begin(const netplay::Hello& me, std::string& error);
     Progress poll_connect(std::string& status);
     void cancel();
+    // The public room list on the netplay server (set_server's), for the menu, while no match is being
+    // connected: browse connects to it for a game whose Hello is `me` (false: `error` says why), and
+    // poll_browse says how it goes and gives the rooms that game can join, asked for again every few seconds.
+    // begin stops it, as does stop_browsing; browse_again asks for the list at once.
+    struct ListedRoom {
+        std::string code;       // its room code
+        std::string name;       // made from its number (netplay::room_name)
+        int players = 2;
+        int joined = 1;
+        bool playing = false;   // being played: nobody can join it
+        bool direct = false;    // its host allows direct connections
+        int rollback = 0;
+    };
+    struct Browse {
+        enum class State { connecting, listed, failed };
+        State state = State::connecting;
+        std::string error;                  // failed: why
+        std::vector<ListedRoom> rooms;      // open ones first
+        int others = 0;                     // rooms of this build and ROM besides, with other settings or mods
+    };
+    bool browse(const netplay::Hello& me, std::string& error);
+    Browse poll_browse();
+    void browse_again();
+    void stop_browsing();
     // The match has started (from the menu or connect).
     bool connected();
     // The Hello begin was given.

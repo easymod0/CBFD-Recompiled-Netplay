@@ -163,7 +163,7 @@ raw oversize 27209 --oversize
 
 # Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
 # (Every probe connects from the same address: more than the server lets one make in a burst.)
-"$bin/netplay_server" --port 27220 --connection-burst 1000 > ice.server.txt 2>&1 &
+"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-listed-per-address 3 > ice.server.txt 2>&1 &
 server=$!
 room_of() {
     i=0
@@ -215,16 +215,24 @@ expect ice-closed "no room $room on the server" join "$room" --signal 127.0.0.1:
 # Relay-only, but this server has no relay.
 expect ice-norelay "offers no TURN relay" host room --signal 127.0.0.1:27220
 # The public room list: a listed room of this game (3 players), one with other mods (counted, not listed),
-# one on macOS (apart from Linux and Windows) and one not listed. The list shows the first as players join
-# it, and as it's played.
-# listed <name> <expected "rooms n, others n"> <grep for a room line, or -> <probe options...>
+# one on macOS (apart from Linux and Windows), one not listed, and one past the server's public rooms
+# from one address (--max-listed-per-address 3 here: it stays private, so it isn't counted). The list
+# shows the first as players join it, and as it's played.
+# listed <name> <expected "rooms n, others n"> <grep for a room line, or -> <probe options...>: asked
+# again until it's so, for up to 15 s (or $tries half seconds).
 listed() {
     name=$1; count=$2; line=$3; shift 3
-    "$probe" list --signal 127.0.0.1:27220 "$@" > "$name.txt" 2>&1
-    if grep -qx "$count" "$name.txt" && { [ "$line" = - ] || grep -q "^listed $line" "$name.txt"; }; then echo "$name: passed"; else
-        echo "$name: FAILED (wanted $count, $line)"; cat "$name.txt"; failed=1; fi
+    i=0
+    while :; do
+        "$probe" list --signal 127.0.0.1:27220 "$@" > "$name.txt" 2>&1
+        if grep -qx "$count" "$name.txt" && { [ "$line" = - ] || grep -q "^listed $line" "$name.txt"; }; then echo "$name: passed"; return; fi
+        [ $i -ge "${tries:-30}" ] && break
+        sleep 0.5
+        i=$((i + 1))
+    done
+    echo "$name: FAILED (wanted $count, $line)"; cat "$name.txt"; failed=1
 }
-"$probe" host room --players 3 --public 1 --signal 127.0.0.1:27220 --direct 1 --reads 60 > lobby.host.txt 2>&1 &
+"$probe" host room --players 3 --public 1 --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.host.txt 2>&1 &
 lobby_host=$!
 lobby_room=$(room_of lobby.host.txt)
 others=
@@ -235,19 +243,21 @@ others="$others $!"
 "$probe" host room --signal 127.0.0.1:27220 --direct 1 > lobby.private.txt 2>&1 &
 others="$others $!"
 room_of lobby.mods.txt > /dev/null; room_of lobby.mac.txt > /dev/null; room_of lobby.private.txt > /dev/null
-sleep 0.5
 listed lobby-list "rooms 1, others 1" "$lobby_room 1/3 direct rollback 0"
-listed lobby-windows "rooms 1, others 1" "$lobby_room 1/3"
+"$probe" host room --public 1 --mods 3 --signal 127.0.0.1:27220 --direct 1 > lobby.capped.txt 2>&1 &
+others="$others $!"
+room_of lobby.capped.txt > /dev/null
+sleep 1
+listed lobby-capped "rooms 1, others 1" "$lobby_room 1/3"
+listed lobby-windows "rooms 1, others 1" "$lobby_room 1/3" --platform 2
 listed lobby-mac "rooms 1, others 0" - --platform 3
 grep -q "^listed $lobby_room" lobby-mac.txt && { echo "lobby-mac: FAILED (Linux's room listed)"; failed=1; }
 listed lobby-build "rooms 0, others 0" - --build 2
-"$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 60 > lobby.join1.txt 2>&1 &
+"$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.join1.txt 2>&1 &
 lobby_joiners=$!
-sleep 2
 listed lobby-joined "rooms 1, others 1" "$lobby_room 2/3"
-"$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 60 > lobby.join2.txt 2>&1 &
+"$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.join2.txt 2>&1 &
 lobby_joiners="$lobby_joiners $!"
-sleep 2
 listed lobby-playing "rooms 1, others 1" "$lobby_room 3/3 playing"
 for pid in $lobby_host $lobby_joiners; do
     wait "$pid" || { echo "lobby-match: FAILED"; failed=1; }
@@ -255,12 +265,7 @@ done
 # Killed, the others' connections only time out on the server (the library's 10 s): until then, their
 # rooms are listed.
 kill $others 2>/dev/null
-i=0
-while [ $i -lt 30 ] && ! "$probe" list --signal 127.0.0.1:27220 2>&1 | grep -qx "rooms 0, others 0"; do
-    sleep 1
-    i=$((i + 1))
-done
-listed lobby-gone "rooms 0, others 0" -
+tries=60 listed lobby-gone "rooms 0, others 0" -
 # Guessing codes: after 10 that aren't there (one above; a slow machine's may be refilled, one each 6 s),
 # the server closes the connection.
 i=0

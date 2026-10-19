@@ -10,6 +10,7 @@
 // traffic (coturn, beside it: tools/netplay/server/).
 //
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]
+//                  [--max-listed-per-address 2]
 //                  [--turn <host:port> [--turn-hours 12]]   (with the secret in TURN_SECRET)
 //
 // With --turn, each peer is offered that TURN relay as it registers (Turn), with credentials of its own
@@ -20,7 +21,8 @@
 // one IP address (an IPv6 one's /64), --connection-burst new ones (then one each 2 s), and --max-peers in
 // all; at most 20 packets a second from each (bursts of 60); one room each; from each address, at most 10
 // lookups of rooms that aren't there (then one each 6 s), so codes can't be guessed; 6 room lists (then one
-// each 3 s), each of at most signal::max_listed rooms. A room's code isn't
+// each 3 s), each of at most signal::max_listed rooms; --max-listed-per-address public rooms from each
+// address at once (more stay private). A room's code isn't
 // given out again for an hour after it closes. A peer without a room that sends nothing for 10 minutes is
 // closed, and any after 12 hours. Anything broken or past a limit closes the connection, after Refused. It
 // logs counts, never addresses, codes or signals.
@@ -146,6 +148,9 @@ namespace {
         std::unordered_map<std::string, Bucket> misses;
         std::unordered_map<std::string, Bucket> arrivals;   // new connections, kept the same way
         int max_per_address = 8;
+        // Public rooms from one address at once (--max-listed-per-address): more aren't listed (they stay
+        // private), so one network can't fill the list with rooms nobody answers in.
+        int max_listed_per_address = 2;
         size_t max_peers = 4096;
         std::string turn;           // the TURN relay offered, if any
         std::string turn_secret;
@@ -318,6 +323,12 @@ namespace {
                     return;
                 }
                 if (!peer.listed) {
+                    const auto from_here = std::count_if(peers.begin(), peers.end(), [&peer](const auto& p) {
+                        return p.second.listed && p.second.address == peer.address;
+                    });
+                    if (from_here >= max_listed_per_address) {
+                        return;
+                    }
                     peer.listed_at = t;
                 }
                 peer.listed = true;
@@ -405,6 +416,7 @@ namespace {
 
     int usage() {
         std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]\n"
+                             "                      [--max-listed-per-address 2]\n"
                              "                      [--turn <host:port> [--turn-hours 12]]   (the secret in TURN_SECRET)\n");
         return 2;
     }
@@ -425,6 +437,7 @@ int main(int argc, char** argv) {
         else if (arg == "--turn-hours" && value > 0 && value <= 48) state.turn_hours = value;
         else if (arg == "--connection-burst" && value > 0) state.connection_burst = value;
         else if (arg == "--max-per-address" && value > 0) state.max_per_address = value;
+        else if (arg == "--max-listed-per-address" && value > 0) state.max_listed_per_address = value;
         else if (arg == "--max-peers" && value > 0) state.max_peers = (size_t)value;
         else return usage();
     }
