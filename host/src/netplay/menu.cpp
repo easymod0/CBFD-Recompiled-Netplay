@@ -16,10 +16,11 @@
 // that list while it's open, asked for again every few seconds, and joins a room from it. Quick Match joins
 // the first open one that fits, or hosts one in public with the Host tab's settings (lockstep's).
 //
-// Once hosting or in, the waiting room shows who's there (by names made from their player ids), whether
-// they're ready, their platform and round trip; the match starts once it's full and everyone's ready (the
-// host's Ready is Start). The host can kick a player; anyone can block one (kept in netplay.json: a host
-// refuses them, a joiner leaves a room they're in).
+// Once hosting or in, the setup gives way to the lobby: the room or join code to share (hosting), and the
+// waiting room, which shows who's there (by names made from their player ids), whether they're ready, their
+// platform and round trip; the match starts once it's full and everyone's ready (the host's Ready is Start).
+// The title and the status line stay above the page's scrolling part. The host can kick a player; anyone can
+// block one (kept in netplay.json: a host refuses them, a joiner leaves a room they're in).
 //
 // A match hosted directly can be visible on this network: games there list it on their Join tab (heard
 // from its beacon: lan.hpp) and join it with no code and no server.
@@ -164,8 +165,17 @@ namespace {
         recompui::TextInput* port_input = nullptr;
         recompui::TextInput* address_input = nullptr;
         recompui::TextInput* join_input = nullptr;
+        recompui::Element* setup_box = nullptr;    // the menu while idle: the settings, Host and Join
+        recompui::Element* lobby_box = nullptr;    // in its place while connecting: the code and the waiting room
+        recompui::Element* code_box = nullptr;     // hosting: the code to share
+        recompui::Label* code_title = nullptr;
         recompui::Label* code_label = nullptr;
+        recompui::Label* code_hint = nullptr;
         recompui::Button* copy_button = nullptr;
+        bool shown_in = false;                     // the waiting room was on show (its Ready is focused when it comes)
+        bool refocus = false;                      // a button of the waiting room was pressed: Ready is focused once it's made again
+        std::vector<recompui::Label*> seat_about;  // each seat's "ready, platform, round trip", or null for a free one
+        std::vector<std::string> shown_about;      // what they show
         std::string shown_code;             // the join code on show, for Copy
         recompui::Element* status_row = nullptr;   // hidden while there's nothing to say
         recompui::Element* waiting_box = nullptr;  // the waiting room, while connecting
@@ -246,7 +256,8 @@ namespace {
             return field;
         }
 
-        // The room code, or the join code (it holds the match's key, new each time), once hosting.
+        // The room code, or the join code (it holds the match's key, new each time), at the top of the lobby
+        // while hosting.
         void show_code() {
             const bool blank = address_text.find_first_not_of(' ') == std::string::npos;
             const std::string code = !hosting ? std::string() :
@@ -256,25 +267,31 @@ namespace {
             }
             shown_code = code;
             copy_button->set_display(code.empty() ? recompui::Display::None : recompui::Display::Flex);
+            code_box->set_display(hosting ? recompui::Display::Flex : recompui::Display::None);
+            const std::string lan = lan_visible ? " Players on this network also find the match on their Join tab." : "";
             if (!host_directly) {
-                code_label->set_text(!hosting ? "Press Host: the room code to send the others appears here." :
-                    code.empty() ? "Making a room..." : "Room code: " + code);
-            }
-            else if (blank && lan_visible) {
-                code_label->set_text(hosting ? "Visible on this network: players there find it on their Join tab." :
-                    "Visible on this network (enter your address for a join code too).");
+                code_title->set_text("Room code");
+                code_label->set_text(code.empty() ? "Making a room..." : code);
+                code_hint->set_text(public_room ? "Public: the room is in the server's list too. Send the code to anyone "
+                    "else you want to play with." : "Private: send this code to the people you want to play with.");
             }
             else if (blank) {
-                code_label->set_text("Enter your address to get a join code.");
-            }
-            else if (!hosting) {
-                code_label->set_text("Press Host: the join code to send the others appears here.");
+                // Only with the match visible on this network (on_host asks for an address otherwise).
+                code_title->set_text("On this network");
+                code_label->set_text("Visible");
+                code_hint->set_text("Players on this network find the match on their Join tab. Give your address (Host "
+                    "tab) for a join code too.");
             }
             else if (code.empty()) {
-                code_label->set_text("That isn't an address: four numbers such as 203.0.113.7, or an IPv6 one.");
+                code_title->set_text("Join code");
+                code_label->set_text("None");
+                code_hint->set_text("That isn't an address: four numbers such as 203.0.113.7, or an IPv6 one. Close the "
+                    "room and host again." + lan);
             }
             else {
-                code_label->set_text("Join code: " + code);
+                code_title->set_text("Join code");
+                code_label->set_text(code);
+                code_hint->set_text("It contains your IP address: share it only with people you trust." + lan);
             }
         }
 
@@ -288,6 +305,9 @@ namespace {
             status_row->set_display(status.empty() && state != State::connecting ? recompui::Display::None : recompui::Display::Flex);
             host_button->set_enabled(state == State::idle);
             join_button->set_enabled(state == State::idle);
+            // Nothing in the setup can change a match under way: it's hidden until it's idle again.
+            setup_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
+            lobby_box->set_display(state == State::idle ? recompui::Display::None : recompui::Display::Flex);
             cancel_button->set_display(state == State::connecting ? recompui::Display::Flex : recompui::Display::None);
             // The room list only while nothing is being connected (it's asked for again once it's idle).
             rooms_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
@@ -334,21 +354,41 @@ namespace {
             set_state(State::connecting, "Connecting...");
         }
 
-        // The waiting room as it is now (while connecting), made again when that changes.
+        static std::string seat_text(const conker::lockstep::Seat& seat) {
+            static const char* const platforms[] = { "", "Linux", "Windows", "macOS" };
+            std::string about = seat.ready ? "ready" : "not ready";
+            about += seat.platform >= 1 && seat.platform <= 3 ? std::string(", ") + platforms[seat.platform] : "";
+            about += seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
+            return about;
+        }
+
+        // The waiting room as it is now (while connecting), made again when who's there or who's ready changes.
+        // A round trip only changes its seat's text: made again, the room would lose a controller's focus.
         void show_waiting() {
             const conker::lockstep::WaitingRoom room = state == State::connecting ? conker::lockstep::waiting_room()
                                                                                     : conker::lockstep::WaitingRoom{};
             std::string summary = room.in ? (room.ready ? "R" : "r") : "";
             for (const conker::lockstep::Seat& seat : room.seats) {
-                // Round trips to 10 ms: not made again for every millisecond.
-                summary += "|" + std::to_string(seat.player) + (seat.ready ? "R" : "") + std::to_string(seat.round_trip_ms / 10);
+                summary += "|" + std::to_string(seat.player) + (seat.ready ? "R" : "");
             }
             if (summary == shown_waiting) {
+                for (size_t port = 0; port < seat_about.size() && port < room.seats.size(); port++) {
+                    const std::string about = seat_text(room.seats[port]);
+                    if (seat_about[port] != nullptr && about != shown_about[port]) {
+                        seat_about[port]->set_text(about);
+                        shown_about[port] = about;
+                    }
+                }
                 return;
             }
+            seat_about.clear();
             shown_waiting = summary;
             waiting_box->clear_children();
             waiting_box->set_display(room.in ? recompui::Display::Flex : recompui::Display::None);
+            // In the room, its Leave takes Cancel's place.
+            cancel_button->set_display(state == State::connecting && !room.in ? recompui::Display::Flex : recompui::Display::None);
+            const bool arrived = room.in && !shown_in;
+            shown_in = room.in;
             if (!room.in) {
                 return;
             }
@@ -360,7 +400,8 @@ namespace {
                 (room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : ", no rollback") +
                 (room.own_view ? ", everyone sees only their own view" : "");
             text(waiting_box, rules, Typography::LabelMD);
-            static const char* const platforms[] = { "", "Linux", "Windows", "macOS" };
+            seat_about.assign(room.players, nullptr);
+            shown_about.assign(room.players, "");
             for (int port = 0; port < room.players; port++) {
                 const conker::lockstep::Seat& seat = room.seats[port];
                 recompui::Element* line = row(waiting_box);
@@ -370,10 +411,8 @@ namespace {
                     continue;
                 }
                 text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body);
-                std::string about = seat.ready ? "ready" : "not ready";
-                about += seat.platform >= 1 && seat.platform <= 3 ? std::string(", ") + platforms[seat.platform] : "";
-                about += seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
-                text(line, about, Typography::Body, seat.ready ? color::Text : color::TextDim);
+                shown_about[port] = seat_text(seat);
+                seat_about[port] = text(line, shown_about[port], Typography::Body, seat.ready ? color::Text : color::TextDim);
                 if (seat.mine) {
                     continue;
                 }
@@ -383,6 +422,7 @@ namespace {
                     kick->add_pressed_callback([this, port, player]() {
                         conker::lockstep::kick(port, player);
                         shown_waiting.clear();
+                        refocus = true;
                         queue_update();
                     });
                 }
@@ -391,18 +431,35 @@ namespace {
                     block_player(player);
                     settings.blocked = load_settings().blocked;
                     shown_waiting.clear();
+                    refocus = true;
                     queue_update();
                 });
             }
             const char* label = room.hosting ? (room.ready ? "Don't start yet" : "Start when everyone's ready") : (room.ready ? "Not ready" : "Ready");
-            recompui::Button* ready = context.create_element<recompui::Button>(waiting_box, label,
+            recompui::Element* buttons = row(waiting_box);
+            recompui::Button* ready = context.create_element<recompui::Button>(buttons, label,
                 room.ready ? recompui::ButtonStyle::Secondary : recompui::ButtonStyle::Primary);
+            // Where a controller goes when someone coming or going made the room again under its focus.
+            ready->set_as_primary_focus();
             const bool now_ready = room.ready;
             ready->add_pressed_callback([this, now_ready]() {
                 conker::lockstep::set_ready(!now_ready);
                 shown_waiting.clear();
+                refocus = true;
                 queue_update();
             });
+            recompui::Button* leave = context.create_element<recompui::Button>(buttons, room.hosting ? "Close room" : "Leave",
+                recompui::ButtonStyle::Tertiary);
+            leave->set_white_space(recompui::WhiteSpace::Nowrap);
+            leave->add_pressed_callback([this, hosting = room.hosting]() {
+                on_cancel(hosting ? "You closed the room." : "You left the room.");
+            });
+            // The Host or Join pressed is hidden now, or the button pressed was made again: a controller goes on
+            // from Ready.
+            if (arrived || refocus) {
+                ready->focus();
+            }
+            refocus = false;
             text(waiting_box, room.hosting ? "The match starts once every place is taken and every player is ready. Kick removes a "
                 "player; Block keeps them out of your matches from now on." :
                 "The match starts once every place is taken and every player is ready (the host too). Block keeps a player "
@@ -688,10 +745,10 @@ namespace {
             begin();
         }
 
-        void on_cancel() {
+        void on_cancel(const std::string& status = "Cancelled.") {
             conker::lockstep::cancel();
             conker::lockstep::set_host(-1, players);
-            set_state(State::idle, "Cancelled.");
+            set_state(State::idle, status);
         }
 
     protected:
@@ -763,28 +820,57 @@ namespace {
             recompui::ContextId context = recompui::get_current_context();
             set_display(recompui::Display::Flex);
             set_flex_direction(recompui::FlexDirection::Column);
-            set_gap(28.0f);
-            set_padding(32.0f);
             set_width(100.0f, recompui::Unit::Percent);
+            set_height(100.0f, recompui::Unit::Percent);
             set_background_color(recompui::theme::color::Background1);
             set_as_navigation_container(recompui::NavigationType::Vertical);
 
-            recompui::Element* intro = column(this, 8.0f);
-            text(intro, "Netplay", Typography::Header3);
-            text(intro, "Play multiplayer online. Everyone needs this same build and the same ROM, and the same mods "
-                "on, at the same versions and settings (texture packs can differ). The game starts from the beginning.",
-                Typography::Body, color::TextDim);
-
-            // How it goes: at the top, where it's seen whatever part of the page is scrolled to.
-            status_row = row(this);
+            // The title and how it goes, above the scrolling part: seen whatever part of the page is scrolled to.
+            recompui::Element* bar = column(this, 12.0f);
+            bar->set_padding(32.0f);
+            bar->set_padding_bottom(16.0f);
+            text(bar, "Netplay", Typography::Header3);
+            status_row = row(bar);
             status_label = text(status_row, "", Typography::LabelLG);
             cancel_button = context.create_element<recompui::Button>(status_row, "Cancel", recompui::ButtonStyle::Tertiary);
             cancel_button->add_pressed_callback([this]() { on_cancel(); });
-            waiting_box = column(this, 10.0f);
+
+            // The rest scrolls: the page is taller than a small window, and squeezed into it its rows and texts
+            // would be drawn over each other.
+            recompui::ScrollContainer* scroll = context.create_element<recompui::ScrollContainer>(this, recompui::ScrollDirection::Vertical);
+            scroll->set_height_auto();
+            scroll->set_flex(1.0f, 1.0f, 0.0f);
+            scroll->set_min_height(0.0f);
+            recompui::Element* content = column(scroll, 28.0f);
+            content->set_padding(32.0f);
+            content->set_padding_top(0.0f);
+
+            // While connecting: the code to share (hosting), then the waiting room.
+            lobby_box = column(content, 20.0f);
+            code_box = column(lobby_box, 8.0f);
+            code_title = text(code_box, "", Typography::LabelMD, color::TextDim);
+            recompui::Element* code_row = row(code_box);
+            code_label = text(code_row, "", Typography::Header2);
+            copy_button = context.create_element<recompui::Button>(code_row, "Copy", recompui::ButtonStyle::Secondary);
+            copy_button->add_pressed_callback([this]() {
+                // Said on the button: the status line is busy while waiting for players.
+                if (!shown_code.empty() && SDL_SetClipboardText(shown_code.c_str()) == 0) {
+                    copy_button->set_text("Copied");
+                    queue_update();
+                }
+            });
+            code_hint = text(code_box, "", Typography::Body, color::TextDim);
+            waiting_box = column(lobby_box, 10.0f);
             waiting_box->set_display(recompui::Display::None);
 
+            // While idle: what the match is to be, and Host or Join.
+            setup_box = column(content, 28.0f);
+            text(setup_box, "Play multiplayer online. Everyone needs this same build and the same ROM, and the same mods "
+                "on, at the same versions and settings (texture packs can differ). The game starts from the beginning.",
+                Typography::Body, color::TextDim);
+
             // Who plays on this computer, hosting or joining.
-            recompui::Element* here = column(this, 12.0f);
+            recompui::Element* here = column(setup_box, 12.0f);
             recompui::Element* here_row = row(here);
             text(here_row, "Players on this computer", Typography::LabelMD);
             recompui::Radio* here_radio = context.create_element<recompui::Radio>(here_row);
@@ -797,7 +883,7 @@ namespace {
                 "keyboard, mouse and gyro.", Typography::Body, color::TextDim);
 
             // The netplay server, for rooms.
-            recompui::Element* server = column(this, 12.0f);
+            recompui::Element* server = column(setup_box, 12.0f);
             recompui::Element* server_row = row(server);
             text(server_row, "Server", Typography::LabelMD);
             recompui::TextInput* server_input = input(server_row, settings.server, 320.0f);
@@ -823,13 +909,13 @@ namespace {
             test_box = column(server, 4.0f);
 
             // Hosting or joining: a tab each, so only the one chosen's settings show.
-            recompui::TabSet* tabs = context.create_element<recompui::TabSet>(this);
+            recompui::TabSet* tabs = context.create_element<recompui::TabSet>(setup_box);
             tabs->set_flex_shrink(0.0f);
             tabs->add_tab("Host a match");
             tabs->add_tab("Join a match");
 
             // Hosting.
-            recompui::Element* host = column(this, 12.0f);
+            recompui::Element* host = column(setup_box, 12.0f);
             host_section = host;
             recompui::Element* host_row = row(host);
             text(host_row, "Players", Typography::LabelMD);
@@ -904,16 +990,6 @@ namespace {
             text(host, "Rollback (experimental): instead of waiting for the others' input, every player's game guesses "
                 "it up to that many reads ahead (about 30 a second) and goes back to correct a wrong guess, so lag is "
                 "felt less.", Typography::Body, color::TextDim);
-            recompui::Element* code_row = row(host);
-            code_label = text(code_row, "", Typography::LabelMD);
-            copy_button = context.create_element<recompui::Button>(code_row, "Copy", recompui::ButtonStyle::Tertiary);
-            copy_button->add_pressed_callback([this]() {
-                // Said on the button: the status line is busy while waiting for players.
-                if (!shown_code.empty() && SDL_SetClipboardText(shown_code.c_str()) == 0) {
-                    copy_button->set_text("Copied");
-                    queue_update();
-                }
-            });
             recompui::Element* lan_row = row(direct_rows);
             text(lan_row, "On this network", Typography::LabelMD);
             recompui::Radio* lan_radio = context.create_element<recompui::Radio>(lan_row);
@@ -935,7 +1011,7 @@ namespace {
             host_button->add_pressed_callback([this]() { on_host(); });
 
             // Joining.
-            recompui::Element* join = column(this, 12.0f);
+            recompui::Element* join = column(setup_box, 12.0f);
             join_section = join;
             recompui::Element* join_row = row(join);
             text(join_row, "Room or join code", Typography::LabelMD);
@@ -1000,7 +1076,7 @@ namespace {
             join_section->set_display(recompui::Display::None);
 
             // What this window shows of the split screen.
-            recompui::Element* display = column(this, 12.0f);
+            recompui::Element* display = column(setup_box, 12.0f);
             text(display, "Your screen", Typography::LabelLG);
             recompui::Radio* display_radio = context.create_element<recompui::Radio>(display);
             display_radio->add_option("Split screen");
@@ -1168,12 +1244,9 @@ void conker::netplay_menu::open() {
         modal = recompui::Modal::create_modal(recompui::ModalType::Fullscreen);
         recompui::ContextId context = modal->modal_root_context;
         context.open();
-        // In a scroll container: the page is taller than a small window, and squeezed into it its rows and
-        // texts would be drawn over each other.
+        // The page scrolls within itself, below its title and status line.
         modal->get_body()->set_overflow_y(recompui::Overflow::Hidden);
-        recompui::ScrollContainer* scroll = context.create_element<recompui::ScrollContainer>(modal->get_body(), recompui::ScrollDirection::Vertical);
-        scroll->set_background_color(recompui::theme::color::Background1);    // the page's, below it too
-        page = context.create_element<NetplayPage>(scroll);
+        page = context.create_element<NetplayPage>(modal->get_body());
         context.close();
         // Closing it while connecting gives up.
         modal->set_on_close_callback([]() {
