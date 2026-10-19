@@ -152,4 +152,11 @@ namespace conker::netplay {
         x ^= x >> 29;
         return std::string(adjectives[x & 31]) + " " + nouns[(x >> 5) & 31];
     }
+
+    std::string player_name(uint64_t player) {
+        // Another mix than rooms', so a player and their room don't share a name.
+        uint64_t x = (player ^ 0xC2B2AE3D27D4EB4Full) * 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 31;
+        return room_name(x == 0 ? 1 : x);
+    }
 }

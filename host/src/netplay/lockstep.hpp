@@ -29,6 +29,12 @@
 //   --netplay-lan                (hosting on a port) visible on this network: a beacon each second while the
 //                                players join (UDP port 27016), which games there list and join from (no
 //                                address needed then); anyone on the network can join it
+//   --netplay-player <hex>       this machine's player id (Hello's: the waiting room's names, block lists);
+//                                random for the process if not given (the menu keeps one in netplay.json)
+//   --netplay-block <hex>        keep this player out (hosting: refused; joining: leave a room they're in),
+//                                again for more
+//                                The waiting room: a match starts once every port is taken and everyone's
+//                                ready; from the command line every machine is ready by itself
 //   --netplay-quick              Quick Match on --netplay-server: joins the first open public room this game
 //                                can join (trying up to 5), or hosts one, in public, as --netplay-host room
 //                                would with --players and the like. A host still alone that sees an older open
@@ -44,6 +50,8 @@
 //                                then Delay: every peer switches at the same read)
 //   --netplay-desync-at <read>   (a test) changes a byte of game memory at that read (in region 64,
 //                                0x80400003), which the next hash comparison must catch
+//   --netplay-kick-at <read>:<port>  (a test, hosting) kicks that player (2 to 4) at that read, as the Esc
+//                                menu's Netplay tab does: their port plays on idle
 //   --netplay-fake-network <spec>  (a test) fakes a bad network on this peer's side, through the library:
 //                                lag=<ms>, jitter=<ms>, loss=<%>, reorder=<%> and dup=<%> on what it sends,
 //                                outage=<read>:<s> (nothing sent or received for that long from that read)
@@ -102,6 +110,9 @@ namespace conker::lockstep {
     void set_join(const std::string& where, int local = 1);
     // Hosting on a port: visible on this network (--netplay-lan).
     void set_lan(bool visible);
+    // Who plays here (the menu's kept player id), whom they keep out, and whether they're ready by themselves
+    // (the command line's way) or when set_ready says (the menu's waiting room).
+    void set_identity(uint64_t player, const std::vector<uint64_t>& blocked, bool ready_by_itself);
     // Quick Match (--netplay-quick): as set_host's, which it hosts with if it finds no room to join.
     void set_quick(int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     // The netplay server ("host:port") for rooms, whether direct connections are allowed through it, and
@@ -154,6 +165,41 @@ namespace conker::lockstep {
     bool lan_browse(const netplay::Hello& me, std::string& error);
     std::vector<ListedRoom> poll_lan();
     void stop_lan();
+    // The waiting room, while connecting (#31): each port's player (by name, made from their player id), whether
+    // they're ready, their platform and round trip to the host, which are this machine's, and the match's
+    // settings. `in`: there's one to show (hosting, or welcomed). set_ready: this machine's players are ready
+    // (the host's: Start). kick: the host removes a port's machine. block: adds a player to the block list
+    // (the menu keeps it): a host kicks them, a joiner leaves a room they're in.
+    struct Seat {
+        uint64_t player = 0;        // 0: free
+        std::string name;
+        bool ready = false;
+        int platform = 0;           // 1 Linux, 2 Windows, 3 macOS
+        int round_trip_ms = -1;     // -1: not known (or this machine's)
+        bool mine = false;
+        bool left = false;          // in a match: they've left (or were removed)
+    };
+    struct WaitingRoom {
+        bool in = false;
+        bool hosting = false;
+        int players = 0;
+        std::array<Seat, netplay::max_players> seats;
+        bool ready = false;         // this machine's players
+        bool own_view = false;
+        int delay = -1;             // -1: auto
+        int rollback = 0;
+    };
+    WaitingRoom waiting_room();
+    void set_ready(bool ready);
+    // `player`: the one shown on `port` (0: whoever's there), so a place that changed hands isn't kicked.
+    bool kick(int port, uint64_t player = 0);
+    void block(uint64_t player);
+    // During a match (the Esc menu's Netplay tab): its players as the waiting room last had them, which have
+    // left since (`in`: there's a match). kick works then too (the host's: their ports play on idle, as when
+    // someone leaves), and block (a host kicks them; a joiner only keeps them out of later matches).
+    // leave_match: this machine leaves; the match is over here (the others play on, or end if it hosted).
+    WaitingRoom match_room();
+    void leave_match();
     // The match has started (from the menu or connect).
     bool connected();
     // The Hello begin was given.

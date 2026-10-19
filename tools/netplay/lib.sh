@@ -9,7 +9,7 @@ made=
 pids=
 procs=
 cleanup() {
-    for pid in $pids; do kill -9 "$pid" 2>/dev/null; done
+    for pid in $pids ${servers:-}; do kill -9 "$pid" 2>/dev/null; done
     for name in $made; do rm -rf "$OUT/data-$name"; done
 }
 trap cleanup EXIT

@@ -132,6 +132,17 @@ namespace conker::netplay {
         // refuses any more. `own_view`: every player sees only their own view (the match's rule); `delay`:
         // the input delay everyone uses; `rollback`: the reads every peer predicts ahead (0: off).
         bool start(bool own_view = false, int delay = 2, int rollback = 0);
+        // The waiting room, before the start (packets.hpp's Roster and Ready). Host: the match's settings it
+        // shows (`delay` -1: auto), whether its own players are ready (its Start), the players it keeps out
+        // (their player ids: refused as kicked), and kick, which drops a port's machine (kicked; false if no
+        // joiner has it). Joiner: set_ready tells the host. roster(): as the host last sent it (the host's:
+        // as it is now); everyone_ready: host, every port taken and every machine ready.
+        void set_room_settings(bool own_view, int delay, int rollback);
+        void set_ready(bool ready);
+        void set_blocked(const std::vector<uint64_t>& players) { blocked = players; }
+        bool kick(int port);
+        Roster roster() const;
+        bool everyone_ready() const;
         // Host: the round trip to each joiner, in milliseconds, as the library measures it (none it doesn't
         // know yet), for choosing the input delay.
         std::vector<int> round_trips_ms() const;
@@ -144,6 +155,8 @@ namespace conker::netplay {
         std::string route(int port) const;
         // Host: the joiners in (machines, not players: one may have several ports).
         int joiners() const;
+        // Host: the connections still on their way in (before their handshake is done).
+        int arriving() const;
         // Host: the ports whose views are shown two to a window (each machine with two players', the host's too),
         // sent with Start.
         uint8_t pairs() const;
@@ -179,6 +192,9 @@ namespace conker::netplay {
             double connected_at = 0;   // host: when its connection came up (Connected)
             bool up = false;            // host: it has (the handshake time runs from then)
             int64_t last_hash = -1; // the read of the last Hash from it (one per read, in order)
+            uint64_t player = 0;    // host: its Hello's player id and platform, and whether it's ready
+            uint8_t platform = 0;
+            bool ready = false;
         };
 
         void on_status_changed(const void* info);
@@ -215,5 +231,13 @@ namespace conker::netplay {
         uint32_t poll_group = 0;
         std::vector<Peer> peers;            // host: everyone connected; joiner: the host
         std::vector<Event> pending_events;  // from the status callback, until the next poll
+        // The waiting room: host, its own readiness, whom it keeps out, the settings shown, and the roster as
+        // last sent (and when next, for the round trips); joiner, the roster as the host last sent it.
+        bool own_ready = false;
+        std::vector<uint64_t> blocked;
+        Roster settings;
+        Roster sent_roster;
+        double next_roster = 0;
+        Roster host_roster;
     };
 }

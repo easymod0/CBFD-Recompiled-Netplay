@@ -22,8 +22,10 @@ namespace conker::netplay {
     namespace {
         // A match not heard from for this long has gone (its host broadcasts about once a second).
         constexpr double heard_seconds = 3.5;
-        // The most matches kept (a network can't fill memory with made-up ones).
+        // The most matches kept (a network can't fill memory with made-up ones), and from one address (one
+        // machine can't push the others' off the list).
         constexpr size_t max_heard = 64;
+        constexpr int max_per_sender = 2;
         // The most beacons one poll takes.
         constexpr int max_per_poll = 256;
 
@@ -111,6 +113,9 @@ namespace conker::netplay {
         // To the network (the default one), and to this machine: a firewall may keep broadcasts out, but not
         // what comes from the machine itself, so two games on it always find each other.
         for (const uint32_t address : { (uint32_t)INADDR_BROADCAST, (uint32_t)INADDR_LOOPBACK }) {
+            if (address == INADDR_LOOPBACK && !to_this_machine) {
+                continue;
+            }
             sockaddr_in to{};
             to.sin_family = AF_INET;
             to.sin_port = htons(to_port);
@@ -177,7 +182,7 @@ namespace conker::netplay {
                 break;
             }
             const std::optional<lan::Beacon> beacon = lan::decode({ data, (size_t)size });
-            // Only this game's (a network's made-up ones can't crowd out the real).
+            // Only this game's.
             if (!beacon || from.sin_family != AF_INET || beacon->fit != want_fit || !platforms_mix(beacon->platform, want_platform)) {
                 continue;
             }
@@ -204,6 +209,13 @@ namespace conker::netplay {
                 }
             }
             else {
+                const std::string sender = match.address.substr(0, match.address.rfind(':'));
+                const auto from_sender = std::count_if(heard.begin(), heard.end(), [&sender](const Heard& h) {
+                    return h.match.address.compare(0, sender.size() + 1, sender + ":") == 0;
+                });
+                if (from_sender >= max_per_sender) {
+                    continue;
+                }
                 // Full: the one heard from longest ago makes way.
                 if (heard.size() >= max_heard) {
                     heard.erase(std::min_element(heard.begin(), heard.end(), [](const Heard& a, const Heard& b) { return a.at < b.at; }));

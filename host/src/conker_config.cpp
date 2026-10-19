@@ -205,6 +205,9 @@ void conker::init_config() {
     conker::sound_volumes::add_options(recompui::config::create_sound_tab());
 
     conker::local_achievements::add_tab();
+#if defined(CONKER_NETPLAY)
+    conker::netplay_menu::add_tab();
+#endif
 
     recompui::config::create_mods_tab();
 

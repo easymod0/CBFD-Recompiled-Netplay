@@ -119,13 +119,16 @@ new kind of packet, for something new the game needs from the server) makes a ne
 and then the server still speaks the older ones (from version 2), each to the games that speak it, and
 keeps them apart: a game finds rooms of its own version only. A game newer than its server speaks the
 server's version instead, and goes without what's newer (public rooms need version 3: on an older
-server, rooms by code still work; desync summaries need version 4). The image is only rebuilt when the
+server, rooms by code still work; desync summaries need version 4, and hiding blocked players' rooms
+version 5, which adds each listed room's host player id). The image is only rebuilt when the
 server's code changes.
 
 ## Desyncs
 
 When a match through a room desyncs (the players' games went different ways), each player whose game
-found it sends the server a short summary, which it logs, at most 4 from each connection:
+found it sends the server a short summary, which it logs: at most 4 from each connection, 4 from each
+address (then one each 5 minutes) and 30 in all (then one each 30 s), so the log can't be filled; the rest
+are only counted:
 
     netplay_server: desync: match 1a2b3c4d, build 5e6f..., Windows, 2 players, port 2 against port 1, read 4512, regions 64,65, rollback 8, delay 2
 
@@ -133,7 +136,7 @@ found it sends the server a short summary, which it logs, at most 4 from each co
 into); `build` is the game's build hash (the release); the regions are the 64 KB parts of game memory
 that differed. No addresses, memory or inputs: the full reports stay on the players' machines
 (`netplay-desyncs/` in the config folder), for them to send when they report the problem. The 10-minute
-count line says how many came in. Matches by join code or on a LAN don't go through the server, so they
+count line says how many came in, and how many weren't logged. Matches by join code or on a LAN don't go through the server, so they
 send nothing.
 
 ## What's limited
@@ -141,7 +144,7 @@ send nothing.
 - **Signalling:** a peer must register within 5 s, with an id nobody else has (nor had in the last
   hour). At most `MAX_PER_ADDRESS` connections at once from one IP address (8; an IPv6 address's /64
   counts as one), 20 new ones in a burst then one each 2 s, 4096 in all, and 20 packets a second each
-  (bursts of 60). A connection without a room that's idle for 10 minutes is closed, and any after 12 hours. One room each. From one IP address, at most 10 lookups of room codes that
+  (bursts of 60). A connection that neither hosts a room nor found one that's still open (a player in a match), and is idle for 10 minutes, is closed, and any after 12 hours. One room each. From one IP address, at most 10 lookups of room codes that
   aren't there, then one each 6 s, so codes can't be guessed (a code is one of a trillion, and isn't
   given out again for an hour after its room closes). At most 6 room lists in a burst, then one each 3 s,
   of 32 rooms at most; at most 2 public rooms from one address at once (more stay private). Anything else closes the connection. The server

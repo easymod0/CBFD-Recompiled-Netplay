@@ -268,6 +268,15 @@ address, from which it shows the join code); players, input delay; or join by ei
 machine once all are in. When a match started there ends (a desync, the host gone), a prompt says why
 instead of the game quitting.
 
+**The waiting room** (fork issues #30, #31). Once hosting or in, everyone sees who's there: each port's
+player by a name made from their player id (random, kept in `netplay.json`; `--netplay-player <hex>` on
+the command line), whether they're ready, their platform and round trip to the host, and the match's
+settings (the host's Roster, sent as it changes; joiners say Ready). The match starts once every port is
+taken and everyone's ready; the host's Ready is its Start. From the command line every copy is ready by
+itself, as before. The host can **kick** a player; anyone can **block** one (kept in `netplay.json`;
+`--netplay-block <hex>`): a host refuses them (told only "the host removed this player"), and a joiner
+leaves a room they're in (Quick Match tries the next).
+
 This fork's menu finds matches too (fork issue #29):
 - **Public rooms** (`--netplay-public`): a room hosted Public is in the server's room list, under a name
   made from its number ("Grumpy Squirrel"). The Join tab lists the rooms this game can join (the same
@@ -278,7 +287,8 @@ This fork's menu finds matches too (fork issue #29):
   its own and joins that, so two players who pressed it at once meet.
 - **On this network** (`--netplay-lan`, hosting on a port): the host broadcasts a beacon each second (UDP
   port 27016, and to its own machine), and games on the network list the match and join it with no code
-  and no server. Anyone on the network can join it. A firewall on the joiner's machine may need UDP 27016
+  and no server. Anyone on the network can join it, and any machine on it could pose as the match (it's
+  for trusted networks: a home, a LAN party). A firewall on the joiner's machine may need UDP 27016
   open to hear other machines.
 
 **Screens.** Every machine draws the whole split screen (that keeps the games the same), but a window can
@@ -400,7 +410,7 @@ so.
 | Script | |
 |---|---|
 | `check.sh` | the determinism check: replays a made-up recording headless twice, with `--jitter` and with `--state-test`, and fails unless all four give the same hashes (about 30 s; the CI runs it, `.github/workflows/netplay.yml`) |
-| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, and a desync is caught and reported (about 100 s); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
+| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, through a room on a local netplay server (public: the server lists it), Quick Match (joining a public host; two at once meeting in one room), block lists (a host keeping a player out, a joiner leaving, Quick Match passing over a blocked host's room), a kick during a match, and a desync is caught and reported, by the players and, through a room, in the server's log (a few minutes); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
 | `network.sh` | the bad-network check: matches with lag, jitter, loss, an outage and a change of lag give the same game as a replay alone, and how long each waited (about 70 s) |
 | `rollback.sh` | the rollback check: matches where the copies predict the others' inputs (the host's `--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone; then a match on real time must keep to time, with time sync keeping both copies predicting (about 90 s) |
 | `rollback-modes.sh` | rollback across the game's own changes: every multiplayer mode (4 players, a pause, a Race's match end) replayed going back every 3 reads, 12 deep, and with other machines' inputs up to 8 reads late, must give the plain replay's game; `--recording` adds a real one (about 90 s) |

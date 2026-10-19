@@ -52,8 +52,8 @@ namespace {
 
 int main() {
     // Each kind, at its documented size.
-    CHECK(round_trips(Hello{ 0x0123456789ABCDEFull, 2, 3, 4, 5 }, 46));
-    CHECK(round_trips(Hello{ 1, 2, 3, 4, 5, 3 }, 46));
+    CHECK(round_trips(Hello{ 0x0123456789ABCDEFull, 2, 3, 4, 5, 1, 9, 1 }, 55));
+    CHECK(round_trips(Hello{ 1, 2, 3, 4, 5, 3, ~0ull, 3 }, 55));
     CHECK(round_trips(Welcome{ 0x02, 2 }, 7));
     CHECK(round_trips(Welcome{ 0x08, 4 }, 7));
     CHECK(round_trips(Welcome{ 0x0E, 4 }, 7));      // three players on one machine
@@ -79,9 +79,11 @@ int main() {
     CHECK(delay[4] == 9 && delay[5] == 5 && delay[6] == 4 && delay[9] == 1);
 
     // The layout: header, then little-endian fields.
-    const std::vector<uint8_t> hello = bytes_of(Hello{ 0x0807060504030201ull, 0, 0, 0x1112131415161718ull, 0x2122232425262728ull, 2 });
+    const std::vector<uint8_t> hello = bytes_of(Hello{ 0x0807060504030201ull, 0, 0, 0x1112131415161718ull, 0x2122232425262728ull, 2,
+        0x3132333435363738ull, 2 });
     CHECK(hello[0] == 'C' && hello[1] == 'N' && hello[2] == protocol_version && hello[3] == 0 && hello[4] == 1);
     CHECK(hello[5] == 1 && hello[12] == 8 && hello[29] == 0x18 && hello[36] == 0x11 && hello[37] == 0x28 && hello[44] == 0x21 && hello[45] == 2);
+    CHECK(hello[46] == 0x38 && hello[53] == 0x31 && hello[54] == 2);
     const std::vector<uint8_t> inputs = bytes_of(some_inputs());
     CHECK(inputs[4] == 4 && inputs[5] == 2);                                    // kind, port
     CHECK(inputs[6] == 0xE8 && inputs[7] == 0x03 && inputs[8] == 0 && inputs[9] == 0);  // first read 1000
@@ -100,8 +102,11 @@ int main() {
     CHECK(bytes_of(Welcome{ 0, 3 }).empty());       // no port
     CHECK(bytes_of(Welcome{ 0x02, 1 }).empty());    // players below 2
     CHECK(bytes_of(Welcome{ 0x02, 5 }).empty());    // players above 4
-    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 0 }).empty());  // nobody playing on the joiner
-    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 4 }).empty());  // nobody left for the host
+    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 0, 1, 1 }).empty());  // nobody playing on the joiner
+    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 4, 1, 1 }).empty());  // nobody left for the host
+    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 0, 1 }).empty());  // no player id
+    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 1, 0 }).empty());  // no platform
+    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 1, 4 }).empty());
     CHECK(bytes_of(Start{ 1 }).empty());
     CHECK(bytes_of(Start{ 5 }).empty());
     CHECK(bytes_of(Start{ 2, 2 }).empty());          // own view is 0 or 1
@@ -209,7 +214,7 @@ int main() {
     data = hello;
     data[0] = 'X';
     CHECK(!decodes(data));
-    for (int kind : { 0, 10, 255 }) {
+    for (int kind : { 0, 12, 255 }) {
         data = hello;
         data[4] = (uint8_t)kind;
         CHECK(!decodes(data));
@@ -217,6 +222,37 @@ int main() {
     data = hello;
     data[4] = 3;                                    // Refuse's kind with Hello's size
     CHECK(!decodes(data));
+
+    // The waiting room: Roster and Ready.
+    Roster roster;
+    roster.players = 3;
+    roster.seats[0] = { 0x0102030405060708ull, 1, 1, 0 };
+    roster.seats[2] = { 9, 2, 0, 0xFFFF };
+    roster.rollback = max_rollback;
+    CHECK(round_trips(roster, 57));
+    Roster settings_only;
+    settings_only.delay = max_delay;
+    CHECK(round_trips(settings_only, 57));
+    CHECK(round_trips(Ready{ 1 }, 6));
+    CHECK(round_trips(Ready{ 0 }, 6));
+    const std::vector<uint8_t> r = bytes_of(roster);
+    CHECK(r[4] == 10 && r[5] == 8 && r[12] == 1 && r[13] == 1 && r[14] == 1 && r[15] == 0 && r[29] == 9 && r[37] == 2 &&
+        r[39] == 0xFF && r[40] == 0xFF && r[53] == 3 && r[54] == 0 && r[55] == auto_delay && r[56] == max_rollback);
+    Roster bad_roster = roster; bad_roster.players = 1; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.players = 2; CHECK(bytes_of(bad_roster).empty());           // a seat past the players
+    bad_roster = roster; bad_roster.seats[1].ready = 1; CHECK(bytes_of(bad_roster).empty());    // a free seat that isn't all zero
+    bad_roster = roster; bad_roster.seats[0].platform = 0; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.seats[0].ready = 2; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.own_view = 2; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.delay = max_delay + 1; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.rollback = max_rollback + 1; CHECK(bytes_of(bad_roster).empty());
+    CHECK(bytes_of(Ready{ 2 }).empty());
+    data = r; data[13] = 4; CHECK(!decodes(data));                 // platform past macOS
+    data = r; data[17] = 1; CHECK(!decodes(data));                 // seat 1 free, but not all zero
+    data = r; data[53] = 5; CHECK(!decodes(data));
+    data = r; data[55] = max_delay + 1; CHECK(!decodes(data));
+    data = bytes_of(Ready{ 1 }); data[5] = 2; CHECK(!decodes(data));
+    data = bytes_of(Refuse{ Reason::kicked }); CHECK(data.size() == 6 && data[5] == last_reason);
 
     if (failures == 0) {
         std::printf("packets_test: all passed\n");

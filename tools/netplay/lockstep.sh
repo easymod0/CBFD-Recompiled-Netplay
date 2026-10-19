@@ -38,6 +38,9 @@
 #              answering, and the two play on as above
 #   leave-couch the couch match with ports 2 and 3 on a joiner that quits at read 1500: the host plays on, both
 #              ports idle from the same read, and must match a solo replay so
+#   kick       the host kicks the joiner during the match: the joiner is told, the host plays to the end
+#   block      a host keeps out a joiner on its block list, and a joiner leaves a host on its own; Quick
+#              Match passes over a public room whose host is on it
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
@@ -48,7 +51,7 @@
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
-# 27310 to 27320 on 127.0.0.1.
+# 27310 to 27323 on 127.0.0.1 (netplay servers on 27320 to 27323).
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -70,7 +73,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift 2 ;;
         --match-options) MATCH_OPTIONS=$2; shift 2 ;;
         --host-options) HOST_OPTIONS=$2; shift 2 ;;
-        -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^set -u$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -152,6 +155,7 @@ echo "quick"
 # A server of their own (finish stops the room case's with its copies).
 "$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27321 > "$OUT/quick-server.out" 2>&1 &
 server=$!
+servers="${servers:-} $server"     # stopped by cleanup too, if this ends early
 room="--netplay-server 127.0.0.1:27321 --netplay-direct"
 # shellcheck disable=SC2086
 pads=1.pads start quick-host --netplay-host room --netplay-public $room --players 2 --input-delay 2
@@ -168,8 +172,7 @@ fi
 
 echo "quick-meet"
 # Both at once: each may host (the list was empty for both), then the newer room's host leaves it for the
-# older. Which machine hosts isn't known, so they're checked against each other (the match's hash
-# comparisons), not solo.
+# older. Which machine hosts isn't known, so they're checked against each other (their hash logs), not solo.
 # shellcheck disable=SC2086
 pads=1.pads start meet-a --netplay-quick $room --players 2
 # shellcheck disable=SC2086
@@ -177,7 +180,8 @@ pads=2.pads start meet-b --netplay-quick $room --players 2
 # If both hosted (both lists were empty), one must have left its room for the older one's.
 if finish "was the last: quitting" meet-a meet-b && both_hosted=$(cat "$OUT/meet-a.out" "$OUT/meet-b.out" | grep -c "no room to join, so hosting one" || true) &&
     grep -q "the match starts" "$OUT/meet-a.out" &&
-    grep -q "the match starts" "$OUT/meet-b.out" && ! grep -qi "desync" "$OUT/meet-a.out" "$OUT/meet-b.out" &&
+    grep -q "the match starts" "$OUT/meet-b.out" && ! grep -q "\[netplay\] desync at read" "$OUT/meet-a.out" "$OUT/meet-b.out" &&
+    same meet-b meet-a &&
     { [ "$both_hosted" -lt 2 ] || grep -q "is older, so leaving" "$OUT/meet-a.out" "$OUT/meet-b.out"; }; then
     grep -h "Quick Match" "$OUT/meet-a.out" "$OUT/meet-b.out" | sed 's/^/  /'
 else
@@ -354,6 +358,46 @@ else
     failed=1
 fi
 
+echo "block"
+# The block list: a host keeps out a joiner on it (told only that the host removed it), and a joiner leaves a
+# host on it. (Every match above went through the waiting room too: from the command line, every copy is ready
+# by itself, and the host starts once all are in.)
+start block-host --netplay-host 27313 --netplay-address 127.0.0.1 --players 2 --netplay-block b10c
+start block-join --netplay-join "$(code_of block-host)" --netplay-player b10c
+finish "the host removed this player" block-join || failed=1
+start block-host2 --netplay-host 27314 --netplay-address 127.0.0.1 --players 2 --netplay-player 4057
+start block-join2 --netplay-join "$(code_of block-host2)" --netplay-block 4057
+finish "is on the block list: leaving" block-join2 || failed=1
+# Quick Match passes over a public room whose host is on its block list (the server says who hosts it), and
+# hosts its own instead.
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27323 > "$OUT/block-server.out" 2>&1 &
+server=$!
+servers="${servers:-} $server"
+start block-public --netplay-host room --netplay-public --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-player 4058
+room_of block-public > /dev/null
+# It must see the room (listed first) and pass over it: not join it and then leave (that's the other check).
+hashes=$(sed -n 's/^\[harness\] build .*: build \([0-9a-f]*\), ROM \([0-9a-f]*\), profile \([0-9a-f]*\)$/--build \1 --rom \2 --profile \3/p' "$OUT/block-public.out")
+i=0
+# shellcheck disable=SC2086
+while [ $i -lt 50 ] && ! "$(dirname "$EXE")/src/netplay/net/netplay_probe" list --signal 127.0.0.1:27323 $hashes --mods 0 2>&1 | grep -q " host 0000000000004058$"; do
+    sleep 0.2
+    i=$((i + 1))
+done
+start block-quick --netplay-quick --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-block 4058
+if finish "no room to join, so hosting one" block-quick && ! grep -q "Quick Match: joining\|is on the block list" "$OUT/block-quick.out"; then :; else
+    echo "  block (Quick Match): FAILED"; failed=1; fi
+kill $server 2>/dev/null
+
+echo "kick"
+# The host kicks the joiner during the match (the Esc menu's Kick): the joiner is told, the host plays on to
+# the end.
+pads=1.pads start kick-host --netplay-host 27315 --netplay-address 127.0.0.1 --players 2 --netplay-kick-at 300:2
+pads=2.pads start kick-join --netplay-join "$(code_of kick-host)"
+# (The joiner's match ends there, and with it that copy; the host's goes on to the replay's end.)
+if finish "was the last: quitting\|the host ended the match: the host removed this player" kick-host kick-join &&
+    grep -q "kicking port 2" "$OUT/kick-host.out" && grep -q "was the last: quitting" "$OUT/kick-host.out" &&
+    grep -q "the host ended the match: the host removed this player" "$OUT/kick-join.out"; then :; else echo "  kick: FAILED"; failed=1; fi
+
 echo "desync"
 start desync-host --netplay-host 27312 --netplay-address 127.0.0.1 --players 2 --netplay-desync-at 300
 start desync-join --netplay-join "$(code_of desync-host)"
@@ -394,6 +438,7 @@ echo "desync-room"
 # The same through a room: the netplay server logs a summary of it (the regions; no addresses).
 "$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27322 > "$OUT/desync-server.out" 2>&1 &
 server=$!
+servers="${servers:-} $server"
 room="--netplay-server 127.0.0.1:27322 --netplay-direct"
 # shellcheck disable=SC2086
 start desync-room-host --netplay-host room $room --players 2 --netplay-desync-at 300

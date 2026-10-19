@@ -132,8 +132,8 @@ namespace conker::netplay {
         // Whether the server takes desync summaries (report_desync; version 4), once ready.
         bool has_desync_reports() const { return speaks >= 4; }
         // Once ready: tells the server this match desynced (it logs a summary for its operator; a few each
-        // connection). Nothing if the server is older.
-        void report_desync(const signal::DesyncReport& report);
+        // connection). False if it wasn't sent (the server is older, it isn't ready, or `report` isn't valid).
+        bool report_desync(const signal::DesyncReport& report);
 
         // Closes the connection.
         void close();
@@ -141,7 +141,8 @@ namespace conker::netplay {
     private:
         void on_status_changed(const void* info);
         void fail(const std::string& why);
-        void send_now(const signal::Packet& packet);
+        // Sent (false: not valid, or not ready).
+        bool send_now(const signal::Packet& packet);
         // Opens the connection to `address` (resolved).
         void open(const std::string& address);
         friend void signaller_status_changed(void* info);

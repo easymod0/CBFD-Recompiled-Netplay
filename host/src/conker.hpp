@@ -389,6 +389,9 @@ namespace conker {
         void open();
         // On the main thread (update_gfx): says when a match is over.
         void update();
+        // The Esc menu's Netplay tab (conker_config.cpp): during a match, its players, with Kick (the host's)
+        // and Block, and Leave match.
+        void add_tab();
     }
 
     // netplay/status.cpp: the match's status on screen: waiting for a player, a player leaving, and with

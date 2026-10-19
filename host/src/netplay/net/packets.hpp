@@ -18,7 +18,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 15;
+    constexpr uint16_t protocol_version = 16;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -86,8 +86,9 @@ namespace conker::netplay {
         timeout,        // a peer stopped answering
         mods,           // mods on (texture packs aside): netplay allows none
         key,            // not this match's key (the join code's): nothing else is checked
+        kicked,         // the host removed the player (or keeps them out: its block list)
     };
-    constexpr uint8_t last_reason = (uint8_t)Reason::key;
+    constexpr uint8_t last_reason = (uint8_t)Reason::kicked;
     const char* describe(Reason reason);
 
     // Joiner to host, first: the match's key, then what it's running. The host checks the key first, and
@@ -99,8 +100,17 @@ namespace conker::netplay {
         uint64_t mods = 0;      // hash of the mods on and their settings, texture packs aside (0: none)
         uint64_t key = 0;       // the match's key, from the join code (the host's own: its random key)
         uint8_t players = 1;    // the players on the joiner's machine, each with a port of their own (1 to 3)
+        // Who's playing, for the waiting room and block lists: the machine's player id (random, kept in its
+        // settings; never 0: the menu shows a name made from it, join_code.hpp's player_name), and its
+        // platform (signal::Platform's numbers: 1 Linux, 2 Windows, 3 macOS).
+        uint64_t player = 0;
+        uint8_t platform = 0;
         bool operator==(const Hello&) const = default;
     };
+    // The same game (build, ROM, settings profile, mods): what a match needs to be the same everywhere.
+    inline bool same_game(const Hello& a, const Hello& b) {
+        return a.build == b.build && a.rom == b.rom && a.profile == b.profile && a.mods == b.mods;
+    }
     // Host to joiner: accepted, on these ports (bit n: port n; one for each of its players, never the
     // host's port 0), in a match of this many players.
     struct Welcome {
@@ -177,7 +187,35 @@ namespace conker::netplay {
         bool operator==(const Delay&) const = default;
     };
 
-    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay>;
+    // The waiting room, before the match starts. Host to everyone, whenever it changes: each port's player
+    // (`player` 0: free; a machine with several players is on several ports), whether they're ready, their
+    // platform and the round trip to the host (ms, the host's own 0; 0xFFFF not known yet), and the match's
+    // settings: its players, whether everyone sees only their own view, its input delay (0 to max_delay, or
+    // auto_delay: chosen as it starts) and its rollback.
+    constexpr uint8_t auto_delay = 0xFF;
+    struct Seat {
+        uint64_t player = 0;
+        uint8_t platform = 0;
+        uint8_t ready = 0;
+        uint16_t round_trip_ms = 0;
+        bool operator==(const Seat&) const = default;
+    };
+    struct Roster {
+        std::array<Seat, max_players> seats{};
+        uint8_t players = 2;
+        uint8_t own_view = 0;
+        uint8_t delay = auto_delay;
+        uint8_t rollback = 0;
+        bool operator==(const Roster&) const = default;
+    };
+    // Joiner to host, before the start: its players are ready (1) or not (0). The match starts once it's full
+    // and everyone's ready (the host's Ready is its Start).
+    struct Ready {
+        uint8_t ready = 0;
+        bool operator==(const Ready&) const = default;
+    };
+
+    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay, Roster, Ready>;
 
     // Writes `packet` into `out` and returns its size, or 0 if the packet isn't valid (the same checks
     // as decode's), so nothing invalid is ever sent.

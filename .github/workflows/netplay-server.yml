@@ -9,8 +9,9 @@ name: netplay-server
 on:
   push:
     branches: ['**']
-    # Only what goes into the image: the server, its packets, how they're built. A game update that doesn't
-    # touch these needs no new server (the game's own packets, packets.cpp, go only between players).
+    # Only what goes into the image: the server, its packets, how they're built (CMakeLists.txt's
+    # conker_netplay_signal). A game update that doesn't touch these needs no new server (the game's own
+    # packets, packets.cpp and lan_packets.cpp, aren't built into it; packets.hpp's constants are).
     paths:
       - 'host/src/netplay/net/signal_server.cpp'
       - 'host/src/netplay/net/signal_packets.*'

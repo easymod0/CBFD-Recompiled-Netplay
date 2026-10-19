@@ -311,12 +311,11 @@ namespace conker::netplay {
         }
     }
 
-    void Signaller::send_now(const signal::Packet& packet) {
+    bool Signaller::send_now(const signal::Packet& packet) {
         uint8_t buffer[signal::max_packet_size];
         const size_t size = signal::encode(packet, buffer, speaks);
-        if (size != 0 && current_state == State::ready) {
-            SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
-        }
+        return size != 0 && current_state == State::ready &&
+            SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr) == k_EResultOK;
     }
 
     void Signaller::create_room(uint64_t key) {
@@ -342,6 +341,7 @@ namespace conker::netplay {
         }
         signal::Publish packet{ fit_of(hello), game_of(hello), platform, room };
         packet.room.room = created_room;
+        packet.room.host = hello.player;
         if (published != packet) {
             published = packet;
             send_now(packet);
@@ -371,10 +371,8 @@ namespace conker::netplay {
         }
     }
 
-    void Signaller::report_desync(const signal::DesyncReport& report) {
-        if (current_state == State::ready && has_desync_reports()) {
-            send_now(report);
-        }
+    bool Signaller::report_desync(const signal::DesyncReport& report) {
+        return has_desync_reports() && send_now(report);
     }
 
     uint64_t fit_of(const Hello& hello) {

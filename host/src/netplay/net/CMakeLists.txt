@@ -23,19 +23,23 @@ endif()
 
 option(CONKER_NETPLAY_FUZZ "Build the packets' libFuzzer target (clang)" OFF)
 
-# The packets (the game's, signalling's and LAN beacons), join and room codes and TURN credentials alone: no dependencies, for the tests and the fuzzer.
-add_library(conker_netplay_packets STATIC packets.cpp signal_packets.cpp lan_packets.cpp join_code.cpp turn_credentials.cpp)
-target_include_directories(conker_netplay_packets PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_compile_features(conker_netplay_packets PUBLIC cxx_std_20)
+# What the netplay server needs (signalling's packets, room codes, TURN credentials), and with it the game's
+# packets and LAN beacons: no dependencies, for the tests and the fuzzer. The server builds only the first,
+# so a change to the game's own packets doesn't touch it (its image isn't rebuilt for one).
+add_library(conker_netplay_signal STATIC signal_packets.cpp join_code.cpp turn_credentials.cpp)
+target_include_directories(conker_netplay_signal PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(conker_netplay_signal PUBLIC cxx_std_20)
+add_library(conker_netplay_packets STATIC packets.cpp lan_packets.cpp)
+target_link_libraries(conker_netplay_packets PUBLIC conker_netplay_signal)
 
 add_executable(packets_test packets_test.cpp)
 target_link_libraries(packets_test PRIVATE conker_netplay_packets)
 add_executable(join_code_test join_code_test.cpp)
 target_link_libraries(join_code_test PRIVATE conker_netplay_packets)
 add_executable(signal_packets_test signal_packets_test.cpp)
-target_link_libraries(signal_packets_test PRIVATE conker_netplay_packets)
+target_link_libraries(signal_packets_test PRIVATE conker_netplay_signal)
 add_executable(turn_credentials_test turn_credentials_test.cpp)
-target_link_libraries(turn_credentials_test PRIVATE conker_netplay_packets)
+target_link_libraries(turn_credentials_test PRIVATE conker_netplay_signal)
 add_executable(lan_packets_test lan_packets_test.cpp)
 target_link_libraries(lan_packets_test PRIVATE conker_netplay_packets)
 
@@ -78,4 +82,4 @@ add_executable(netplay_probe probe.cpp)
 target_link_libraries(netplay_probe PRIVATE conker_netplay_net)
 
 add_executable(netplay_server signal_server.cpp)
-target_link_libraries(netplay_server PRIVATE conker_netplay_packets GameNetworkingSockets::static)
+target_link_libraries(netplay_server PRIVATE conker_netplay_signal GameNetworkingSockets::static)
