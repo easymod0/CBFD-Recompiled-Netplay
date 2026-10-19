@@ -77,7 +77,7 @@ start() {
     [ -n "${paced:-}" ] && speed=
     extra=
     case " $* " in
-        *" --netplay-host "*) extra="${MATCH_OPTIONS:-} ${HOST_OPTIONS:-}" ;;
+        *" --netplay-host "*|*" --netplay-quick "*) extra="${MATCH_OPTIONS:-} ${HOST_OPTIONS:-}" ;;
         *" --netplay-join "*) extra=${MATCH_OPTIONS:-} ;;
     esac
     # shellcheck disable=SC2086

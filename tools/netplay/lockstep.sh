@@ -27,6 +27,8 @@
 #              loopback): the host makes the room, public, which the server must list for the game's hashes;
 #              the joiner joins by its code (direct connections: there's no relay here,
 #              tools/netplay/server/test.sh tests that); both must match solo's
+#   quick      Quick Match (--netplay-quick) finds a public room's host and joins it; both must match solo's
+#   quick-meet two Quick Matches at once, with no room: they must end up in one match, without a desync
 #   jittery    the same with input delay 0 and random sleeps (--jitter 500) on the joiner, so the two
 #              are out of step and wait for each other all the time
 #   leave      the mouse match, the second joiner quitting at read 1500: the host and the first joiner play on,
@@ -142,6 +144,43 @@ if finish "was the last: quitting" room-host room-join; then
     same room-host || failed=1
     same room-join || failed=1
 else
+    failed=1
+fi
+
+echo "quick"
+# A server of their own (finish stops the room case's with its copies).
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27321 > "$OUT/quick-server.out" 2>&1 &
+server=$!
+room="--netplay-server 127.0.0.1:27321 --netplay-direct"
+# shellcheck disable=SC2086
+pads=1.pads start quick-host --netplay-host room --netplay-public $room --players 2 --input-delay 2
+room_of quick-host > /dev/null
+# shellcheck disable=SC2086
+pads=2.pads start quick-join --netplay-quick $room --players 2
+if finish "was the last: quitting" quick-host quick-join && grep -q "Quick Match: joining" "$OUT/quick-join.out"; then
+    same quick-host || failed=1
+    same quick-join || failed=1
+else
+    echo "quick: FAILED"
+    failed=1
+fi
+
+echo "quick-meet"
+# Both at once: each may host (the list was empty for both), then the newer room's host leaves it for the
+# older. Which machine hosts isn't known, so they're checked against each other (the match's hash
+# comparisons), not solo.
+# shellcheck disable=SC2086
+pads=1.pads start meet-a --netplay-quick $room --players 2
+# shellcheck disable=SC2086
+pads=2.pads start meet-b --netplay-quick $room --players 2
+# If both hosted (both lists were empty), one must have left its room for the older one's.
+if finish "was the last: quitting" meet-a meet-b && both_hosted=$(cat "$OUT/meet-a.out" "$OUT/meet-b.out" | grep -c "no room to join, so hosting one" || true) &&
+    grep -q "the match starts" "$OUT/meet-a.out" &&
+    grep -q "the match starts" "$OUT/meet-b.out" && ! grep -qi "desync" "$OUT/meet-a.out" "$OUT/meet-b.out" &&
+    { [ "$both_hosted" -lt 2 ] || grep -q "is older, so leaving" "$OUT/meet-a.out" "$OUT/meet-b.out"; }; then
+    grep -h "Quick Match" "$OUT/meet-a.out" "$OUT/meet-b.out" | sed 's/^/  /'
+else
+    echo "quick-meet: FAILED"
     failed=1
 fi
 kill $server 2>/dev/null

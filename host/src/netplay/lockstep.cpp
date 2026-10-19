@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,6 +36,7 @@
 #include "hello.hpp"
 #include "net/join_code.hpp"
 #include "net/session.hpp"
+#include "net/lan.hpp"
 #include "net/signalling.hpp"
 
 // The runtime's flag for the program quitting (ultramodern::quit), set before it waits for the game's
@@ -68,6 +70,27 @@ namespace {
     std::string server_option;      // the netplay server's "host:port", for rooms
     bool direct_option = false;     // through the server: direct connections allowed, not only the relay
     bool public_option = false;     // hosting through a room: it's in the server's public list (--netplay-public)
+    // Quick Match (--netplay-quick): join the first open public room that fits, or host one. Each try is a
+    // room joined or hosted as by code, on one connection to the server; a host still alone that sees an
+    // older open room in the list leaves its own (a new connection: a room lasts as long as its host's)
+    // and joins that, so two players who started at once end up in one room.
+    bool quick_option = false;
+    // Hosting on a port: visible on this network (--netplay-lan), by a beacon each second while the players
+    // join (lan.hpp).
+    bool lan_option = false;
+    conker::netplay::LanBeacon* lan_beacon = nullptr;
+    double next_beacon = 0;
+    // The matches on this network, for the menu (lan_browse).
+    conker::netplay::LanListener* lan_listener = nullptr;
+    conker::netplay::Hello lan_hello;
+    std::set<uint64_t> quick_tried;     // the rooms tried, not to try again
+    int quick_tries = 0;                // joins tried; then it hosts
+    uint64_t quick_target = 0;          // a room to join first (the older one a host left its own for)
+    bool quick_asked = false;           // hosting alone: the list was asked for, to look for an older room
+    double next_quick_list = 0;
+    bool quick_restarting = false;      // begin, from Quick Match itself: its state stays
+    constexpr int quick_most_tries = 5;
+    constexpr double quick_list_seconds = 5.0;
     int wanted_players = 2;
     int local_option = 1;           // the players on this machine
     bool host_own_view = true;      // hosting: the rule this peer will start the match with
@@ -129,7 +152,7 @@ namespace {
     // Through a room: the connection to the netplay server, from begin until the session goes (which polls
     // it: a host stays there, with its room, for the whole match), and how far connecting through it is.
     conker::netplay::Signaller* signaller = nullptr;
-    enum class Rendezvous { none, registering, creating, finding };
+    enum class Rendezvous { none, registering, listing, creating, finding };
     Rendezvous rendezvous = Rendezvous::none;
     double rendezvous_since = 0;
     std::string room_text;          // hosting: the room's code, once the server has made it
@@ -938,6 +961,14 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
         public_option = true;
         return true;
     }
+    if (std::strcmp(option, "--netplay-quick") == 0) {
+        quick_option = true;
+        return true;
+    }
+    if (std::strcmp(option, "--netplay-lan") == 0) {
+        lan_option = true;
+        return true;
+    }
     if (std::strcmp(option, "--players") == 0) {
         number(2, netplay::max_players, n);
         wanted_players = (int)n;
@@ -1044,7 +1075,11 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
 }
 
 bool conker::lockstep::active() {
-    return host_port > 0 || host_room || !join_where.empty();
+    return host_port > 0 || host_room || !join_where.empty() || quick_option;
+}
+
+void conker::lockstep::set_lan(bool visible) {
+    lan_option = visible;
 }
 
 void conker::lockstep::set_server(const std::string& server, bool allow_direct, bool listed) {
@@ -1053,7 +1088,13 @@ void conker::lockstep::set_server(const std::string& server, bool allow_direct, 
     public_option = listed;
 }
 
+void conker::lockstep::set_quick(int players, bool own_view, int input_delay, int local, int rollback) {
+    set_host(-1, players, own_view, input_delay, local, rollback);
+    quick_option = true;
+}
+
 void conker::lockstep::set_host(int port, int players, bool own_view, int input_delay, int local, int rollback) {
+    quick_option = false;
     host_address.clear();
     host_port = port;
     host_room = port == 0;
@@ -1066,6 +1107,7 @@ void conker::lockstep::set_host(int port, int players, bool own_view, int input_
 }
 
 void conker::lockstep::set_join(const std::string& where, int local) {
+    quick_option = false;
     host_port = -1;
     host_room = false;
     join_where = where;
@@ -1090,6 +1132,14 @@ bool conker::lockstep::prepare() {
         std::fprintf(stderr, "[netplay] --netplay-public lists a room: it needs --netplay-host room\n");
         return false;
     }
+    if (quick_option && (hosting || !join_where.empty() || server_option.empty())) {
+        std::fprintf(stderr, "[netplay] --netplay-quick finds or hosts a room on --netplay-server: not with --netplay-host or --netplay-join\n");
+        return false;
+    }
+    if (quick_option && local_option >= wanted_players) {
+        std::fprintf(stderr, "[netplay] --local-players %d needs a match of more players than that (--players), should it host\n", local_option);
+        return false;
+    }
     if (!join_where.empty() && rollback_option > 0) {
         std::fprintf(stderr, "[netplay] --rollback is the host's choice: a joiner predicts as the host's match does\n");
         return false;
@@ -1099,8 +1149,12 @@ bool conker::lockstep::prepare() {
         return false;
     }
     // The others join by the code, which holds the match's key: without the address there's none to give.
-    if (host_port > 0 && host_address.empty()) {
-        std::fprintf(stderr, "[netplay] --netplay-host needs --netplay-address <this computer's address>, for the join code\n");
+    if (host_port > 0 && host_address.empty() && !lan_option) {
+        std::fprintf(stderr, "[netplay] --netplay-host needs --netplay-address <this computer's address>, for the join code (or --netplay-lan)\n");
+        return false;
+    }
+    if (lan_option && host_port <= 0) {
+        std::fprintf(stderr, "[netplay] --netplay-lan makes a match on a port visible on this network: it needs --netplay-host <port>\n");
         return false;
     }
     return true;
@@ -1204,10 +1258,21 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
             fake.lag_ms, fake.jitter_ms, fake.loss, fake.reorder, fake.dup);
     }
     cancel();
-    const bool hosting = host_port > 0 || host_room;
     netplay::Hello mine = me;
     mine.players = (uint8_t)local_option;
-    if (host_room || netplay::decode_room_code(join_where)) {
+    if (quick_option && !quick_restarting) {
+        // A new Quick Match: it starts listing, hosting nothing yet.
+        host_room = false;
+        public_option = false;
+        join_where.clear();
+        quick_tried.clear();
+        quick_tries = 0;
+        quick_target = 0;
+    }
+    quick_asked = false;
+    next_quick_list = 0;
+    const bool hosting = host_port > 0 || host_room;
+    if (host_room || netplay::decode_room_code(join_where) || quick_option) {
         // Through the server: the session starts once it's there (poll_connect). A new id each time (the
         // last one's may still be on the server, or be kept from reuse there).
         if (!netplay::new_id(error)) {
@@ -1274,7 +1339,12 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     last_made = never;
     unverified_hashes.clear();
     rollbacks = {};
-    if (host_room) {
+    if (quick_option) {
+        if (!quick_restarting) {
+            std::printf("[netplay] Quick Match on %s: looking for a room, %d players here\n", server_option.c_str(), local_option);
+        }
+    }
+    else if (host_room) {
         std::printf("[netplay] hosting a match of %d through a room on %s, %d of them here\n", wanted_players,
             server_option.c_str(), local_option);
     }
@@ -1311,6 +1381,66 @@ namespace {
             signaller->publish(sent, { 0, (uint8_t)match_players, (uint8_t)std::clamp(joined, 1, match_players), match_started,
                 direct_option, (uint8_t)rollback_option });
         }
+    }
+
+    // Quick Match: asks for the room list (rendezvous listing).
+    void quick_list() {
+        signaller->list_rooms(sent);
+        rendezvous = Rendezvous::listing;
+        rendezvous_since = now();
+    }
+
+    // Quick Match: the first room in the list this one could join that isn't `own` nor tried (open, with
+    // room for this machine's players), or null.
+    const conker::netplay::signal::ListedRoom* quick_pick(uint64_t own) {
+        for (const conker::netplay::signal::ListedRoom& room : signaller->rooms()) {
+            if (room.room != own && !room.playing && room.players - room.joined >= local_option && !quick_tried.contains(room.room)) {
+                return &room;
+            }
+        }
+        return nullptr;
+    }
+
+    // Through the server: this one's session hosts, and makes its room (rendezvous creating).
+    conker::lockstep::Progress host_here(std::string& status) {
+        conker::netplay::Hello mine = sent;
+        mine.players = (uint8_t)local_option;
+        std::string error;
+        session = new conker::netplay::Session();
+        if (!session->host(*signaller, signaller->ice(!direct_option), wanted_players, mine, error, local_option)) {
+            delete session;
+            session = nullptr;
+            status = "Couldn't host: " + error + ".";
+            std::printf("[netplay] %s\n", status.c_str());
+            conker::lockstep::cancel();
+            return conker::lockstep::Progress::failed;
+        }
+        own_ports = session->ports();
+        match_players = wanted_players;
+        joined = local_option;
+        connecting_since = now();
+        signaller->create_room(session->key());
+        rendezvous = Rendezvous::creating;
+        rendezvous_since = now();
+        // Quick Match: the first look for an older room in a while (the lists so far count against the
+        // server's limit on them).
+        next_quick_list = now() + quick_list_seconds;
+        status = quick_option ? "Quick Match: making a room..." : "Making a room...";
+        return conker::lockstep::Progress::waiting;
+    }
+
+    // Quick Match: joins `room` by its code, as a joiner would (rendezvous finding).
+    conker::lockstep::Progress quick_join(uint64_t room, const std::string& name, std::string& status) {
+        quick_tries++;
+        quick_tried.insert(room);
+        quick_target = 0;
+        join_where = conker::netplay::encode_room_code(room);
+        std::printf("[netplay] Quick Match: joining %s (%s)\n", name.c_str(), join_where.c_str());
+        signaller->find_room(room);
+        rendezvous = Rendezvous::finding;
+        rendezvous_since = now();
+        status = "Quick Match: joining " + name + "...";
+        return conker::lockstep::Progress::waiting;
     }
 
     // Connecting through the netplay server (poll_connect's, with the lock held): registering, then the
@@ -1353,16 +1483,17 @@ namespace {
                 }
                 rendezvous_since = now();
                 if (host_room) {
-                    session = new conker::netplay::Session();
-                    if (!session->host(*signaller, signaller->ice(!direct_option), wanted_players, mine, error, local_option)) {
-                        delete session;
-                        session = nullptr;
-                        return fail("Couldn't host: " + error + ".");
+                    return host_here(status);
+                }
+                if (quick_option && quick_target != 0) {
+                    return quick_join(quick_target, "the older room", status);
+                }
+                if (quick_option) {
+                    if (!signaller->has_public_rooms()) {
+                        return fail("Quick Match needs public rooms, which this netplay server is too old for: join or host by a room code.");
                     }
-                    own_ports = session->ports();
-                    signaller->create_room(session->key());
-                    rendezvous = Rendezvous::creating;
-                    status = "Making a room...";
+                    quick_list();
+                    status = "Quick Match: looking for a room...";
                     return Progress::waiting;
                 }
                 signaller->find_room(*conker::netplay::decode_room_code(join_where));
@@ -1370,11 +1501,33 @@ namespace {
                 status = "Looking up the room...";
                 return Progress::waiting;
             }
+            case Rendezvous::listing: {
+                if (signaller->listing() != Signaller::Lookup::found) {
+                    status = "Quick Match: looking for a room...";
+                    return Progress::waiting;
+                }
+                if (quick_tries < quick_most_tries) {
+                    if (const conker::netplay::signal::ListedRoom* room = quick_pick(0)) {
+                        return quick_join(room->room, conker::netplay::room_name(room->room), status);
+                    }
+                }
+                // None to join (or too many tried): this one hosts, in public.
+                std::printf("[netplay] Quick Match: no room to join, so hosting one\n");
+                host_room = true;
+                public_option = true;
+                return host_here(status);
+            }
             case Rendezvous::finding:
                 switch (signaller->lookup()) {
                     case Signaller::Lookup::found:
                         break;
                     case Signaller::Lookup::missing:
+                        if (quick_option) {
+                            std::printf("[netplay] Quick Match: room %s has gone\n", join_where.c_str());
+                            quick_list();
+                            status = "Quick Match: looking for a room...";
+                            return Progress::waiting;
+                        }
                         return fail("There's no room " + join_where + " on the netplay server: check the code (a room closes when its host leaves).");
                     default:
                         status = "Looking up the room...";
@@ -1454,6 +1607,16 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 break;
             case Event::Type::ended:
                 std::printf("[netplay] couldn't join: %s (%s)\n", netplay::describe(event.reason), event.detail.c_str());
+                // Quick Match: another room, on the same connection to the server.
+                if (quick_option && signaller != nullptr && signaller->state() == netplay::Signaller::State::ready) {
+                    delete session;
+                    session = nullptr;
+                    own_ports = 0;
+                    match_players = 0;
+                    quick_list();
+                    status = "Quick Match: looking for another room...";
+                    return Progress::waiting;
+                }
                 // Through the server, why it couldn't find the host says more than "timed out".
                 status = "Couldn't join: " + (event.by_signalling ? event.detail : std::string(netplay::describe(event.reason))) + ".";
                 // Full for this machine's players, not for one: fewer may fit.
@@ -1469,6 +1632,13 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         }
     }
     list_room();
+    if (match_started && lan_beacon != nullptr) {
+        // Nobody else can join now: said once, then no more beacons.
+        lan_beacon->send({ netplay::fit_of(sent), netplay::this_platform(), (uint16_t)host_port, session->key(), (uint8_t)match_players,
+            (uint8_t)std::clamp(joined, 1, match_players), true, (uint8_t)rollback_option });
+        delete lan_beacon;
+        lan_beacon = nullptr;
+    }
     if (match_started) {
         std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s%s\n", match_players,
             ports_text(own_ports).c_str(), delay, match_own_view ? ", everyone sees only their own view" : "",
@@ -1485,6 +1655,65 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         std::fflush(stdout);
         list_room();
     }
+    // Quick Match, hosting alone: an older open room in the list is joined instead (this one left: its room
+    // goes with its connection to the server), so two who started at once end up in one room.
+    if (quick_option && hosting && joined != local_option) {
+        // Someone's in: a list asked for before is out of date.
+        quick_asked = false;
+    }
+    if (quick_option && hosting && rendezvous == Rendezvous::none && joined == local_option && signaller != nullptr &&
+        signaller->state() == netplay::Signaller::State::ready && signaller->room() != 0) {
+        if (quick_asked && signaller->listing() == netplay::Signaller::Lookup::found) {
+            quick_asked = false;
+            const uint64_t own = signaller->room();
+            const auto& rooms = signaller->rooms();
+            const auto mine = std::find_if(rooms.begin(), rooms.end(), [own](const auto& room) { return room.room == own; });
+            const netplay::signal::ListedRoom* older = quick_pick(own);
+            // The server lists open rooms fullest, then oldest, first: one before this one is the one to be in.
+            if (older != nullptr && (mine == rooms.end() || older < &*mine)) {
+                const uint64_t target = older->room;
+                std::printf("[netplay] Quick Match: %s is older, so leaving this room for it\n", netplay::room_name(target).c_str());
+                quick_target = target;
+                quick_restarting = true;
+                host_room = false;
+                public_option = false;
+                std::string error;
+                const bool restarted = begin(sent, error);
+                quick_restarting = false;
+                if (!restarted) {
+                    status = "Quick Match: couldn't join the other room: " + error + ".";
+                    std::printf("[netplay] %s\n", status.c_str());
+                    cancel();
+                    return Progress::failed;
+                }
+                status = "Quick Match: joining " + netplay::room_name(target) + "...";
+                return Progress::waiting;
+            }
+        }
+        else if (!quick_asked && now() >= next_quick_list) {
+            signaller->list_rooms(sent);
+            quick_asked = true;
+            next_quick_list = now() + quick_list_seconds;
+        }
+    }
+    // Visible on this network: a beacon each second while the players join.
+    if (lan_option && hosting && host_port > 0) {
+        if (lan_beacon == nullptr) {
+            std::string error;
+            lan_beacon = new netplay::LanBeacon();
+            if (!lan_beacon->open(netplay::lan::default_port, error)) {
+                std::printf("[netplay] can't be seen on this network: %s\n", error.c_str());
+            }
+            else {
+                std::printf("[netplay] visible on this network (UDP port %u)\n", (unsigned)netplay::lan::default_port);
+            }
+        }
+        if (now() >= next_beacon) {
+            lan_beacon->send({ netplay::fit_of(sent), netplay::this_platform(), (uint16_t)host_port, session->key(), (uint8_t)match_players,
+                (uint8_t)std::clamp(joined, 1, match_players), false, (uint8_t)rollback_option });
+            next_beacon = now() + 1.0;
+        }
+    }
     // A host that lost the server can't be found by anyone else.
     if (hosting && signaller != nullptr && signaller->state() == netplay::Signaller::State::failed) {
         std::printf("[netplay] lost the netplay server: %s\n", signaller->error().c_str());
@@ -1499,7 +1728,11 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         return Progress::failed;
     }
     if (rendezvous == Rendezvous::creating) {
-        status = "Making a room...";
+        status = quick_option ? "Quick Match: making a room..." : "Making a room...";
+    }
+    else if (hosting && quick_option && signaller != nullptr && signaller->room() != 0) {
+        status = "Quick Match: waiting for players in " + netplay::room_name(signaller->room()) + ": " + std::to_string(joined) +
+            " of " + std::to_string(match_players) + " in.";
     }
     else if (hosting) {
         status = "Waiting for players: " + std::to_string(joined) + " of " + std::to_string(match_players) + " in.";
@@ -1526,6 +1759,9 @@ void conker::lockstep::cancel() {
     // After the session, which uses it.
     delete signaller;
     signaller = nullptr;
+    delete lan_beacon;
+    lan_beacon = nullptr;
+    next_beacon = 0;
     rendezvous = Rendezvous::none;
     room_text.clear();
     match_started = false;
@@ -1627,6 +1863,40 @@ void conker::lockstep::stop_browsing() {
     std::scoped_lock lock(session_mutex);
     delete browser;
     browser = nullptr;
+}
+
+bool conker::lockstep::lan_browse(const netplay::Hello& me, std::string& error) {
+    std::scoped_lock lock(session_mutex);
+    stop_lan();
+    lan_listener = new netplay::LanListener();
+    lan_listener->listen_for(netplay::fit_of(me), netplay::this_platform());
+    if (!lan_listener->open(netplay::lan::default_port, error)) {
+        delete lan_listener;
+        lan_listener = nullptr;
+        return false;
+    }
+    lan_hello = me;
+    return true;
+}
+
+std::vector<conker::lockstep::ListedRoom> conker::lockstep::poll_lan() {
+    std::scoped_lock lock(session_mutex);
+    std::vector<ListedRoom> out;
+    if (lan_listener == nullptr) {
+        return out;
+    }
+    lan_listener->poll(now());
+    for (const netplay::LanMatch& match : lan_listener->matches()) {
+        out.push_back({ match.code, netplay::room_name(match.beacon.key), match.beacon.players, match.beacon.joined, match.beacon.playing,
+            true, match.beacon.rollback });
+    }
+    return out;
+}
+
+void conker::lockstep::stop_lan() {
+    std::scoped_lock lock(session_mutex);
+    delete lan_listener;
+    lan_listener = nullptr;
 }
 
 bool conker::lockstep::connected() {

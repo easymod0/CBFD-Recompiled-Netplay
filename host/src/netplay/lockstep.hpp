@@ -26,6 +26,13 @@
 //                                (the relay if not): quicker, but the players see each other's addresses
 //   --netplay-public             (hosting through a room) list it in the server's public room list, where
 //                                players of the same build, ROM, settings and mods find it by its name
+//   --netplay-lan                (hosting on a port) visible on this network: a beacon each second while the
+//                                players join (UDP port 27016), which games there list and join from (no
+//                                address needed then); anyone on the network can join it
+//   --netplay-quick              Quick Match on --netplay-server: joins the first open public room this game
+//                                can join (trying up to 5), or hosts one, in public, as --netplay-host room
+//                                would with --players and the like. A host still alone that sees an older open
+//                                room leaves its own and joins that, so players who started at once meet
 //   --local-players <n>          (hosting or joining) players on this machine, 1 to 3 (1 by default): each
 //                                has a port of their own (the lowest free ones), and plays with this
 //                                machine's controller of the same number (the first has the keyboard, mouse
@@ -93,6 +100,10 @@ namespace conker::lockstep {
     // `port` 0: through a room on the netplay server (set_server); -1: not hosting.
     void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     void set_join(const std::string& where, int local = 1);
+    // Hosting on a port: visible on this network (--netplay-lan).
+    void set_lan(bool visible);
+    // Quick Match (--netplay-quick): as set_host's, which it hosts with if it finds no room to join.
+    void set_quick(int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
     // The netplay server ("host:port") for rooms, whether direct connections are allowed through it, and
     // (hosting) whether the room is in its public list.
     void set_server(const std::string& server, bool allow_direct, bool listed = false);
@@ -137,6 +148,12 @@ namespace conker::lockstep {
     Browse poll_browse();
     void browse_again();
     void stop_browsing();
+    // The matches on this network a game whose Hello is `me` can join (hosts with --netplay-lan; no server):
+    // lan_browse listens (false: `error` says why), poll_lan gives those heard from lately (each `code` a
+    // join code; `direct`), stop_lan stops.
+    bool lan_browse(const netplay::Hello& me, std::string& error);
+    std::vector<ListedRoom> poll_lan();
+    void stop_lan();
     // The match has started (from the menu or connect).
     bool connected();
     // The Hello begin was given.

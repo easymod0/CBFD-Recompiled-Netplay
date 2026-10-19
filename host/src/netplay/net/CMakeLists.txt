@@ -23,8 +23,8 @@ endif()
 
 option(CONKER_NETPLAY_FUZZ "Build the packets' libFuzzer target (clang)" OFF)
 
-# The packets, join and room codes and TURN credentials alone: no dependencies, for the tests and the fuzzer.
-add_library(conker_netplay_packets STATIC packets.cpp signal_packets.cpp join_code.cpp turn_credentials.cpp)
+# The packets (the game's, signalling's and LAN beacons), join and room codes and TURN credentials alone: no dependencies, for the tests and the fuzzer.
+add_library(conker_netplay_packets STATIC packets.cpp signal_packets.cpp lan_packets.cpp join_code.cpp turn_credentials.cpp)
 target_include_directories(conker_netplay_packets PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_features(conker_netplay_packets PUBLIC cxx_std_20)
 
@@ -36,9 +36,11 @@ add_executable(signal_packets_test signal_packets_test.cpp)
 target_link_libraries(signal_packets_test PRIVATE conker_netplay_packets)
 add_executable(turn_credentials_test turn_credentials_test.cpp)
 target_link_libraries(turn_credentials_test PRIVATE conker_netplay_packets)
+add_executable(lan_packets_test lan_packets_test.cpp)
+target_link_libraries(lan_packets_test PRIVATE conker_netplay_packets)
 
 if (CONKER_NETPLAY_FUZZ)
-    add_executable(fuzz_packets fuzz_packets.cpp packets.cpp signal_packets.cpp join_code.cpp)
+    add_executable(fuzz_packets fuzz_packets.cpp packets.cpp signal_packets.cpp lan_packets.cpp join_code.cpp)
     target_include_directories(fuzz_packets PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(fuzz_packets PRIVATE -fsanitize=fuzzer,address,undefined -g)
     target_link_options(fuzz_packets PRIVATE -fsanitize=fuzzer,address,undefined)
@@ -69,7 +71,7 @@ if (WIN32)
 endif()
 FetchContent_MakeAvailable(GameNetworkingSockets)
 
-add_library(conker_netplay_net STATIC session.cpp signalling.cpp)
+add_library(conker_netplay_net STATIC session.cpp signalling.cpp lan.cpp)
 target_link_libraries(conker_netplay_net PUBLIC conker_netplay_packets GameNetworkingSockets::static)
 
 add_executable(netplay_probe probe.cpp)

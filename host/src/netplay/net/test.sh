@@ -5,7 +5,8 @@
 # also lossy; a joiner with more players than ports left, which must be refused), joiners with another match's key, another ROM or
 # other mods, which must be refused, joiners sending Inputs early or far ahead or a Hash twice, which
 # must be dropped, as must one sending Inputs for a port that isn't its own, one that never says Hello, which must be dropped too, and one sending a message bigger
-# than any packet, which the library must close. Then a match through ICE, by a room on the signalling
+# than any packet, which the library must close. A match found on this network (LAN discovery). Then a
+# match through ICE, by a room on the signalling
 # server netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh);
 # a room gone with its host, the public room list (by game, mods and platform), a relay-only host on a
 # server without one, an older version's games (which play together, apart from this one's), and
@@ -20,6 +21,7 @@ failed=0
 "$bin/join_code_test" || failed=1
 "$bin/signal_packets_test" || failed=1
 "$bin/turn_credentials_test" || failed=1
+"$bin/lan_packets_test" || failed=1
 
 # The join code a host printed in <file> (its key is random), once it has.
 code_of() {
@@ -161,6 +163,23 @@ raw() {
 }
 raw silent 27203 --silent
 raw oversize 27209 --oversize
+
+# LAN discovery: a host visible on this network (on a port of the test's own) is heard, and joined by the
+# code the beacon makes; a game of another build hears nothing.
+"$probe" host 27240 --lan 1 --lan-port 27241 --reads 60 > lan.host.txt 2>&1 &
+lan_host=$!
+sleep 1
+"$probe" lan --lan-port 27241 > lan.list.txt 2>&1
+lan_code=$(sed -n 's/^lan [^ ]* \([^ ]*\) 1\/2 rollback 0$/\1/p' lan.list.txt | head -1)
+if [ -n "$lan_code" ] && "$probe" join "$lan_code" --reads 60 > lan.join.txt 2>&1 && wait $lan_host; then echo "lan: passed"; else
+    echo "lan: FAILED"; cat lan.list.txt lan.host.txt lan.join.txt; failed=1; kill $lan_host 2>/dev/null; fi
+# Another build hears nothing; this one, then, hears the host (so it was there to be heard).
+"$probe" host 27242 --lan 1 --lan-port 27241 --reads 30 > lan-other.host.txt 2>&1 &
+lan_host=$!
+sleep 1
+if "$probe" lan --lan-port 27241 --build 2 2>&1 | grep -qx "matches 0" && "$probe" lan --lan-port 27241 2>&1 | grep -qx "matches 1"; then
+    echo "lan-other: passed"; else echo "lan-other: FAILED"; failed=1; fi
+kill $lan_host 2>/dev/null
 
 # Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
 # (Every probe connects from the same address: more than the server lets one make in a burst, or have at once.)
