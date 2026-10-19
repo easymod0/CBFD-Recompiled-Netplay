@@ -171,7 +171,7 @@ namespace conker::netplay::stun {
             std::vector<std::pair<Address, std::string>> data;
             std::vector<std::pair<Address, std::string>> straight;
             // When the whole check gives up: no request is sent past it (an unresponsive relay).
-            std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::time_point::max();
+            std::chrono::steady_clock::time_point deadline = (std::chrono::steady_clock::time_point::max)();
 
             ~Client() { if (s != no_socket) close_socket(s); }
 
