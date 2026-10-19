@@ -10,7 +10,7 @@
 // traffic (coturn, beside it: tools/netplay/server/).
 //
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]
-//                  [--max-listed-per-address 2] [--newest-version <n>]   (a test: speak no newer one)
+//                  [--max-listed-per-address 2] [--desync-burst 4] [--newest-version <n>]   (a test: speak no newer one)
 //                  [--turn <host:port> [--turn-hours 12]]   (with the secret in TURN_SECRET)
 //
 // With --turn, each peer is offered that TURN relay as it registers (Turn), with credentials of its own
@@ -82,8 +82,7 @@ namespace {
     constexpr double max_seconds = 12 * 3600.0;
     // Room lists: each looks at every listed room.
     constexpr int max_desync_reports = 4;
-    constexpr double reports_per_second = 1.0 / 300.0;     // from each address, after a burst of 4
-    constexpr double report_burst = 4.0;
+    constexpr double reports_per_second = 1.0 / 300.0;     // from each address, after a burst (--desync-burst)
     constexpr double all_reports_per_second = 1.0 / 30.0;  // from everyone, after a burst of 30
     constexpr double all_report_burst = 30.0;
     constexpr double lists_per_second = 1.0 / 3.0;
@@ -169,6 +168,7 @@ namespace {
         // Public rooms from one address at once (--max-listed-per-address): more aren't listed (they stay
         // private), so one network can't fill the list with rooms nobody answers in.
         int max_listed_per_address = 2;
+        double report_burst = 4;    // desync summaries logged from an address at once (--desync-burst)
         // The newest signalling version spoken (--newest-version: a test, posing as an older server).
         uint16_t newest_version = signal::version;
         size_t max_peers = 4096;
@@ -473,7 +473,7 @@ namespace {
                 }
             }
             std::erase_if(misses, [t](const auto& entry) { return entry.second.tokens + (t - entry.second.at) * misses_per_second >= miss_burst; });
-            std::erase_if(reports, [t](const auto& entry) { return entry.second.tokens + (t - entry.second.at) * reports_per_second >= report_burst; });
+            std::erase_if(reports, [this, t](const auto& entry) { return entry.second.tokens + (t - entry.second.at) * reports_per_second >= report_burst; });
             std::erase_if(arrivals, [this, t](const auto& entry) {
                 return entry.second.tokens + (t - entry.second.at) * connections_per_second >= connection_burst;
             });
@@ -487,7 +487,7 @@ namespace {
 
     int usage() {
         std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]\n"
-                             "                      [--max-listed-per-address 2] [--newest-version <n>]\n"
+                             "                      [--max-listed-per-address 2] [--desync-burst 4] [--newest-version <n>]\n"
                              "                      [--turn <host:port> [--turn-hours 12]]   (the secret in TURN_SECRET)\n");
         return 2;
     }
@@ -509,6 +509,7 @@ int main(int argc, char** argv) {
         else if (arg == "--connection-burst" && value > 0) state.connection_burst = value;
         else if (arg == "--max-per-address" && value > 0) state.max_per_address = value;
         else if (arg == "--max-listed-per-address" && value > 0) state.max_listed_per_address = value;
+        else if (arg == "--desync-burst" && value > 0) state.report_burst = value;
         else if (arg == "--newest-version" && value >= signal::oldest_version && value <= signal::version) state.newest_version = (uint16_t)value;
         else if (arg == "--max-peers" && value > 0) state.max_peers = (size_t)value;
         else return usage();

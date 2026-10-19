@@ -191,7 +191,8 @@ namespace conker::lockstep {
     };
     WaitingRoom waiting_room();
     void set_ready(bool ready);
-    bool kick(int port);
+    // `player`: the one shown on `port` (0: whoever's there), so a place that changed hands isn't kicked.
+    bool kick(int port, uint64_t player = 0);
     void block(uint64_t player);
     // During a match (the Esc menu's Netplay tab): its players as the waiting room last had them, which have
     // left since (`in`: there's a match). kick works then too (the host's: their ports play on idle, as when

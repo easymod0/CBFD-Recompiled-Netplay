@@ -484,7 +484,7 @@ namespace conker::netplay {
 
     void Session::set_room_settings(bool own_view, int delay, int rollback) {
         settings.own_view = own_view ? 1 : 0;
-        settings.delay = delay < 0 ? auto_delay : (uint8_t)std::min(delay, max_delay);
+        settings.delay = delay < 0 ? auto_delay : (uint8_t)(std::min)(delay, max_delay);
         settings.rollback = (uint8_t)std::clamp(rollback, 0, max_rollback);
     }
 
@@ -527,7 +527,7 @@ namespace conker::netplay {
             SteamNetConnectionRealTimeStatus_t status;
             uint16_t trip = 0xFFFF;
             if (SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.connection, &status, 0, nullptr) == k_EResultOK && status.m_nPing >= 0) {
-                trip = (uint16_t)std::min(status.m_nPing, 0xFFFE);
+                trip = (uint16_t)(std::min)(status.m_nPing, 0xFFFE);
             }
             seat(peer.ports, { peer.player, peer.platform, (uint8_t)(peer.ready ? 1 : 0), trip });
         }
@@ -724,8 +724,10 @@ namespace conker::netplay {
                 else if (theirs->profile != hello.profile) refusal = Reason::profile;
                 else if (theirs->mods != hello.mods) refusal = Reason::mods;
                 else if (!entry_open) refusal = Reason::started;
-                // Kept out (the host's block list): told only that the host removed it.
-                else if (std::find(blocked.begin(), blocked.end(), theirs->player) != blocked.end()) refusal = Reason::kicked;
+                // Kept out (the host's block list), or posing as the host itself: told only that the host removed it.
+                else if (std::find(blocked.begin(), blocked.end(), theirs->player) != blocked.end() || theirs->player == hello.player) {
+                    refusal = Reason::kicked;
+                }
                 // The lowest free ports, one for each of its players.
                 uint8_t ports = 0;
                 if (!refusal) {
@@ -762,11 +764,10 @@ namespace conker::netplay {
             }
             // Ready, only before the start.
             if (const Ready* ready = std::get_if<Ready>(&packet)) {
-                if (!entry_open) {
-                    drop(peer, Reason::protocol, &events);
-                    return;
+                // One the joiner sent as the match started (Start on its way to it) is too late, not wrong.
+                if (entry_open) {
+                    peer.ready = ready->ready != 0;
                 }
-                peer.ready = ready->ready != 0;
                 return;
             }
             // Inputs and hashes only once the match has started (before, a player can still leave and

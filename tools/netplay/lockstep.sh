@@ -51,7 +51,7 @@
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
-# 27310 to 27320 on 127.0.0.1.
+# 27310 to 27323 on 127.0.0.1 (netplay servers on 27320 to 27323).
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -73,7 +73,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift 2 ;;
         --match-options) MATCH_OPTIONS=$2; shift 2 ;;
         --host-options) HOST_OPTIONS=$2; shift 2 ;;
-        -h|--help) sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,/^set -u$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -375,8 +375,17 @@ server=$!
 servers="${servers:-} $server"
 start block-public --netplay-host room --netplay-public --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-player 4058
 room_of block-public > /dev/null
+# It must see the room (listed first) and pass over it: not join it and then leave (that's the other check).
+hashes=$(sed -n 's/^\[harness\] build .*: build \([0-9a-f]*\), ROM \([0-9a-f]*\), profile \([0-9a-f]*\)$/--build \1 --rom \2 --profile \3/p' "$OUT/block-public.out")
+i=0
+# shellcheck disable=SC2086
+while [ $i -lt 50 ] && ! "$(dirname "$EXE")/src/netplay/net/netplay_probe" list --signal 127.0.0.1:27323 $hashes --mods 0 2>&1 | grep -q " host 0000000000004058$"; do
+    sleep 0.2
+    i=$((i + 1))
+done
 start block-quick --netplay-quick --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-block 4058
-finish "no room to join, so hosting one" block-quick || failed=1
+if finish "no room to join, so hosting one" block-quick && ! grep -q "Quick Match: joining\|is on the block list" "$OUT/block-quick.out"; then :; else
+    echo "  block (Quick Match): FAILED"; failed=1; fi
 kill $server 2>/dev/null
 
 echo "kick"

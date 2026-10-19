@@ -121,6 +121,10 @@ namespace {
     // Adds `player` to the block list (kept), and tells lockstep (a host kicks them).
     void block_player(uint64_t player) {
         ServerSettings settings = load_settings();
+        // Never this player's own id (two windows sharing a config folder share one).
+        if (player == settings.player) {
+            return;
+        }
         if (player != 0 && std::find(settings.blocked.begin(), settings.blocked.end(), player) == settings.blocked.end()) {
             settings.blocked.push_back(player);
             save_settings(settings);
@@ -372,8 +376,8 @@ namespace {
                 const uint64_t player = seat.player;
                 if (room.hosting) {
                     recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
-                    kick->add_pressed_callback([this, port]() {
-                        conker::lockstep::kick(port);
+                    kick->add_pressed_callback([this, port, player]() {
+                        conker::lockstep::kick(port, player);
                         shown_waiting.clear();
                         queue_update();
                     });
@@ -1011,8 +1015,8 @@ namespace {
                 const uint64_t player = seat.player;
                 if (room.hosting && !seat.left) {
                     recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
-                    kick->add_pressed_callback([this, port]() {
-                        conker::lockstep::kick(port);
+                    kick->add_pressed_callback([this, port, player]() {
+                        conker::lockstep::kick(port, player);
                         shown.clear();
                     });
                 }

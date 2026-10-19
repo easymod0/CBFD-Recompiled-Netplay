@@ -126,16 +126,16 @@ refused refused-mods 27204 --mods "other mods on than the host's"
 refused refused-full 27212 --local "the match is full"
 # The waiting room: the host kicks a joiner, or keeps one out (its block list: player id 2): told only that the
 # host removed it.
-host_options="--kick 1" refused refused-kicked 27213 --player "the host removed this player"
-host_options="--block 2" refused refused-blocked 27214 --player "the host removed this player"
+host_options="--kick 1" refused refused-kicked 27216 --player "the host removed this player"
+host_options="--block 2" refused refused-blocked 27217 --player "the host removed this player"
 host_options=
 # The host waits for everyone to be Ready: a joiner that says so after 3 s starts the match then, not as it joins.
-"$probe" host 27215 --reads 30 > ready.host.txt 2>&1 &
+"$probe" host 27218 --reads 30 > ready.host.txt 2>&1 &
 host=$!
 if "$probe" join "$(code_of ready.host.txt)" --reads 30 --ready-after 3 > ready.join.txt 2>&1 && wait $host &&
     after=$(sed -n 's/^started after \([0-9.]*\) s$/\1/p' ready.host.txt) && [ -n "$after" ] &&
     awk -v a="$after" 'BEGIN { exit !(a >= 2.5) }'; then echo "ready: passed (started after $after s)"; else
-    echo "ready: FAILED"; cat ready.host.txt ready.join.txt; failed=1; fi
+    echo "ready: FAILED"; cat ready.host.txt ready.join.txt; failed=1; kill $host 2>/dev/null; fi
 
 # A hostile joiner: Inputs before the start (it joins a lobby of 3 alone, so the match hasn't started),
 # far beyond what the game could have reached, or the same Hash twice (in a started match of 2). The host
@@ -189,11 +189,12 @@ lan_code=$(sed -n 's/^lan [^ ]* \([^ ]*\) 1\/2 rollback 0$/\1/p' lan.list.txt | 
 if [ -n "$lan_code" ] && "$probe" join "$lan_code" --reads 60 > lan.join.txt 2>&1 && wait $lan_host; then echo "lan: passed"; else
     echo "lan: FAILED"; cat lan.list.txt lan.host.txt lan.join.txt; failed=1; kill $lan_host 2>/dev/null; fi
 # Another build hears nothing; this one, then, hears the host (so it was there to be heard).
-"$probe" host 27242 --lan 1 --lan-port 27241 --reads 30 > lan-other.host.txt 2>&1 &
+# (As Linux's: the machine's own platform may be macOS.)
+"$probe" host 27242 --lan 1 --lan-port 27241 --platform 1 --reads 30 > lan-other.host.txt 2>&1 &
 lan_host=$!
 sleep 1
-if "$probe" lan --lan-port 27241 --build 2 2>&1 | grep -qx "matches 0" && "$probe" lan --lan-port 27241 --platform 3 2>&1 | grep -qx "matches 0" &&
-    "$probe" lan --lan-port 27241 2>&1 | grep -qx "matches 1"; then
+if "$probe" lan --lan-port 27241 --platform 1 --build 2 2>&1 | grep -qx "matches 0" && "$probe" lan --lan-port 27241 --platform 3 2>&1 | grep -qx "matches 0" &&
+    "$probe" lan --lan-port 27241 --platform 1 2>&1 | grep -qx "matches 1"; then
     echo "lan-other: passed"; else echo "lan-other: FAILED"; failed=1; fi
 kill $lan_host 2>/dev/null
 # The broadcast alone (not also sent to this machine): heard where a firewall lets it in. Required with
@@ -208,7 +209,7 @@ kill $lan_host 2>/dev/null
 
 # Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
 # (Every probe connects from the same address: more than the server lets one make in a burst, or have at once.)
-"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-per-address 32 --max-listed-per-address 3 > ice.server.txt 2>&1 &
+"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-per-address 32 --max-listed-per-address 3 --desync-burst 8 > ice.server.txt 2>&1 &
 server=$!
 room_of() {
     i=0
@@ -249,14 +250,15 @@ for pid in $pids; do
 done
 if [ $ok -eq 1 ] && grep -q "^left room" ice-again.host.txt; then echo "ice-again: passed"; else
     echo "ice-again: FAILED"; cat ice-again.host.txt ice-again.join.txt; failed=1; fi
-# Desync summaries: 6 from one connection and 1 from another, from this address: the server logs 4 (its
-# limit for a connection, and for an address), counting the others, with nothing of the sender's in them.
+# Desync summaries: 6 from one connection and 1 from another, from this address: the server logs 5 (4, its
+# limit for a connection, and the other's: this server allows 8 from an address), counting the others,
+# with nothing of the sender's in them.
 "$probe" desync --signal 127.0.0.1:27220 --platform 1 --count 6 > desync-report.txt 2>&1
 "$probe" desync --signal 127.0.0.1:27220 --platform 1 > desync-report2.txt 2>&1
 sleep 0.5
 logged=$(grep -c "^netplay_server: desync: match 5eed1234, build 0123456789abcdef, Linux, 2 players, port 2 against port 1, read [0-9]*, regions 64, rollback 0, delay 2$" ice.server.txt)
-if grep -qx "sent 6" desync-report.txt && grep -qx "sent 1" desync-report2.txt && [ "$logged" -eq 4 ] && ! grep "desync:" ice.server.txt | grep -q "127.0.0.1"; then
-    echo "desync-reports: passed (4 logged)"; else echo "desync-reports: FAILED ($logged logged)"; grep "desync" ice.server.txt; failed=1; fi
+if grep -qx "sent 6" desync-report.txt && grep -qx "sent 1" desync-report2.txt && [ "$logged" -eq 5 ] && ! grep "desync:" ice.server.txt | grep -q "127.0.0.1"; then
+    echo "desync-reports: passed (5 logged)"; else echo "desync-reports: FAILED ($logged logged)"; grep "desync" ice.server.txt; failed=1; fi
 # expect <name> <text> <probe options...>: the probe fails, saying <text>.
 expect() {
     name=$1; text=$2; shift 2
