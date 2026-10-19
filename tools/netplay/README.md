@@ -268,6 +268,15 @@ address, from which it shows the join code); players, input delay; or join by ei
 machine once all are in. When a match started there ends (a desync, the host gone), a prompt says why
 instead of the game quitting.
 
+**The waiting room** (fork issues #30, #31). Once hosting or in, everyone sees who's there: each port's
+player by a name made from their player id (random, kept in `netplay.json`; `--netplay-player <hex>` on
+the command line), whether they're ready, their platform and round trip to the host, and the match's
+settings (the host's Roster, sent as it changes; joiners say Ready). The match starts once every port is
+taken and everyone's ready; the host's Ready is its Start. From the command line every copy is ready by
+itself, as before. The host can **kick** a player; anyone can **block** one (kept in `netplay.json`;
+`--netplay-block <hex>`): a host refuses them (told only "the host removed this player"), and a joiner
+leaves a room they're in (Quick Match tries the next).
+
 This fork's menu finds matches too (fork issue #29):
 - **Public rooms** (`--netplay-public`): a room hosted Public is in the server's room list, under a name
   made from its number ("Grumpy Squirrel"). The Join tab lists the rooms this game can join (the same

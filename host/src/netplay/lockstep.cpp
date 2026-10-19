@@ -23,6 +23,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -78,6 +79,14 @@ namespace {
     // Hosting on a port: visible on this network (--netplay-lan), by a beacon each second while the players
     // join (lan.hpp).
     bool lan_option = false;
+    // Who plays here (Hello's player id: --netplay-player, or the menu's kept one; random if neither), and whom
+    // they keep out (the block list: a host refuses them, a joiner leaves a room they're in).
+    uint64_t player_option = 0;
+    std::vector<uint64_t> blocked_players;
+    // The waiting room: whether this machine's players are ready by themselves (the command line's way), or
+    // when the menu says (set_ready); and whether they are.
+    bool auto_ready = true;
+    bool ready_now = false;
     conker::netplay::LanBeacon* lan_beacon = nullptr;
     double next_beacon = 0;
     // The matches on this network, for the menu (lan_browse).
@@ -377,6 +386,17 @@ namespace {
 
     // Leaves the match with a goodbye, and polls the library a moment for it to go out (it's sent as the
     // library is polled), or the others only hear the match is over when their connection times out.
+    // A new session's waiting room: the block list, and as a host the match's settings and whether it's
+    // ready by itself.
+    void prepare_room() {
+        session->set_blocked(blocked_players);
+        if (session->hosting()) {
+            session->set_room_settings(host_own_view, delay_option, rollback_option);
+            ready_now = auto_ready;
+            session->set_ready(ready_now);
+        }
+    }
+
     void say_goodbye() {
         std::scoped_lock lock(session_mutex);
         if (catching_up) set_catching_up(false);
@@ -1000,6 +1020,25 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
         lan_option = true;
         return true;
     }
+    if (std::strcmp(option, "--netplay-player") == 0) {
+        player_option = value != nullptr ? std::strtoull(value, nullptr, 16) : 0;
+        if (player_option == 0) {
+            std::fprintf(stderr, "[netplay] --netplay-player needs a player id (hex, not 0)\n");
+            options_valid = false;
+        }
+        if (value != nullptr) i++;
+        return true;
+    }
+    if (std::strcmp(option, "--netplay-block") == 0) {
+        const uint64_t player = value != nullptr ? std::strtoull(value, nullptr, 16) : 0;
+        if (player == 0) {
+            std::fprintf(stderr, "[netplay] --netplay-block needs a player id (hex, not 0)\n");
+            options_valid = false;
+        }
+        blocked_players.push_back(player);
+        if (value != nullptr) i++;
+        return true;
+    }
     if (std::strcmp(option, "--players") == 0) {
         number(2, netplay::max_players, n);
         wanted_players = (int)n;
@@ -1107,6 +1146,16 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
 
 bool conker::lockstep::active() {
     return host_port > 0 || host_room || !join_where.empty() || quick_option;
+}
+
+void conker::lockstep::set_identity(uint64_t player, const std::vector<uint64_t>& blocked, bool ready_by_itself) {
+    std::scoped_lock lock(session_mutex);
+    player_option = player;
+    blocked_players = blocked;
+    auto_ready = ready_by_itself;
+    if (session != nullptr) {
+        session->set_blocked(blocked_players);
+    }
 }
 
 void conker::lockstep::set_lan(bool visible) {
@@ -1289,8 +1338,16 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
             fake.lag_ms, fake.jitter_ms, fake.loss, fake.reorder, fake.dup);
     }
     cancel();
+    if (player_option == 0) {
+        // Neither the menu's nor --netplay-player: one for this process.
+        std::random_device random;
+        while (player_option == 0) player_option = (uint64_t)random() << 32 | random();
+    }
     netplay::Hello mine = me;
     mine.players = (uint8_t)local_option;
+    mine.player = player_option;
+    mine.platform = (uint8_t)netplay::this_platform();
+    ready_now = false;
     if (quick_option && !quick_restarting) {
         // A new Quick Match: it starts listing, hosting nothing yet.
         host_room = false;
@@ -1328,6 +1385,11 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
         }
     }
     sent = me;
+    sent.player = mine.player;
+    sent.platform = mine.platform;
+    if (session != nullptr) {
+        prepare_room();
+    }
     own_ports = hosting && session != nullptr ? session->ports() : 0;
     match_players = hosting ? wanted_players : 0;
     joined = hosting ? local_option : 0;
@@ -1450,6 +1512,7 @@ namespace {
         match_players = wanted_players;
         joined = local_option;
         connecting_since = now();
+        prepare_room();
         signaller->create_room(session->key());
         rendezvous = Rendezvous::creating;
         rendezvous_since = now();
@@ -1576,6 +1639,7 @@ namespace {
                     }
                     return fail("Couldn't join: " + error + ".");
                 }
+                prepare_room();
                 rendezvous = Rendezvous::none;
                 return std::nullopt;
             default:
@@ -1602,16 +1666,6 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
             case Event::Type::joined:
                 joined += std::popcount(event.ports);
                 std::printf("[netplay] %s joined (%d of %d)\n", ports_text(event.ports).c_str(), joined, match_players);
-                if (joined == match_players) {
-                    const int chosen = delay_option == auto_delay ? delay_for(session->round_trips_ms(), (size_t)session->joiners()) : delay_option;
-                    if (session->start(host_own_view, chosen, rollback_option)) {
-                        match_started = true;
-                        match_own_view = host_own_view;
-                        match_pairs = session->pairs();
-                        delay = chosen;
-                        delays = { 0, chosen, chosen };
-                    }
-                }
                 break;
             case Event::Type::left:
                 // Once started (a joiner leaving in the poll the match started in), as in the match: Gone.
@@ -1633,6 +1687,10 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 own_ports = event.ports;
                 match_players = event.players;
                 std::printf("[netplay] in, on %s of %d: waiting for the others\n", ports_text(own_ports).c_str(), match_players);
+                if (auto_ready) {
+                    ready_now = true;
+                    session->set_ready(true);
+                }
                 break;
             case Event::Type::started:
                 match_started = true;
@@ -1666,6 +1724,39 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
             case Event::Type::packet:
                 handle(event);
                 break;
+        }
+    }
+    // The host starts the match once every port is taken and everyone's ready (the host too: its Start).
+    if (hosting && !match_started && joined == match_players && session->everyone_ready()) {
+        const int chosen = delay_option == auto_delay ? delay_for(session->round_trips_ms(), (size_t)session->joiners()) : delay_option;
+        if (session->start(host_own_view, chosen, rollback_option)) {
+            match_started = true;
+            match_own_view = host_own_view;
+            match_pairs = session->pairs();
+            delay = chosen;
+            delays = { 0, chosen, chosen };
+        }
+    }
+    // A joiner in a room with someone on its block list leaves (Quick Match: for another room).
+    if (!hosting && !match_started && own_ports != 0) {
+        for (const netplay::Seat& seat : session->roster().seats) {
+            if (seat.player == 0 || std::find(blocked_players.begin(), blocked_players.end(), seat.player) == blocked_players.end()) {
+                continue;
+            }
+            std::printf("[netplay] %s is on the block list: leaving\n", netplay::player_name(seat.player).c_str());
+            if (quick_option && signaller != nullptr && signaller->state() == netplay::Signaller::State::ready) {
+                say_goodbye();
+                delete session;
+                session = nullptr;
+                own_ports = 0;
+                match_players = 0;
+                quick_list();
+                status = "Quick Match: looking for another room...";
+                return Progress::waiting;
+            }
+            status = "Left: " + netplay::player_name(seat.player) + " is on your block list.";
+            cancel();
+            return Progress::failed;
         }
     }
     list_room();
@@ -1934,6 +2025,70 @@ void conker::lockstep::stop_lan() {
     std::scoped_lock lock(session_mutex);
     delete lan_listener;
     lan_listener = nullptr;
+}
+
+conker::lockstep::WaitingRoom conker::lockstep::waiting_room() {
+    std::scoped_lock lock(session_mutex);
+    WaitingRoom room;
+    if (session == nullptr || match_started || (!session->hosting() && own_ports == 0)) {
+        return room;
+    }
+    const netplay::Roster roster = session->roster();
+    room.in = true;
+    room.hosting = session->hosting();
+    room.players = roster.players;
+    room.ready = ready_now;
+    room.own_view = roster.own_view != 0;
+    room.delay = roster.delay == netplay::auto_delay ? -1 : roster.delay;
+    room.rollback = roster.rollback;
+    for (int port = 0; port < netplay::max_players; port++) {
+        const netplay::Seat& s = roster.seats[port];
+        Seat& seat = room.seats[port];
+        seat.player = s.player;
+        if (s.player == 0) continue;
+        seat.name = netplay::player_name(s.player);
+        seat.ready = s.ready != 0;
+        seat.platform = s.platform;
+        seat.mine = (own_ports & (1u << port)) != 0;
+        seat.round_trip_ms = seat.mine || s.round_trip_ms == 0xFFFF ? -1 : s.round_trip_ms;
+    }
+    return room;
+}
+
+void conker::lockstep::set_ready(bool ready) {
+    std::scoped_lock lock(session_mutex);
+    if (session != nullptr && !match_started) {
+        ready_now = ready;
+        session->set_ready(ready);
+    }
+}
+
+bool conker::lockstep::kick(int port) {
+    std::scoped_lock lock(session_mutex);
+    return session != nullptr && !match_started && session->kick(port);
+}
+
+void conker::lockstep::block(uint64_t player) {
+    std::scoped_lock lock(session_mutex);
+    if (player == 0 || player == player_option) {
+        return;
+    }
+    if (std::find(blocked_players.begin(), blocked_players.end(), player) == blocked_players.end()) {
+        blocked_players.push_back(player);
+    }
+    if (session == nullptr) {
+        return;
+    }
+    session->set_blocked(blocked_players);
+    // A host kicks them now (a joiner leaves at its next poll: poll_connect).
+    if (session->hosting() && !match_started) {
+        const netplay::Roster roster = session->roster();
+        for (int port = 0; port < netplay::max_players; port++) {
+            if (roster.seats[port].player == player) {
+                session->kick(port);
+            }
+        }
+    }
 }
 
 bool conker::lockstep::connected() {

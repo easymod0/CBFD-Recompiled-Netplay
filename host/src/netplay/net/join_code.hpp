@@ -43,4 +43,7 @@ namespace conker::netplay {
     // A listed room's name, made from its number (two words, "Grumpy Squirrel"): the same in every game,
     // with nothing a player wrote. Names repeat (a thousand of them); the code doesn't.
     std::string room_name(uint64_t room);
+    // A player's name, made from their player id (packets.hpp's Hello) the same way: the same on every
+    // machine, with nothing anyone wrote.
+    std::string player_name(uint64_t player);
 }

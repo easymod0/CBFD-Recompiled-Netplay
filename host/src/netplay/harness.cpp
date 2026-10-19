@@ -1472,9 +1472,8 @@ void conker::harness::start(uint8_t* game_rdram) {
         if (conker::lockstep::connected()) {
             // Connected from the menu, with the stored ROM's hash: it's the one loaded, unless something
             // changed it since.
-            conker::netplay::Hello sent = conker::lockstep::sent_hello();
-            sent.key = 0;   // the match's, not the game's
-            if (!(sent == hello)) {
+            const conker::netplay::Hello sent = conker::lockstep::sent_hello();
+            if (!conker::netplay::same_game(sent, hello)) {
                 std::fprintf(stderr, "[harness] the game loaded isn't the one the match was joined with\n");
                 conker::lockstep::end(conker::netplay::Reason::rom, "the ROM loaded isn't the one the match was joined with");
                 match_over = true;

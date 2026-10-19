@@ -2,8 +2,8 @@
 // code that parses what arrives from the network; fuzz_packets.cpp fuzzes it.
 //
 // Each packet: "CN", u16 protocol version, u8 kind, then (all little-endian):
-//   1 Hello    u64 build, u64 rom, u64 profile, u64 mods, u64 key,                    46 bytes
-//              u8 players (1 to 3)
+//   1 Hello    u64 build, u64 rom, u64 profile, u64 mods, u64 key,                    55 bytes
+//              u8 players (1 to 3), u64 player (not 0), u8 platform (1 to 3)
 //   2 Welcome  u8 ports (bits: some, none at or past players, not port 0),             7 bytes
 //              u8 players (2 to 4)
 //   3 Refuse   u8 reason                                                               6 bytes
@@ -19,6 +19,11 @@
 //   8 Gone     u8 port (1 to 3: never the host's 0), u32 from read,                    11 bytes
 //              u8 silent (0 or 1: stopped answering)
 //   9 Delay    u8 delay (0 to 8), u32 from read                                        10 bytes
+//  10 Roster   4 seats of 12: u64 player, u8 platform, u8 ready, u16 round trip;     57 bytes
+//              (a free seat, player 0, all zero; a taken one platform 1 to 3, ready
+//              0 or 1; none taken at or past players), u8 players (2 to 4),
+//              u8 own view (0 or 1), u8 delay (0 to 8, or 255: auto), u8 rollback (0 to 12)
+//  11 Ready    u8 ready (0 or 1)                                                       6 bytes
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
 #include "packets.hpp"
@@ -28,14 +33,14 @@
 
 namespace conker::netplay {
     namespace {
-        enum Kind : uint8_t { hello = 1, welcome, refuse, inputs, hash, bye, start, gone, delay };
+        enum Kind : uint8_t { hello = 1, welcome, refuse, inputs, hash, bye, start, gone, delay, roster, ready };
         constexpr size_t header_size = 5;
         constexpr size_t pad_size = 5;
         constexpr size_t motion_size = 13;
 
         constexpr size_t size_of(uint8_t kind) {
             switch (kind) {
-                case hello: return header_size + 41;
+                case hello: return header_size + 50;
                 case welcome: return header_size + 2;
                 case refuse: return header_size + 1;
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players;
@@ -44,6 +49,8 @@ namespace conker::netplay {
                 case start: return header_size + 5;
                 case gone: return header_size + 6;
                 case delay: return header_size + 5;
+                case roster: return header_size + 12 * max_players + 4;
+                case ready: return header_size + 1;
             }
             return 0;
         }
@@ -56,7 +63,23 @@ namespace conker::netplay {
         // Each kind's fields (plain overloads: MSVC misreads `p.count < 1 || p.count > n` in a generic
         // lambda as a template's arguments).
         bool valid_fields(const Hello& p) {
-            return p.players >= 1 && p.players < max_players;
+            return p.players >= 1 && p.players < max_players && p.player != 0 && p.platform >= 1 && p.platform <= 3;
+        }
+        bool valid_fields(const Roster& p) {
+            if (p.players < 2 || p.players > max_players || p.own_view > 1 || (p.delay > max_delay && p.delay != auto_delay) ||
+                p.rollback > max_rollback) {
+                return false;
+            }
+            for (int port = 0; port < max_players; port++) {
+                const Seat& s = p.seats[port];
+                if (s.player == 0 ? !(s == Seat{}) : port >= p.players || s.platform < 1 || s.platform > 3 || s.ready > 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        bool valid_fields(const Ready& p) {
+            return p.ready <= 1;
         }
         bool valid_fields(const Welcome& p) {
             return p.players >= 2 && p.players <= max_players && p.ports != 0 && (p.ports & 1) == 0 &&
@@ -135,6 +158,7 @@ namespace conker::netplay {
             case Reason::timeout: return "the connection timed out";
             case Reason::mods: return "other mods on than the host's (everyone needs the same mods, versions and mod settings; texture packs aside)";
             case Reason::key: return "not this match's join code";
+            case Reason::kicked: return "the host removed this player";
         }
         return "an unknown reason";
     }
@@ -159,6 +183,23 @@ namespace conker::netplay {
                 w.u64(p.mods);
                 w.u64(p.key);
                 w.u8(p.players);
+                w.u64(p.player);
+                w.u8(p.platform);
+            }
+            else if constexpr (std::is_same_v<T, Roster>) {
+                for (const Seat& s : p.seats) {
+                    w.u64(s.player);
+                    w.u8(s.platform);
+                    w.u8(s.ready);
+                    w.u16(s.round_trip_ms);
+                }
+                w.u8(p.players);
+                w.u8(p.own_view);
+                w.u8(p.delay);
+                w.u8(p.rollback);
+            }
+            else if constexpr (std::is_same_v<T, Ready>) {
+                w.u8(p.ready);
             }
             else if constexpr (std::is_same_v<T, Welcome>) {
                 w.u8(p.ports);
@@ -236,9 +277,29 @@ namespace conker::netplay {
                 p.mods = r.u64();
                 p.key = r.u64();
                 p.players = r.u8();
+                p.player = r.u64();
+                p.platform = r.u8();
                 packet = p;
                 break;
             }
+            case roster: {
+                Roster p;
+                for (Seat& s : p.seats) {
+                    s.player = r.u64();
+                    s.platform = r.u8();
+                    s.ready = r.u8();
+                    s.round_trip_ms = r.u16();
+                }
+                p.players = r.u8();
+                p.own_view = r.u8();
+                p.delay = r.u8();
+                p.rollback = r.u8();
+                packet = p;
+                break;
+            }
+            case ready:
+                packet = Ready{ r.u8() };
+                break;
             case welcome: {
                 Welcome p;
                 p.ports = r.u8();

@@ -3,7 +3,8 @@
 # tests, then matches between copies of netplay_probe over loopback (2 players; 3 with 20% of packets
 # lost, which also tests the host passing inputs on; 3 and 4 with two players on the host or on a joiner,
 # also lossy; a joiner with more players than ports left, which must be refused), joiners with another match's key, another ROM or
-# other mods, which must be refused, joiners sending Inputs early or far ahead or a Hash twice, which
+# other mods, which must be refused, a joiner kicked or kept out (the host's block list), the host waiting
+# for everyone to be Ready, joiners sending Inputs early or far ahead or a Hash twice, which
 # must be dropped, as must one sending Inputs for a port that isn't its own, one that never says Hello, which must be dropped too, and one sending a message bigger
 # than any packet, which the library must close. A match found on this network (LAN discovery: by build and
 # platform, and the broadcast alone). Desync summaries the server logs, within its limits. Then a
@@ -103,7 +104,8 @@ fi
 # with the reason (a wrong key's alone, as nothing else is checked).
 refused() {
     name=$1; port=$2; option=$3; reason=$4
-    "$probe" host "$port" --reads 30 > "$name.host.txt" 2>&1 &
+    # shellcheck disable=SC2086
+    "$probe" host "$port" --reads 30 ${host_options:-} > "$name.host.txt" 2>&1 &
     host=$!
     to=$(code_of "$name.host.txt")
     [ "$option" = "--key" ] && to=$("$probe" code "127.0.0.1:$port" 1234567890ABCDEF) && option=
@@ -122,6 +124,18 @@ refused refused-rom 27202 --rom "a different ROM"
 refused refused-mods 27204 --mods "other mods on than the host's"
 # More players on a joiner than the match has ports left (a match of 2: the host and one).
 refused refused-full 27212 --local "the match is full"
+# The waiting room: the host kicks a joiner, or keeps one out (its block list: player id 2): told only that the
+# host removed it.
+host_options="--kick 1" refused refused-kicked 27213 --player "the host removed this player"
+host_options="--block 2" refused refused-blocked 27214 --player "the host removed this player"
+host_options=
+# The host waits for everyone to be Ready: a joiner that says so after 3 s starts the match then, not as it joins.
+"$probe" host 27215 --reads 30 > ready.host.txt 2>&1 &
+host=$!
+if "$probe" join "$(code_of ready.host.txt)" --reads 30 --ready-after 3 > ready.join.txt 2>&1 && wait $host &&
+    after=$(sed -n 's/^started after \([0-9.]*\) s$/\1/p' ready.host.txt) && [ -n "$after" ] &&
+    awk -v a="$after" 'BEGIN { exit !(a >= 2.5) }'; then echo "ready: passed (started after $after s)"; else
+    echo "ready: FAILED"; cat ready.host.txt ready.join.txt; failed=1; fi
 
 # A hostile joiner: Inputs before the start (it joins a lobby of 3 alone, so the match hasn't started),
 # far beyond what the game could have reached, or the same Hash twice (in a started match of 2). The host

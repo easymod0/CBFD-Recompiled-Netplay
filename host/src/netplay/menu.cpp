@@ -16,6 +16,11 @@
 // that list while it's open, asked for again every few seconds, and joins a room from it. Quick Match joins
 // the first open one that fits, or hosts one in public with the Host tab's settings (lockstep's).
 //
+// Once hosting or in, the waiting room shows who's there (by names made from their player ids), whether
+// they're ready, their platform and round trip; the match starts once it's full and everyone's ready (the
+// host's Ready is Start). The host can kick a player; anyone can block one (kept in netplay.json: a host
+// refuses them, a joiner leaves a room they're in).
+//
 // A match hosted directly can be visible on this network: games there list it on their Join tab (heard
 // from its beacon: lan.hpp) and join it with no code and no server.
 //
@@ -26,6 +31,7 @@
 //
 // Rollback (--rollback) is the host's choice too, the same for everyone in the match.
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -33,6 +39,7 @@
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -62,11 +69,20 @@ namespace {
     // The netplay server players use unless they set another.
     constexpr const char* default_server = "conker.jesp.ca:27100";
 
-    // The server settings, kept in netplay.json in the config folder.
+    // The server settings, kept in netplay.json in the config folder, with this player's id (random, made the
+    // first time: others see a name made from it) and their block list (player ids).
     struct ServerSettings {
         std::string server = default_server;
         bool allow_direct = false;
+        uint64_t player = 0;
+        std::vector<uint64_t> blocked;
     };
+
+    std::string hex_id(uint64_t id) {
+        char text[17];
+        std::snprintf(text, sizeof(text), "%016llx", (unsigned long long)id);
+        return text;
+    }
 
     std::filesystem::path settings_path() {
         return recomp::get_config_path() / "netplay.json";
@@ -79,6 +95,13 @@ namespace {
         if (json.is_object()) {
             if (json.contains("server") && json["server"].is_string()) settings.server = json["server"].get<std::string>();
             if (json.contains("allow_direct") && json["allow_direct"].is_boolean()) settings.allow_direct = json["allow_direct"].get<bool>();
+            if (json.contains("player") && json["player"].is_string()) settings.player = std::strtoull(json["player"].get<std::string>().c_str(), nullptr, 16);
+            if (json.contains("blocked") && json["blocked"].is_array()) {
+                for (const auto& id : json["blocked"]) {
+                    const uint64_t player = id.is_string() ? std::strtoull(id.get<std::string>().c_str(), nullptr, 16) : 0;
+                    if (player != 0) settings.blocked.push_back(player);
+                }
+            }
         }
         return settings;
     }
@@ -86,8 +109,22 @@ namespace {
     void save_settings(const ServerSettings& settings) {
         std::ofstream file(settings_path(), std::ios::trunc);
         if (file) {
-            file << nlohmann::json{ { "server", settings.server }, { "allow_direct", settings.allow_direct } }.dump(4) << "\n";
+            nlohmann::json blocked = nlohmann::json::array();
+            for (const uint64_t player : settings.blocked) blocked.push_back(hex_id(player));
+            file << nlohmann::json{ { "server", settings.server }, { "allow_direct", settings.allow_direct },
+                { "player", hex_id(settings.player) }, { "blocked", blocked } }.dump(4) << "\n";
         }
+    }
+
+    // The settings, with a player id made the first time.
+    ServerSettings load_or_make_settings() {
+        ServerSettings settings = load_settings();
+        if (settings.player == 0) {
+            std::random_device random;
+            while (settings.player == 0) settings.player = (uint64_t)random() << 32 | random();
+            save_settings(settings);
+        }
+        return settings;
     }
 
     std::string trimmed(std::string text) {
@@ -115,6 +152,8 @@ namespace {
         recompui::Button* copy_button = nullptr;
         std::string shown_code;             // the join code on show, for Copy
         recompui::Element* status_row = nullptr;   // hidden while there's nothing to say
+        recompui::Element* waiting_box = nullptr;  // the waiting room, while connecting
+        std::string shown_waiting;                 // what it shows, to make it again only when that changes
         recompui::Label* status_label = nullptr;
         recompui::Element* direct_rows = nullptr;  // hosting directly: the port and address
         recompui::Element* room_row = nullptr;     // hosting through a room: private or public
@@ -142,7 +181,7 @@ namespace {
         bool hosting = false;               // a match is hosted (connecting, as the host)
         bool host_directly = false;         // hosting: by a join code (a port), not a room on the server
         bool public_room = false;           // hosting through a room: in the server's public list
-        ServerSettings settings = load_settings();
+        ServerSettings settings = load_or_make_settings();
         bool own_view_for_everyone = true;  // hosting: the match's screens rule
         int input_delay = -1;               // hosting: reads, or -1 for auto
         int rollback = 0;                   // hosting: reads predicted, 0 (off) to 12
@@ -261,11 +300,90 @@ namespace {
                 return;
             }
             std::string error;
+            conker::lockstep::set_identity(settings.player, settings.blocked, false);
             if (!conker::lockstep::begin(hello, error)) {
                 set_state(State::idle, "Couldn't: " + error);
                 return;
             }
             set_state(State::connecting, "Connecting...");
+        }
+
+        // The waiting room as it is now (while connecting), made again when that changes.
+        void show_waiting() {
+            const conker::lockstep::WaitingRoom room = state == State::connecting ? conker::lockstep::waiting_room()
+                                                                                    : conker::lockstep::WaitingRoom{};
+            std::string summary = room.in ? (room.ready ? "R" : "r") : "";
+            for (const conker::lockstep::Seat& seat : room.seats) {
+                // Round trips to 10 ms: not made again for every millisecond.
+                summary += "|" + std::to_string(seat.player) + (seat.ready ? "R" : "") + std::to_string(seat.round_trip_ms / 10);
+            }
+            if (summary == shown_waiting) {
+                return;
+            }
+            shown_waiting = summary;
+            waiting_box->clear_children();
+            waiting_box->set_display(room.in ? recompui::Display::Flex : recompui::Display::None);
+            if (!room.in) {
+                return;
+            }
+            using recompui::theme::Typography;
+            using recompui::theme::color;
+            recompui::ContextId context = recompui::get_current_context();
+            std::string rules = "Waiting room: " + std::to_string(room.players) + " players, input delay " +
+                (room.delay < 0 ? std::string("auto") : std::to_string(room.delay)) +
+                (room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : ", no rollback") +
+                (room.own_view ? ", everyone sees only their own view" : "");
+            text(waiting_box, rules, Typography::LabelMD);
+            static const char* const platforms[] = { "", "Linux", "Windows", "macOS" };
+            for (int port = 0; port < room.players; port++) {
+                const conker::lockstep::Seat& seat = room.seats[port];
+                recompui::Element* line = row(waiting_box);
+                text(line, "Player " + std::to_string(port + 1), Typography::LabelMD);
+                if (seat.player == 0) {
+                    text(line, "free", Typography::Body, color::TextDim);
+                    continue;
+                }
+                text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body);
+                std::string about = seat.ready ? "ready" : "not ready";
+                about += seat.platform >= 1 && seat.platform <= 3 ? std::string(", ") + platforms[seat.platform] : "";
+                about += seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
+                text(line, about, Typography::Body, seat.ready ? color::Text : color::TextDim);
+                if (seat.mine) {
+                    continue;
+                }
+                const uint64_t player = seat.player;
+                if (room.hosting) {
+                    recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
+                    kick->add_pressed_callback([this, port]() {
+                        conker::lockstep::kick(port);
+                        shown_waiting.clear();
+                        queue_update();
+                    });
+                }
+                recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
+                block->add_pressed_callback([this, player]() {
+                    if (std::find(settings.blocked.begin(), settings.blocked.end(), player) == settings.blocked.end()) {
+                        settings.blocked.push_back(player);
+                        save_settings(settings);
+                    }
+                    conker::lockstep::block(player);
+                    shown_waiting.clear();
+                    queue_update();
+                });
+            }
+            const char* label = room.hosting ? (room.ready ? "Don't start yet" : "Start when everyone's ready") : (room.ready ? "Not ready" : "Ready");
+            recompui::Button* ready = context.create_element<recompui::Button>(waiting_box, label,
+                room.ready ? recompui::ButtonStyle::Secondary : recompui::ButtonStyle::Primary);
+            const bool now_ready = room.ready;
+            ready->add_pressed_callback([this, now_ready]() {
+                conker::lockstep::set_ready(!now_ready);
+                shown_waiting.clear();
+                queue_update();
+            });
+            text(waiting_box, room.hosting ? "The match starts once every place is taken and every player is ready. Kick removes a "
+                "player; Block keeps them out of your matches from now on." :
+                "The match starts once every place is taken and every player is ready (the host too). Block keeps a player "
+                "out of your matches from now on (you leave a room they're in).", Typography::Body, color::TextDim);
         }
 
         // Through the server (hosting a room public if `listed`): false (and says why) if none is set.
@@ -501,6 +619,7 @@ namespace {
             if ((browsing || lan_listening) && state == State::idle) {
                 queue_update();
             }
+            show_waiting();
             if (state == State::connecting) {
                 std::string status;
                 switch (conker::lockstep::poll_connect(status)) {
@@ -555,6 +674,8 @@ namespace {
             status_label = text(status_row, "", Typography::LabelLG);
             cancel_button = context.create_element<recompui::Button>(status_row, "Cancel", recompui::ButtonStyle::Tertiary);
             cancel_button->add_pressed_callback([this]() { on_cancel(); });
+            waiting_box = column(this, 10.0f);
+            waiting_box->set_display(recompui::Display::None);
 
             // Who plays on this computer, hosting or joining.
             recompui::Element* here = column(this, 12.0f);

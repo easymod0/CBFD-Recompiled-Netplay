@@ -482,6 +482,71 @@ namespace conker::netplay {
         return (int)std::count_if(peers.begin(), peers.end(), [](const Peer& p) { return p.port < 0; });
     }
 
+    void Session::set_room_settings(bool own_view, int delay, int rollback) {
+        settings.own_view = own_view ? 1 : 0;
+        settings.delay = delay < 0 ? auto_delay : (uint8_t)std::min(delay, max_delay);
+        settings.rollback = (uint8_t)std::clamp(rollback, 0, max_rollback);
+    }
+
+    void Session::set_ready(bool ready) {
+        if (is_host) {
+            own_ready = ready;
+        }
+        else if (own_ports != 0 && !started && !peers.empty()) {
+            send_to(peers[0].connection, Ready{ (uint8_t)(ready ? 1 : 0) });
+        }
+    }
+
+    bool Session::kick(int port) {
+        if (!is_host || port < 0 || port >= max_players) {
+            return false;
+        }
+        for (Peer& peer : peers) {
+            if (peer.port >= 0 && (peer.ports & (1u << port)) != 0) {
+                drop(peer, Reason::kicked, &pending_events);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    Roster Session::roster() const {
+        if (!is_host) {
+            return host_roster;
+        }
+        Roster r = settings;
+        r.players = (uint8_t)match_players;
+        const auto seat = [&r](uint8_t ports, const Seat& s) {
+            for (int port = 0; port < max_players; port++) {
+                if ((ports & (1u << port)) != 0) r.seats[port] = s;
+            }
+        };
+        seat(own_ports, { hello.player, hello.platform, (uint8_t)(own_ready ? 1 : 0), 0 });
+        for (const Peer& peer : peers) {
+            if (peer.port < 0) continue;
+            SteamNetConnectionRealTimeStatus_t status;
+            uint16_t trip = 0xFFFF;
+            if (SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.connection, &status, 0, nullptr) == k_EResultOK && status.m_nPing >= 0) {
+                trip = (uint16_t)std::min(status.m_nPing, 0xFFFE);
+            }
+            seat(peer.ports, { peer.player, peer.platform, (uint8_t)(peer.ready ? 1 : 0), trip });
+        }
+        return r;
+    }
+
+    bool Session::everyone_ready() const {
+        if (!is_host || !own_ready) {
+            return false;
+        }
+        int taken = std::popcount(own_ports);
+        for (const Peer& peer : peers) {
+            if (peer.port < 0) continue;
+            if (!peer.ready) return false;
+            taken += std::popcount(peer.ports);
+        }
+        return taken == match_players;
+    }
+
     std::string Session::join_code(const std::string& address) const {
         return is_host ? join_code_for(address, hello.key) : std::string();
     }
@@ -577,8 +642,24 @@ namespace conker::netplay {
             }
         }
 
-        // Joiners that never said Hello.
+        // The waiting room's roster, to everyone in: at once when someone comes, goes or gets ready, and every 2 s
+        // for the round trips.
         const double t = now();
+        if (is_host && entry_open) {
+            Roster now_roster = roster();
+            Roster without_trips = now_roster, sent_without = sent_roster;
+            for (int port = 0; port < max_players; port++) {
+                without_trips.seats[port].round_trip_ms = sent_without.seats[port].round_trip_ms = 0;
+            }
+            if (!(without_trips == sent_without) || t >= next_roster) {
+                for (const Peer& peer : peers) {
+                    if (peer.port >= 0) send_to(peer.connection, now_roster);
+                }
+                sent_roster = now_roster;
+                next_roster = t + 2.0;
+            }
+        }
+        // Joiners that never said Hello.
         for (size_t i = 0; i < peers.size();) {
             if (is_host && peers[i].port < 0 && peers[i].up && t - peers[i].connected_at > handshake_seconds) {
                 drop(peers[i], Reason::timeout, &events);
@@ -643,6 +724,8 @@ namespace conker::netplay {
                 else if (theirs->profile != hello.profile) refusal = Reason::profile;
                 else if (theirs->mods != hello.mods) refusal = Reason::mods;
                 else if (!entry_open) refusal = Reason::started;
+                // Kept out (the host's block list): told only that the host removed it.
+                else if (std::find(blocked.begin(), blocked.end(), theirs->player) != blocked.end()) refusal = Reason::kicked;
                 // The lowest free ports, one for each of its players.
                 uint8_t ports = 0;
                 if (!refusal) {
@@ -667,12 +750,23 @@ namespace conker::netplay {
                 }
                 peer.port = std::countr_zero(ports);
                 peer.ports = ports;
+                peer.player = theirs->player;
+                peer.platform = theirs->platform;
                 send_to(peer.connection, Welcome{ ports, (uint8_t)match_players });
                 Event event{ Event::Type::joined };
                 event.port = peer.port;
                 event.ports = ports;
                 event.players = match_players;
                 events.push_back(std::move(event));
+                return;
+            }
+            // Ready, only before the start.
+            if (const Ready* ready = std::get_if<Ready>(&packet)) {
+                if (!entry_open) {
+                    drop(peer, Reason::protocol, &events);
+                    return;
+                }
+                peer.ready = ready->ready != 0;
                 return;
             }
             // Inputs and hashes only once the match has started (before, a player can still leave and
@@ -750,6 +844,19 @@ namespace conker::netplay {
             else {
                 drop(peer, Reason::protocol, &events);
             }
+            return;
+        }
+        if (const Roster* roster = std::get_if<Roster>(&packet)) {
+            // The waiting room's, before the start, with this machine's ports in it.
+            bool mine = true;
+            for (int port = 0; port < max_players; port++) {
+                mine = mine && ((own_ports & (1u << port)) == 0 || roster->seats[port].player == hello.player);
+            }
+            if (started || roster->players != match_players || !mine) {
+                drop(peer, Reason::protocol, &events);
+                return;
+            }
+            host_roster = *roster;
             return;
         }
         if (const Start* start = std::get_if<Start>(&packet)) {

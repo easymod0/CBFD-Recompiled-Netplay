@@ -38,6 +38,7 @@
 #              answering, and the two play on as above
 #   leave-couch the couch match with ports 2 and 3 on a joiner that quits at read 1500: the host plays on, both
 #              ports idle from the same read, and must match a solo replay so
+#   block      a host keeps out a joiner on its block list, and a joiner leaves a host on its own
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
@@ -354,6 +355,17 @@ if finish "was the last: quitting" tall-host tall-join; then
 else
     failed=1
 fi
+
+echo "block"
+# The block list: a host keeps out a joiner on it (told only that the host removed it), and a joiner leaves a
+# host on it. (Every match above went through the waiting room too: from the command line, every copy is ready
+# by itself, and the host starts once all are in.)
+start block-host --netplay-host 27313 --netplay-address 127.0.0.1 --players 2 --netplay-block b10c
+start block-join --netplay-join "$(code_of block-host)" --netplay-player b10c
+finish "the host removed this player" block-join || failed=1
+start block-host2 --netplay-host 27314 --netplay-address 127.0.0.1 --players 2 --netplay-player 4057
+start block-join2 --netplay-join "$(code_of block-host2)" --netplay-block 4057
+finish "is on the block list: leaving" block-join2 || failed=1
 
 echo "desync"
 start desync-host --netplay-host 27312 --netplay-address 127.0.0.1 --players 2 --netplay-desync-at 300
