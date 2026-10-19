@@ -1487,7 +1487,8 @@ namespace {
     // room for this machine's players), or null.
     const conker::netplay::signal::ListedRoom* quick_pick(uint64_t own) {
         for (const conker::netplay::signal::ListedRoom& room : signaller->rooms()) {
-            if (room.room != own && !room.playing && room.players - room.joined >= local_option && !quick_tried.contains(room.room)) {
+            if (room.room != own && !room.playing && room.players - room.joined >= local_option && !quick_tried.contains(room.room) &&
+                std::find(blocked_players.begin(), blocked_players.end(), room.host) == blocked_players.end()) {
                 return &room;
             }
         }
@@ -1980,6 +1981,10 @@ conker::lockstep::Browse conker::lockstep::poll_browse() {
         out.state = Browse::State::listed;
         out.others = browser->others();
         for (const netplay::signal::ListedRoom& room : browser->rooms()) {
+            // Not a blocked player's (its host's id: none from an older server or host).
+            if (room.host != 0 && std::find(blocked_players.begin(), blocked_players.end(), room.host) != blocked_players.end()) {
+                continue;
+            }
             out.rooms.push_back({ netplay::encode_room_code(room.room), netplay::room_name(room.room), room.players, room.joined,
                 room.playing, room.direct, room.rollback });
         }

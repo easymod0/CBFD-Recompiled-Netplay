@@ -435,6 +435,8 @@ namespace {
             }
             else {
                 conker::lockstep::set_server(settings.server, settings.allow_direct);
+                // The block list hides its players' rooms.
+                conker::lockstep::set_identity(settings.player, settings.blocked, false);
                 if (!conker::lockstep::browse(*browse_hello, error)) {
                     rooms_label->set_text("Couldn't get the public rooms: " + error + ".");
                 }

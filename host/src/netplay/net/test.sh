@@ -286,7 +286,7 @@ listed() {
     done
     echo "$name: FAILED (wanted $count, $line)"; cat "$name.txt"; failed=1
 }
-"$probe" host room --players 3 --public 1 --platform 1 --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.host.txt 2>&1 &
+"$probe" host room --players 3 --public 1 --platform 1 --player 10b --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.host.txt 2>&1 &
 lobby_host=$!
 lobby_room=$(room_of lobby.host.txt)
 others=
@@ -297,7 +297,7 @@ others="$others $!"
 "$probe" host room --signal 127.0.0.1:27220 --direct 1 > lobby.private.txt 2>&1 &
 others="$others $!"
 room_of lobby.mods.txt > /dev/null; room_of lobby.mac.txt > /dev/null; room_of lobby.private.txt > /dev/null
-listed lobby-list "rooms 1, others 1" "$lobby_room 1/3 direct rollback 0"
+listed lobby-list "rooms 1, others 1" "$lobby_room 1/3 direct rollback 0 host 000000000000010b$"
 "$probe" host room --public 1 --platform 1 --mods 3 --signal 127.0.0.1:27220 --direct 1 > lobby.capped.txt 2>&1 &
 others="$others $!"
 room_of lobby.capped.txt > /dev/null

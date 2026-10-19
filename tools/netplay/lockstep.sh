@@ -38,7 +38,8 @@
 #              answering, and the two play on as above
 #   leave-couch the couch match with ports 2 and 3 on a joiner that quits at read 1500: the host plays on, both
 #              ports idle from the same read, and must match a solo replay so
-#   block      a host keeps out a joiner on its block list, and a joiner leaves a host on its own
+#   block      a host keeps out a joiner on its block list, and a joiner leaves a host on its own; Quick
+#              Match passes over a public room whose host is on it
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
@@ -366,6 +367,16 @@ finish "the host removed this player" block-join || failed=1
 start block-host2 --netplay-host 27314 --netplay-address 127.0.0.1 --players 2 --netplay-player 4057
 start block-join2 --netplay-join "$(code_of block-host2)" --netplay-block 4057
 finish "is on the block list: leaving" block-join2 || failed=1
+# Quick Match passes over a public room whose host is on its block list (the server says who hosts it), and
+# hosts its own instead.
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27323 > "$OUT/block-server.out" 2>&1 &
+server=$!
+servers="${servers:-} $server"
+start block-public --netplay-host room --netplay-public --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-player 4058
+room_of block-public > /dev/null
+start block-quick --netplay-quick --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-block 4058
+finish "no room to join, so hosting one" block-quick || failed=1
+kill $server 2>/dev/null
 
 echo "desync"
 start desync-host --netplay-host 27312 --netplay-address 127.0.0.1 --players 2 --netplay-desync-at 300

@@ -37,9 +37,9 @@
 
 namespace conker::netplay::signal {
     // Changes whenever any packet's layout or meaning does: a peer with another one is refused.
-    constexpr uint16_t version = 4;
+    constexpr uint16_t version = 5;
     // The oldest version the server still speaks: 2 (no public rooms: Publish, ListRooms and Rooms came with 3;
-    // DesyncReport with 4).
+    // DesyncReport with 4; a listed room's host player id with 5).
     constexpr uint16_t oldest_version = 2;
     // The largest signal GameNetworkingSockets sends (4200 bytes of message data at most, plus its
     // own), with room to spare.
@@ -123,7 +123,9 @@ namespace conker::netplay::signal {
     enum class Platform : uint8_t { gnu_linux = 1, windows, macos, last = macos };   // not "linux": GCC defines it
     // A listed room as everyone sees it: its number (the room code's), its match's players, how many are
     // in (the host's too, 1 to players), whether the match is being played (joining it isn't possible
-    // then), whether its host allows direct connections, and its rollback (packets.hpp: 0 to max_rollback).
+    // then), whether its host allows direct connections, and its rollback (packets.hpp: 0 to max_rollback);
+    // and from version 5, its host's player id (packets.hpp's Hello: for block lists; 0, not known: a host
+    // of an older version), which versions before it don't carry.
     struct ListedRoom {
         uint64_t room = 0;
         uint8_t players = 2;
@@ -131,6 +133,7 @@ namespace conker::netplay::signal {
         bool playing = false;
         bool direct = false;
         uint8_t rollback = 0;
+        uint64_t host = 0;
         bool operator==(const ListedRoom&) const = default;
     };
     // Peer to server, once its room is made: lists it in public, as `room` says (its number is ignored:

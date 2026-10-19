@@ -341,6 +341,7 @@ namespace conker::netplay {
         }
         signal::Publish packet{ fit_of(hello), game_of(hello), platform, room };
         packet.room.room = created_room;
+        packet.room.host = hello.player;
         if (published != packet) {
             published = packet;
             send_now(packet);

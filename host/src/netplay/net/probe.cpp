@@ -45,8 +45,8 @@
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
 // that. `code` prints the join code for an address and key. `list` prints the public rooms a game with
-// those hashes could join ("listed <code> <joined>/<players>", then "playing" and "direct" if so, and
-// "rollback <n>"), then "rooms <count>, others <count>" (those of the same build and ROM with other
+// those hashes could join ("listed <code> <joined>/<players>", then "playing" and "direct" if so,
+// "rollback <n>", and "host <id>" if the server says), then "rooms <count>, others <count>" (those of the same build and ROM with other
 // settings or mods), and exits 0 (1 if it couldn't get them). `lan` listens for beacons for 3 s and prints
 // the matches on this network a game with those hashes could join ("lan <address:port> <join code>
 // <joined>/<players>", then "playing" if so, and "rollback <n>"), then "matches <count>". `desync` sends the
@@ -327,8 +327,10 @@ int main(int argc, char** argv) {
                 signaller.list_rooms(me, platform);
                 if (signaller.has_public_rooms() && wait([&] { return signaller.listing() == Signaller::Lookup::found; })) {
                     for (const signal::ListedRoom& room : signaller.rooms()) {
-                        std::printf("listed %s %d/%d%s%s rollback %d\n", encode_room_code(room.room).c_str(), room.joined, room.players,
+                        std::printf("listed %s %d/%d%s%s rollback %d", encode_room_code(room.room).c_str(), room.joined, room.players,
                             room.playing ? " playing" : "", room.direct ? " direct" : "", room.rollback);
+                        if (room.host != 0) std::printf(" host %016llx", (unsigned long long)room.host);
+                        std::printf("\n");
                     }
                     std::printf("rooms %zu, others %d\n", signaller.rooms().size(), signaller.others());
                     list_result = 0;

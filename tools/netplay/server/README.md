@@ -119,7 +119,8 @@ new kind of packet, for something new the game needs from the server) makes a ne
 and then the server still speaks the older ones (from version 2), each to the games that speak it, and
 keeps them apart: a game finds rooms of its own version only. A game newer than its server speaks the
 server's version instead, and goes without what's newer (public rooms need version 3: on an older
-server, rooms by code still work; desync summaries need version 4). The image is only rebuilt when the
+server, rooms by code still work; desync summaries need version 4, and hiding blocked players' rooms
+version 5, which adds each listed room's host player id). The image is only rebuilt when the
 server's code changes.
 
 ## Desyncs

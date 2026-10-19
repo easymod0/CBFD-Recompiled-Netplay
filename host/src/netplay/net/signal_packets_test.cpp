@@ -59,13 +59,13 @@ int main() {
     CHECK(round_trips(Turn{ std::string(max_text, 'a'), "u", std::string(max_text, '~') }, 8 + 2 * max_text + 1));
 
     const ListedRoom room{ 77, 4, 2, false, true, 8 };
-    CHECK(round_trips(Publish{ 0xABCDull, 0x1234ull, Platform::windows, room }, 34));
-    CHECK(round_trips(Publish{ 1, 1, Platform::last, { 0, 2, 2, true, false, max_rollback } }, 34));
+    CHECK(round_trips(Publish{ 0xABCDull, 0x1234ull, Platform::windows, room }, 42));
+    CHECK(round_trips(Publish{ 1, 1, Platform::last, { 0, 2, 2, true, false, max_rollback, ~0ull } }, 42));
     CHECK(round_trips(ListRooms{ 5, 6, Platform::gnu_linux }, 22));
     CHECK(round_trips(Rooms{}, 8));
     CHECK(round_trips(Rooms{ 65535, {} }, 8));
-    CHECK(round_trips(Rooms{ 3, { room, { max_room, (uint8_t)max_players, 1, true, true, 0 } } }, 8 + 2 * 12));
-    CHECK(round_trips(Rooms{ 0, std::vector<ListedRoom>(max_listed, room) }, 8 + 12 * max_listed));
+    CHECK(round_trips(Rooms{ 3, { room, { max_room, (uint8_t)max_players, 1, true, true, 0, 0x55 } } }, 8 + 2 * 20));
+    CHECK(round_trips(Rooms{ 0, std::vector<ListedRoom>(max_listed, room) }, 8 + 20 * max_listed));
 
     // The layout: "CS", the version, the kind, little-endian fields.
     const std::vector<uint8_t> reg = bytes_of(Register{ 0x0102030405060708ull });
@@ -146,7 +146,7 @@ int main() {
 
     // Listing: the layout, and every field out of range.
     const std::vector<uint8_t> pub = bytes_of(Publish{ 0x0102030405060708ull, 0x1112131415161718ull, Platform::macos, room });
-    CHECK(pub.size() == 34 && pub[4] == 12 && pub[5] == 8 && pub[13] == 0x18 && pub[21] == 3 && pub[22] == 77 && pub[30] == 4 &&
+    CHECK(pub.size() == 42 && pub[4] == 12 && pub[5] == 8 && pub[13] == 0x18 && pub[21] == 3 && pub[22] == 77 && pub[30] == 4 &&
         pub[31] == 2 && pub[32] == 2 && pub[33] == 8);
     CHECK(bytes_of(Publish{ 0, 1, Platform::windows, room }).empty());
     CHECK(bytes_of(Publish{ 1, 0, Platform::windows, room }).empty());
@@ -183,17 +183,29 @@ int main() {
     bad = ask; bad[5] = 0; CHECK(!decodes(bad));
     bad = ask; bad[13] = 0; CHECK(!decodes(bad));
     bad = ask; bad.push_back(0); CHECK(!decodes(bad));
-    const std::vector<uint8_t> list = bytes_of(Rooms{ 0x0102, { room, room } });
-    CHECK(list.size() == 32 && list[4] == 14 && list[5] == 2 && list[6] == 1 && list[7] == 2 && list[8] == 77);
+    ListedRoom hosted = room;
+    hosted.host = 0x1112131415161718ull;
+    const std::vector<uint8_t> list = bytes_of(Rooms{ 0x0102, { room, hosted } });
+    CHECK(list.size() == 48 && list[4] == 14 && list[5] == 2 && list[6] == 1 && list[7] == 2 && list[8] == 77 && list[28] == 77 &&
+        list[40] == 0x18 && list[47] == 0x11);                                                     // the second's host
     bad = list; bad[7] = 3; CHECK(!decodes(bad));                                                  // a count past what follows
     bad = list; bad[7] = 1; CHECK(!decodes(bad));
     bad = list; bad.pop_back(); CHECK(!decodes(bad));
-    bad = list; for (int i = 20; i < 28; i++) bad[i] = 0; CHECK(!decodes(bad));                   // the second's room 0
-    bad = list; bad[25] = 0x10; CHECK(!decodes(bad));                                              // past max_room (byte 5 of 8)
-    bad = list; bad[30] = 8; CHECK(!decodes(bad));                                                 // an unknown flag
+    bad = list; for (int i = 28; i < 36; i++) bad[i] = 0; CHECK(!decodes(bad));                   // the second's room 0
+    bad = list; bad[33] = 0x10; CHECK(!decodes(bad));                                              // past max_room (byte 5 of 8)
+    bad = list; bad[38] = 8; CHECK(!decodes(bad));                                                 // an unknown flag
     bad = { 'C', 'S', (uint8_t)version, (uint8_t)(version >> 8), 14, 0 }; CHECK(!decodes(bad));
     bad = bytes_of(Rooms{ 0, std::vector<ListedRoom>(max_listed, room) }); bad[7] = max_listed + 1;
-    bad.insert(bad.end(), list.begin() + 8, list.begin() + 20); CHECK(!decodes(bad));
+    bad.insert(bad.end(), list.begin() + 8, list.begin() + 28); CHECK(!decodes(bad));
+    // Versions 3 and 4: rooms of 12 bytes, without the host (it's dropped going to them).
+    for (uint16_t as : { (uint16_t)3, (uint16_t)4 }) {
+        uint8_t buffer[max_packet_size];
+        const size_t size = encode(Rooms{ 0x0102, { room, hosted } }, buffer, as);
+        CHECK(size == 8 + 2 * 12);
+        const std::optional<Packet> back = decode({ buffer, size }, as);
+        CHECK(back && std::get<Rooms>(*back).rooms[1].host == 0 && std::get<Rooms>(*back).rooms[1].room == 77);
+        CHECK(encode(Publish{ 1, 1, Platform::windows, hosted }, buffer, as) == 34);
+    }
 
     // Older versions: the same kinds as they were, but none that came later; a version not spoken is refused.
     {
