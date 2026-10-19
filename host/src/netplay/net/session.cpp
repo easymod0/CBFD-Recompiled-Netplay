@@ -1084,7 +1084,7 @@ namespace conker::netplay {
             set_send_rate(peer.connection, true);
             peer.sending_state = true;
             for (size_t offset = 0; offset < state.size(); offset += max_state_part) {
-                const size_t count = std::min(max_state_part, state.size() - offset);
+                const size_t count = (std::min)(max_state_part, state.size() - offset);
                 send_to(peer.connection, StatePart{ read, (uint32_t)state.size(), (uint32_t)offset, hash,
                     std::vector<uint8_t>(state.begin() + offset, state.begin() + offset + count) });
             }
