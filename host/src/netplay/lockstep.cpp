@@ -491,6 +491,37 @@ namespace {
         return path_text(path);
     }
 
+    // Through a room: tells the netplay server this match desynced, in a summary for its operator (the build,
+    // this machine's platform, the read and the regions; no address, memory or inputs). The full report stays
+    // here.
+    void report_to_server(int port, uint32_t read, const std::vector<int>& regions) {
+        if (signaller == nullptr || session == nullptr || own_ports == 0) {
+            return;
+        }
+        // The match's key, which every player has, made into a tag that tells this match's reports from
+        // another's (and can't be turned back into the key).
+        uint64_t key = session->hosting() ? session->key() : signaller->found().key;
+        key = (key ^ (key >> 33)) * 0xFF51AFD7ED558CCDull;
+        key = (key ^ (key >> 33)) * 0xC4CEB9FE1A85EC53ull;
+        conker::netplay::signal::DesyncReport summary;
+        summary.match = (uint32_t)(key ^ (key >> 32)) | 1;
+        summary.build = sent.build != 0 ? sent.build : 1;
+        summary.platform = conker::netplay::this_platform();
+        summary.players = (uint8_t)match_players;
+        summary.port = (uint8_t)std::countr_zero(own_ports);
+        summary.other = (uint8_t)port;
+        summary.read = read;
+        summary.rollback = (uint8_t)rollback_option;
+        summary.delay = (uint8_t)delay;
+        for (const int region : regions) {
+            summary.regions[region / 8] |= (uint8_t)(1u << (region % 8));
+        }
+        if (signaller->has_desync_reports()) {
+            signaller->report_desync(summary);
+            std::printf("[netplay] a summary of the desync was sent to the netplay server (no addresses, memory or inputs)\n");
+        }
+    }
+
     // The game's memory at `read` isn't `port`'s: says where, writes the report, and ends the match.
     void desync(int port, uint32_t read, const OwnHash& own, const Hash& theirs) {
         const std::vector<int> regions = differing_regions(own, theirs);
@@ -503,6 +534,7 @@ namespace {
             read, port + 1, (unsigned long long)theirs.hash, (unsigned long long)own.hash,
             regions.empty() ? "no region the region hashes tell apart" : ((regions.size() == 1 ? "region " : "regions ") + where).c_str());
         const std::string report = write_report(port, read, own, theirs, regions);
+        report_to_server(port, read, regions);
         std::string why = "the games went different ways (a desync)";
         if (!report.empty()) {
             why += ". A report is in " + report + ": please send it, with the other players' reports, when you report the problem";

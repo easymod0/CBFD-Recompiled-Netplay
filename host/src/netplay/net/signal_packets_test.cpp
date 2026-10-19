@@ -220,6 +220,35 @@ int main() {
         CHECK(spoken_version(ancient) == 0);
     }
 
+    // A desync summary (version 4): its layout, every field out of range, and none in version 3.
+    {
+        DesyncReport report{ 0xA1B2C3D4u, 0x0102030405060708ull, Platform::windows, 3, 1, 0, 300, 8, 2, {} };
+        report.regions[8] = 1;   // region 64
+        CHECK(round_trips(report, 43));
+        const std::vector<uint8_t> d = bytes_of(report);
+        CHECK(d[4] == 15 && d[5] == 0xD4 && d[9] == 8 && d[17] == 2 && d[18] == 3 && d[19] == 1 && d[20] == 0 && d[21] == 44 &&
+            d[22] == 1 && d[25] == 8 && d[26] == 2 && d[27 + 8] == 1);
+        uint8_t buffer[max_packet_size];
+        CHECK(encode(report, buffer, 3) == 0);
+        bad = d; bad[2] = 3; CHECK(!decode(bad, 3));
+        DesyncReport r = report; r.match = 0; CHECK(bytes_of(r).empty());
+        r = report; r.build = 0; CHECK(bytes_of(r).empty());
+        r = report; r.platform = (Platform)0; CHECK(bytes_of(r).empty());
+        r = report; r.players = 1; r.port = 0; r.other = 0; CHECK(bytes_of(r).empty());
+        r = report; r.players = max_players + 1; CHECK(bytes_of(r).empty());
+        r = report; r.port = 3; CHECK(bytes_of(r).empty());                  // past players
+        r = report; r.other = 1; CHECK(bytes_of(r).empty());                 // itself
+        r = report; r.rollback = max_rollback + 1; CHECK(bytes_of(r).empty());
+        r = report; r.delay = conker::netplay::max_delay + 1; CHECK(bytes_of(r).empty());
+        bad = d; bad[18] = 1; CHECK(!decodes(bad));
+        bad = d; bad[19] = 3; CHECK(!decodes(bad));
+        bad = d; bad[20] = 1; CHECK(!decodes(bad));
+        bad = d; bad[25] = max_rollback + 1; CHECK(!decodes(bad));
+        bad = d; bad[26] = conker::netplay::max_delay + 1; CHECK(!decodes(bad));
+        bad = d; bad.push_back(0); CHECK(!decodes(bad));
+        bad = d; bad.pop_back(); CHECK(!decodes(bad));
+    }
+
     if (failures == 0) {
         std::printf("signal_packets_test: all passed\n");
     }

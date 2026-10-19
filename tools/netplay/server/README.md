@@ -119,7 +119,22 @@ new kind of packet, for something new the game needs from the server) makes a ne
 and then the server still speaks the older ones (from version 2), each to the games that speak it, and
 keeps them apart: a game finds rooms of its own version only. A game newer than its server speaks the
 server's version instead, and goes without what's newer (public rooms need version 3: on an older
-server, rooms by code still work). The image is only rebuilt when the server's code changes.
+server, rooms by code still work; desync summaries need version 4). The image is only rebuilt when the
+server's code changes.
+
+## Desyncs
+
+When a match through a room desyncs (the players' games went different ways), each player whose game
+found it sends the server a short summary, which it logs, at most 4 from each connection:
+
+    netplay_server: desync: match 1a2b3c4d, build 5e6f..., Windows, 2 players, port 2 against port 1, read 4512, regions 64,65, rollback 8, delay 2
+
+`match` tells one match's summaries from another's (made from its key, which it can't be turned back
+into); `build` is the game's build hash (the release); the regions are the 64 KB parts of game memory
+that differed. No addresses, memory or inputs: the full reports stay on the players' machines
+(`netplay-desyncs/` in the config folder), for them to send when they report the problem. The 10-minute
+count line says how many came in. Matches by join code or on a LAN don't go through the server, so they
+send nothing.
 
 ## What's limited
 

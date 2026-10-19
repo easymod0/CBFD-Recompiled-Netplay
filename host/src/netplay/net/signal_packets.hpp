@@ -16,6 +16,9 @@
 // and how many more there are of the same game (build and ROM: another hash) with other settings or mods. A listed room
 // has no name on the wire: the game makes one from its number (join_code.hpp: room_name).
 //
+// And a player whose game went another way than another's (a desync) may tell the server, which logs it
+// for its operator (DesyncReport): a summary, with no address, memory or inputs in it.
+//
 // The layout, little-endian: "CS", u16 version, u8 kind, then the kind's fields (see signal_packets.cpp).
 // New kinds come with a new version, which leaves the older kinds as they were: so the server still speaks
 // the older versions it can (oldest_version on), each to the peers that speak it, and keeps them apart (a
@@ -23,6 +26,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -33,8 +37,9 @@
 
 namespace conker::netplay::signal {
     // Changes whenever any packet's layout or meaning does: a peer with another one is refused.
-    constexpr uint16_t version = 3;
-    // The oldest version the server still speaks: 2 (no public rooms: Publish, ListRooms and Rooms came with 3).
+    constexpr uint16_t version = 4;
+    // The oldest version the server still speaks: 2 (no public rooms: Publish, ListRooms and Rooms came with 3;
+    // DesyncReport with 4).
     constexpr uint16_t oldest_version = 2;
     // The largest signal GameNetworkingSockets sends (4200 bytes of message data at most, plus its
     // own), with room to spare.
@@ -154,8 +159,28 @@ namespace conker::netplay::signal {
         bool operator==(const Rooms&) const = default;
     };
 
+    // Peer to server, once registered: its game's memory at `read` wasn't `other`'s (port), in the regions set
+    // in `regions` (bit n of byte n / 8: region n of packets.hpp's memory_regions). `match` (not 0) tells one
+    // match's reports from another's (made from its key: it can't be turned back into it); `build` (not 0)
+    // is the game's build hash; `port` is the reporting machine's first; `players` 2 to max_players, ports
+    // below it and apart; `rollback` 0 to max_rollback, `delay` 0 to max_delay. A few each connection.
+    struct DesyncReport {
+        uint32_t match = 0;
+        uint64_t build = 0;
+        Platform platform = Platform::gnu_linux;
+        uint8_t players = 2;
+        uint8_t port = 0;
+        uint8_t other = 1;
+        uint32_t read = 0;
+        uint8_t rollback = 0;
+        uint8_t delay = 0;
+        std::array<uint8_t, 16> regions{};
+        bool operator==(const DesyncReport&) const = default;
+    };
+
+    // In the kinds' order (a kind's number is its index here, plus 1).
     using Packet = std::variant<Register, Signal, Unreachable, Refused, Registered, CreateRoom, RoomCreated, FindRoom,
-        RoomFound, NoRoom, Turn, Publish, ListRooms, Rooms>;
+        RoomFound, NoRoom, Turn, Publish, ListRooms, Rooms, DesyncReport>;
 
     // The packet's bytes into `out` (max_packet_size), as version `as` (oldest_version to version) has it:
     // their size, or 0 for a packet that isn't valid (or a kind `as` hasn't).

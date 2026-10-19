@@ -129,6 +129,11 @@ namespace conker::netplay {
         // down to signal::oldest_version, doing without what came later. Whether the server has public rooms
         // (publish and list_rooms; version 3), once ready.
         bool has_public_rooms() const { return speaks >= 3; }
+        // Whether the server takes desync summaries (report_desync; version 4), once ready.
+        bool has_desync_reports() const { return speaks >= 4; }
+        // Once ready: tells the server this match desynced (it logs a summary for its operator; a few each
+        // connection). Nothing if the server is older.
+        void report_desync(const signal::DesyncReport& report);
 
         // Closes the connection.
         void close();

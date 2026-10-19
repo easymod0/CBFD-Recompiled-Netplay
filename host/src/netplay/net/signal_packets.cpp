@@ -16,10 +16,13 @@
 //  12 Publish      u64 fit, u64 game (neither 0), u8 platform (1 to Platform::last), a room   34 bytes
 //  13 ListRooms    u64 fit, u64 game (neither 0), u8 platform (1 to Platform::last)          22 bytes
 //  14 Rooms        u16 others, u8 count (0 to max_listed), count rooms          8 + 12 * count bytes
+//  15 DesyncReport u32 match, u64 build (neither 0), u8 platform, u8 players (2 to max_players), u8 port,
+//                  u8 other (each below players, not the same), u32 read, u8 rollback (0 to max_rollback),
+//                  u8 delay (0 to max_delay), 16 bytes of regions                                    43 bytes
 // A room (ListedRoom): u64 room (1 to max_room; Publish's 0 or any), u8 players (2 to max_players),
 // u8 joined (1 to players), u8 flags (bit 0 playing, bit 1 direct; the others 0), u8 rollback (0 to
 // max_rollback).
-// Kinds 12 to 14 came with version 3; version 2 has the others, as they are here. A packet of any other
+// Kinds 12 to 14 came with version 3, and 15 with 4; version 2 has the others, as they are here. A packet of any other
 // size, version or kind (or a kind its version hasn't), or with any field out of range, is refused.
 
 #include "signal_packets.hpp"
@@ -31,29 +34,36 @@
 namespace conker::netplay::signal {
     namespace {
         enum Kind : uint8_t { register_ = 1, signal, unreachable, refused, registered, create_room, room_created, find_room,
-            room_found, no_room, turn, publish, list_rooms, rooms };
+            room_found, no_room, turn, publish, list_rooms, rooms, desync_report };
         constexpr size_t header_size = 5;
         constexpr size_t room_size = 12;
         // The version a kind came with.
-        uint16_t since(uint8_t kind) { return kind >= publish ? 3 : 2; }
+        uint16_t since(uint8_t kind) { return kind >= desync_report ? 4 : kind >= publish ? 3 : 2; }
         bool spoken(uint16_t as) { return as >= oldest_version && as <= version; }
 
         struct Writer {
             uint8_t* p;
             void u8(uint8_t v) { *p++ = v; }
             void u16(uint16_t v) { u8((uint8_t)v); u8((uint8_t)(v >> 8)); }
+            void u32(uint32_t v) { u16((uint16_t)v); u16((uint16_t)(v >> 16)); }
             void u64(uint64_t v) { for (int i = 0; i < 8; i++) u8((uint8_t)(v >> (8 * i))); }
         };
         struct Reader {
             const uint8_t* p;
             uint8_t u8() { return *p++; }
             uint16_t u16() { const uint16_t v = (uint16_t)(p[0] | (p[1] << 8)); p += 2; return v; }
+            uint32_t u32() { const uint32_t lo = u16(); return lo | ((uint32_t)u16() << 16); }
             uint64_t u64() { uint64_t v = 0; for (int i = 0; i < 8; i++) v |= (uint64_t)p[i] << (8 * i); p += 8; return v; }
         };
 
         bool valid_id(uint64_t id) { return id != 0; }
         bool valid_room(uint64_t room) { return room != 0 && room <= max_room; }
         bool valid_platform(Platform platform) { return (uint8_t)platform >= 1 && platform <= Platform::last; }
+        // A desync report's fields.
+        bool valid_report(const DesyncReport& d) {
+            return d.match != 0 && d.build != 0 && valid_platform(d.platform) && d.players >= 2 && d.players <= max_players &&
+                d.port < d.players && d.other < d.players && d.port != d.other && d.rollback <= max_rollback && d.delay <= max_delay;
+        }
         // A listed room's fields but its number (Publish's is the server's to fill in).
         bool valid_listing(const ListedRoom& room) {
             return room.players >= 2 && room.players <= max_players && room.joined >= 1 && room.joined <= room.players &&
@@ -86,8 +96,8 @@ namespace conker::netplay::signal {
     }
 
     size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out, uint16_t as) {
-        // Publish, ListRooms and Rooms (the variant's last three) came with version 3.
-        if (!spoken(as) || (packet.index() >= std::variant_size_v<Packet> - 3 && as < since(publish))) {
+        // A kind's number is its index in Packet, plus 1: kinds newer than `as` aren't in it.
+        if (!spoken(as) || as < since((uint8_t)(packet.index() + 1))) {
             return 0;
         }
         Writer w{ out.data() };
@@ -138,6 +148,20 @@ namespace conker::netplay::signal {
             w.u64(p->game);
             w.u8((uint8_t)p->platform);
             write_room(w, p->room);
+        }
+        else if (const DesyncReport* p = std::get_if<DesyncReport>(&packet)) {
+            if (!valid_report(*p)) return 0;
+            w.u8(desync_report);
+            w.u32(p->match);
+            w.u64(p->build);
+            w.u8((uint8_t)p->platform);
+            w.u8(p->players);
+            w.u8(p->port);
+            w.u8(p->other);
+            w.u32(p->read);
+            w.u8(p->rollback);
+            w.u8(p->delay);
+            for (uint8_t b : p->regions) w.u8(b);
         }
         else if (const ListRooms* p = std::get_if<ListRooms>(&packet)) {
             if (p->fit == 0 || p->game == 0 || !valid_platform(p->platform)) return 0;
@@ -246,6 +270,22 @@ namespace conker::netplay::signal {
                 p.game = r.u64();
                 p.platform = (Platform)r.u8();
                 if (p.fit == 0 || p.game == 0 || !valid_platform(p.platform)) return std::nullopt;
+                return p;
+            }
+            case desync_report: {
+                if (size != 38) return std::nullopt;
+                DesyncReport p;
+                p.match = r.u32();
+                p.build = r.u64();
+                p.platform = (Platform)r.u8();
+                p.players = r.u8();
+                p.port = r.u8();
+                p.other = r.u8();
+                p.read = r.u32();
+                p.rollback = r.u8();
+                p.delay = r.u8();
+                for (uint8_t& b : p.regions) b = r.u8();
+                if (!valid_report(p)) return std::nullopt;
                 return p;
             }
             case rooms: {

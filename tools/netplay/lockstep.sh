@@ -41,6 +41,7 @@
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
+#   desync-room the same through a room: the netplay server must log a summary of it (region 64)
 # --match-options gives every copy in a match those options too, and --host-options every hosting copy, e.g.
 # --host-options "--rollback 8" --match-options "--netplay-fake-network lag=40" (rollback, issue #22, is the
 # host's choice: every run must still come out the same).
@@ -388,6 +389,24 @@ if finish "the netplay match is over" desync-host desync-join; then
 else
     failed=1
 fi
+
+echo "desync-room"
+# The same through a room: the netplay server logs a summary of it (the regions; no addresses).
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27322 > "$OUT/desync-server.out" 2>&1 &
+server=$!
+room="--netplay-server 127.0.0.1:27322 --netplay-direct"
+# shellcheck disable=SC2086
+start desync-room-host --netplay-host room $room --players 2 --netplay-desync-at 300
+# shellcheck disable=SC2086
+start desync-room-join --netplay-join "$(room_of desync-room-host)" $room
+if finish "the netplay match is over" desync-room-host desync-room-join &&
+    grep -q "^netplay_server: desync: match [0-9a-f]*, build [0-9a-f]*, [A-Za-z]*, 2 players, port [12] against port [12], read 3[0-9][0-9], regions 64," "$OUT/desync-server.out"; then
+    echo "  $(grep -m1 "desync: match" "$OUT/desync-server.out")"
+else
+    echo "  desync-room: FAILED (the server logged no summary: desync-server.out)"
+    failed=1
+fi
+kill $server 2>/dev/null
 
 if [ $failed -ne 0 ]; then
     echo "logs: $OUT"

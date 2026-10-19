@@ -27,6 +27,10 @@
 // closed, and any after 12 hours. Anything broken or past a limit closes the connection, after Refused. It
 // logs counts, never addresses, codes or signals.
 //
+// A peer whose match desynced may send a summary of it (DesyncReport: the build, its platform, the read,
+// the regions of memory that differed; no address, memory or inputs), which it logs, up to 4 from each
+// connection, for its operator to see desyncs happen.
+//
 // It speaks every signalling version from signal::oldest_version on, each peer in the one its first packet
 // has (a version without public rooms just can't use them), and keeps the versions apart: a peer only
 // reaches the peers of its own, and only finds their rooms.
@@ -54,6 +58,7 @@
 #include <steam/steamnetworkingsockets.h>
 
 #include "join_code.hpp"
+#include "packets.hpp"
 #include "signal_packets.hpp"
 #include "turn_credentials.hpp"
 
@@ -75,6 +80,7 @@ namespace {
     constexpr double idle_seconds = 600.0;
     constexpr double max_seconds = 12 * 3600.0;
     // Room lists: each looks at every listed room.
+    constexpr int max_desync_reports = 4;
     constexpr double lists_per_second = 1.0 / 3.0;
     constexpr double list_burst = 6.0;
 
@@ -130,6 +136,7 @@ namespace {
         Bucket packets;
         uint64_t room = 0;         // the room it hosts, if any
         uint64_t room_key = 0;
+        int desync_reports = 0;    // DesyncReports taken from it
         bool listed = false;       // its room is in the public list (Publish), as `listing` says
         signal::Publish listing;
         double listed_at = 0;
@@ -169,6 +176,7 @@ namespace {
         uint64_t rooms_found = 0;
         uint64_t rooms_missed = 0;
         uint64_t lists_sent = 0;
+        uint64_t desyncs_reported = 0;
 
         // In the peer's version (the newest, before it's said).
         void send(HSteamNetConnection connection, const signal::Packet& packet) {
@@ -361,6 +369,26 @@ namespace {
                 peer.listing = *p;
                 peer.listing.room.room = peer.room;
             }
+            else if (const signal::DesyncReport* d = std::get_if<signal::DesyncReport>(&*packet)) {
+                // A few each: more are ignored (the log isn't to be filled).
+                if (++peer.desync_reports > max_desync_reports) {
+                    return;
+                }
+                desyncs_reported++;
+                std::string regions;
+                int count = 0;
+                for (int region = 0; region < memory_regions; region++) {
+                    if ((d->regions[region / 8] & (1u << (region % 8))) != 0 && count++ < 16) {
+                        regions += (regions.empty() ? "" : ",") + std::to_string(region);
+                    }
+                }
+                if (count > 16) regions += " and " + std::to_string(count - 16) + " more";
+                static const char* const platforms[] = { "?", "Linux", "Windows", "macOS" };
+                std::printf("netplay_server: desync: match %08x, build %016llx, %s, %d players, port %d against port %d, read %u, "
+                            "regions %s, rollback %d, delay %d\n", d->match, (unsigned long long)d->build, platforms[(int)d->platform],
+                    d->players, d->port + 1, d->other + 1, d->read, regions.empty() ? "none told apart" : regions.c_str(), d->rollback, d->delay);
+                std::fflush(stdout);
+            }
             else if (const signal::ListRooms* l = std::get_if<signal::ListRooms>(&*packet)) {
                 if (!peer.lists.take(t, lists_per_second, list_burst)) {
                     refuse(connection, signal::Refusal::busy);
@@ -532,9 +560,10 @@ int main(int argc, char** argv) {
         }
         if (now() >= next_report) {
             const size_t listed = (size_t)std::count_if(state.peers.begin(), state.peers.end(), [](const auto& p) { return p.second.listed; });
-            std::printf("netplay_server: %zu peers, %zu rooms (%zu listed); %llu signals passed, rooms %llu created, %llu found, %llu missed; %llu lists\n",
+            std::printf("netplay_server: %zu peers, %zu rooms (%zu listed); %llu signals passed, rooms %llu created, %llu found, %llu missed; %llu lists; %llu desyncs reported\n",
                 state.peers.size(), state.rooms.size(), listed, (unsigned long long)state.signals_passed, (unsigned long long)state.rooms_created,
-                (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed, (unsigned long long)state.lists_sent);
+                (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed, (unsigned long long)state.lists_sent,
+                (unsigned long long)state.desyncs_reported);
             std::fflush(stdout);
             next_report = now() + 600;
         }
