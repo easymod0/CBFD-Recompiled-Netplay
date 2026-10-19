@@ -516,8 +516,7 @@ namespace {
         for (const int region : regions) {
             summary.regions[region / 8] |= (uint8_t)(1u << (region % 8));
         }
-        if (signaller->has_desync_reports()) {
-            signaller->report_desync(summary);
+        if (signaller->report_desync(summary)) {
             std::printf("[netplay] a summary of the desync was sent to the netplay server (no addresses, memory or inputs)\n");
         }
     }
@@ -1518,7 +1517,7 @@ namespace {
                     return host_here(status);
                 }
                 if (quick_option && quick_target != 0) {
-                    return quick_join(quick_target, "the older room", status);
+                    return quick_join(quick_target, conker::netplay::room_name(quick_target), status);
                 }
                 if (quick_option) {
                     if (!signaller->has_public_rooms()) {
@@ -1569,6 +1568,12 @@ namespace {
                 if (!session->join(*signaller, signaller->ice(!direct_option), signaller->found().host, signaller->found().key, mine, error)) {
                     delete session;
                     session = nullptr;
+                    if (quick_option) {
+                        std::printf("[netplay] Quick Match: couldn't join %s: %s\n", join_where.c_str(), error.c_str());
+                        quick_list();
+                        status = "Quick Match: looking for another room...";
+                        return Progress::waiting;
+                    }
                     return fail("Couldn't join: " + error + ".");
                 }
                 rendezvous = Rendezvous::none;
@@ -1693,7 +1698,7 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         // Someone's in: a list asked for before is out of date.
         quick_asked = false;
     }
-    if (quick_option && hosting && rendezvous == Rendezvous::none && joined == local_option && signaller != nullptr &&
+    if (quick_option && hosting && rendezvous == Rendezvous::none && joined == local_option && session->arriving() == 0 && signaller != nullptr &&
         signaller->state() == netplay::Signaller::State::ready && signaller->room() != 0) {
         if (quick_asked && signaller->listing() == netplay::Signaller::Lookup::found) {
             quick_asked = false;

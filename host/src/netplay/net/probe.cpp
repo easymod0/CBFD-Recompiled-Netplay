@@ -10,6 +10,7 @@
 //   netplay_probe join <room code> --signal <server:port> [--direct 1] [options]
 //   netplay_probe list --signal <server:port> [--build/--rom/--profile/--mods <hex>] [--platform <n>]
 //   netplay_probe lan [--lan-port 27016] [--build/--rom/--profile/--mods <hex>] [--platform <n>]
+//   netplay_probe desync --signal <server:port> [--count 1]
 //     --reads <n>        how many reads each peer sends (300: 10 s)
 //     --local <n>        players on this peer, each with a port (1 by default)
 //     --loss <percent>   the library drops this share of the packets sent (they're resent)
@@ -33,6 +34,8 @@
 //     --speak <version>  (a test, with --signal) speak this older signalling version, as an older game does
 //     --lan 1            (hosting on a port) broadcast a beacon on this network once a second (lan.hpp)
 //     --lan-port <port>  the port beacons go to (lan::default_port)
+//     --lan-loopback 0   (a test, with --lan 1) broadcast only: not also to this machine
+//     --count <n>        (desync) how many summaries to send
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
@@ -41,7 +44,8 @@
 // "rollback <n>"), then "rooms <count>, others <count>" (those of the same build and ROM with other
 // settings or mods), and exits 0 (1 if it couldn't get them). `lan` listens for beacons for 3 s and prints
 // the matches on this network a game with those hashes could join ("lan <address:port> <join code>
-// <joined>/<players>", then "playing" if so, and "rollback <n>"), then "matches <count>".
+// <joined>/<players>", then "playing" if so, and "rollback <n>"), then "matches <count>". `desync` sends the
+// server that many made-up desync summaries (as a player whose match desynced would) and prints "sent <n>".
 
 #include <bit>
 #include <chrono>
@@ -93,7 +97,8 @@ namespace {
                              "       [--reads 300] [--loss <percent>] [--build <hex>] [--rom <hex>] [--profile <hex>] [--mods <hex>]\n"
                              "       netplay_probe code <address:port> <key, hex>\n"
                              "       netplay_probe list --signal <server:port> [--build/--rom/--profile/--mods <hex>] [--platform <n>]\n"
-                             "       netplay_probe lan [--lan-port 27016] [--build/--rom/--profile/--mods <hex>] [--platform <n>]\n");
+                             "       netplay_probe lan [--lan-port 27016] [--build/--rom/--profile/--mods <hex>] [--platform <n>]\n"
+                             "       netplay_probe desync --signal <server:port> [--count 1]\n");
         return 2;
     }
 
@@ -161,7 +166,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     const bool lan_listing = argc >= 2 && std::strcmp(argv[1], "lan") == 0;
-    const bool listing = lan_listing || (argc >= 2 && std::strcmp(argv[1], "list") == 0);
+    const bool reporting = argc >= 2 && std::strcmp(argv[1], "desync") == 0;
+    const bool listing = lan_listing || reporting || (argc >= 2 && std::strcmp(argv[1], "list") == 0);
     if (!listing && (argc < 3 || (std::strcmp(argv[1], "host") != 0 && std::strcmp(argv[1], "join") != 0))) {
         return usage();
     }
@@ -180,6 +186,8 @@ int main(int argc, char** argv) {
     bool again = false;
     bool listed = false;
     bool lan_visible = false;
+    bool lan_loopback = true;
+    int count = 1;
     uint16_t lan_port = lan::default_port;
     signal::Platform platform = this_platform();
     uint16_t speaks = signal::version;
@@ -205,9 +213,12 @@ int main(int argc, char** argv) {
         else if (option == "--speak") speaks = (uint16_t)std::atoi(value);
         else if (option == "--lan") lan_visible = std::atoi(value) != 0;
         else if (option == "--lan-port") lan_port = (uint16_t)std::atoi(value);
+        else if (option == "--lan-loopback") lan_loopback = std::atoi(value) != 0;
+        else if (option == "--count") count = std::atoi(value);
         else return usage();
     }
     if ((uint8_t)platform < 1 || platform > signal::Platform::last || (listing && !lan_listing && signal_server.empty()) || lan_port == 0 ||
+        (lan_listing && !signal_server.empty()) || (lan_visible && !signal_server.empty()) || count < 1 ||
         speaks < signal::oldest_version || speaks > signal::version) {
         return usage();
     }
@@ -250,6 +261,35 @@ int main(int argc, char** argv) {
         std::printf("matches %zu\n", matches.size());
         shutdown();
         return 0;
+    }
+    if (reporting) {
+        int report_result = 1;
+        {
+            Signaller signaller;
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            while (signaller.state() != Signaller::State::ready && signaller.state() != Signaller::State::failed &&
+                std::chrono::steady_clock::now() < until) {
+                if (signaller.state() == Signaller::State::idle && !signaller.connect(signal_server, error)) break;
+                signaller.poll();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            int sent = 0;
+            signal::DesyncReport report{ 0x5EED1234u, 0x0123456789ABCDEFull, platform, 2, 1, 0, 300, 0, 2, {} };
+            report.regions[8] = 1;   // region 64
+            for (int i = 0; i < count && signaller.state() == Signaller::State::ready; i++) {
+                sent += signaller.report_desync(report) ? 1 : 0;
+                report.read += 30;
+            }
+            // A moment for them to go out, before goodbye.
+            for (int i = 0; i < 100; i++) {
+                signaller.poll();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            std::printf("sent %d\n", sent);
+            report_result = sent == count ? 0 : 1;
+        }
+        shutdown();
+        return report_result;
     }
     if (listing) {
         int list_result = 1;
@@ -384,6 +424,7 @@ int main(int argc, char** argv) {
             list_room();
             // Visible on this network: a beacon each second.
             LanBeacon beacon;
+            beacon.send_to_this_machine(lan_loopback);
             if (lan_visible && hosting && signal_server.empty() && !beacon.open(lan_port, error)) {
                 std::fprintf(stderr, "LAN: %s\n", error.c_str());
             }

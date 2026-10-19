@@ -152,6 +152,7 @@ echo "quick"
 # A server of their own (finish stops the room case's with its copies).
 "$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27321 > "$OUT/quick-server.out" 2>&1 &
 server=$!
+servers="${servers:-} $server"     # stopped by cleanup too, if this ends early
 room="--netplay-server 127.0.0.1:27321 --netplay-direct"
 # shellcheck disable=SC2086
 pads=1.pads start quick-host --netplay-host room --netplay-public $room --players 2 --input-delay 2
@@ -168,8 +169,7 @@ fi
 
 echo "quick-meet"
 # Both at once: each may host (the list was empty for both), then the newer room's host leaves it for the
-# older. Which machine hosts isn't known, so they're checked against each other (the match's hash
-# comparisons), not solo.
+# older. Which machine hosts isn't known, so they're checked against each other (their hash logs), not solo.
 # shellcheck disable=SC2086
 pads=1.pads start meet-a --netplay-quick $room --players 2
 # shellcheck disable=SC2086
@@ -177,7 +177,8 @@ pads=2.pads start meet-b --netplay-quick $room --players 2
 # If both hosted (both lists were empty), one must have left its room for the older one's.
 if finish "was the last: quitting" meet-a meet-b && both_hosted=$(cat "$OUT/meet-a.out" "$OUT/meet-b.out" | grep -c "no room to join, so hosting one" || true) &&
     grep -q "the match starts" "$OUT/meet-a.out" &&
-    grep -q "the match starts" "$OUT/meet-b.out" && ! grep -qi "desync" "$OUT/meet-a.out" "$OUT/meet-b.out" &&
+    grep -q "the match starts" "$OUT/meet-b.out" && ! grep -q "\[netplay\] desync at read" "$OUT/meet-a.out" "$OUT/meet-b.out" &&
+    same meet-b meet-a &&
     { [ "$both_hosted" -lt 2 ] || grep -q "is older, so leaving" "$OUT/meet-a.out" "$OUT/meet-b.out"; }; then
     grep -h "Quick Match" "$OUT/meet-a.out" "$OUT/meet-b.out" | sed 's/^/  /'
 else
@@ -394,6 +395,7 @@ echo "desync-room"
 # The same through a room: the netplay server logs a summary of it (the regions; no addresses).
 "$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27322 > "$OUT/desync-server.out" 2>&1 &
 server=$!
+servers="${servers:-} $server"
 room="--netplay-server 127.0.0.1:27322 --netplay-direct"
 # shellcheck disable=SC2086
 start desync-room-host --netplay-host room $room --players 2 --netplay-desync-at 300

@@ -4,9 +4,13 @@
 // reaches one of the games listening on it there); a
 // player looking for matches listens there and lists the ones that fit its game (the same fit, platforms that play together). Joining one is joining by
 // its join code, made from the beacon's sender, port and key: no server, no code to pass on. Anyone on the
-// network can join such a match (the key is in the beacon), so a host only broadcasts if it chose to. A
-// match keeps the address it was first heard from (a beacon copied from another address doesn't move it),
-// and the listener keeps only matches for its own game.
+// network can join such a match (the key is in the beacon), so a host only broadcasts if it chose to.
+//
+// It's for a network whose machines are trusted, like a home or a LAN party: anyone on it can copy a
+// beacon. The listener keeps only its own game's matches, at most 2 from each address, and a match keeps
+// the address it was first heard from (a copy sent from elsewhere later doesn't move it); but a machine
+// that copies a beacon before the real one is heard, or floods made-up ones from many addresses, can still
+// mislead it.
 //
 // Plain UDP sockets, apart from GameNetworkingSockets (the library has no broadcasts), non-blocking.
 // Single-threaded: poll from one thread.
@@ -35,10 +39,13 @@ namespace conker::netplay {
         bool open(uint16_t port, std::string& error);
         // Broadcasts `beacon` (the caller's pace: about once a second).
         void send(const lan::Beacon& beacon);
+        // Whether it also sends to this machine (a test turns that off, to try the broadcast alone).
+        void send_to_this_machine(bool on) { to_this_machine = on; }
         void close();
     private:
         intptr_t socket_handle = -1;
         uint16_t to_port = 0;
+        bool to_this_machine = true;
     };
 
     // A match a beacon told of: its host's address and port, as a join code takes them ("192.168.1.20:27015"),

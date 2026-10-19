@@ -51,6 +51,8 @@ jobs:
 
       - name: Test
         run: sh host/src/netplay/net/test.sh build
+        env:
+          LAN_BROADCAST: '1'   # no firewall here: LAN discovery's broadcast alone must be heard
 
       - name: Test the relay (Docker)
         run: sh tools/netplay/server/test.sh build relay-test

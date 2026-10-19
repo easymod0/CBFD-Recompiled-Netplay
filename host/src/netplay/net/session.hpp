@@ -144,6 +144,8 @@ namespace conker::netplay {
         std::string route(int port) const;
         // Host: the joiners in (machines, not players: one may have several ports).
         int joiners() const;
+        // Host: the connections still on their way in (before their handshake is done).
+        int arriving() const;
         // Host: the ports whose views are shown two to a window (each machine with two players', the host's too),
         // sent with Start.
         uint8_t pairs() const;

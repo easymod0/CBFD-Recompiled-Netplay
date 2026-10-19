@@ -278,7 +278,8 @@ This fork's menu finds matches too (fork issue #29):
   its own and joins that, so two players who pressed it at once meet.
 - **On this network** (`--netplay-lan`, hosting on a port): the host broadcasts a beacon each second (UDP
   port 27016, and to its own machine), and games on the network list the match and join it with no code
-  and no server. Anyone on the network can join it. A firewall on the joiner's machine may need UDP 27016
+  and no server. Anyone on the network can join it, and any machine on it could pose as the match (it's
+  for trusted networks: a home, a LAN party). A firewall on the joiner's machine may need UDP 27016
   open to hear other machines.
 
 **Screens.** Every machine draws the whole split screen (that keeps the games the same), but a window can
@@ -400,7 +401,7 @@ so.
 | Script | |
 |---|---|
 | `check.sh` | the determinism check: replays a made-up recording headless twice, with `--jitter` and with `--state-test`, and fails unless all four give the same hashes (about 30 s; the CI runs it, `.github/workflows/netplay.yml`) |
-| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, and a desync is caught and reported (about 100 s); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
+| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, through a room on a local netplay server (public: the server lists it), Quick Match (joining a public host; two at once meeting in one room), and a desync is caught and reported, by the players and, through a room, in the server's log (a few minutes); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
 | `network.sh` | the bad-network check: matches with lag, jitter, loss, an outage and a change of lag give the same game as a replay alone, and how long each waited (about 70 s) |
 | `rollback.sh` | the rollback check: matches where the copies predict the others' inputs (the host's `--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone; then a match on real time must keep to time, with time sync keeping both copies predicting (about 90 s) |
 | `rollback-modes.sh` | rollback across the game's own changes: every multiplayer mode (4 players, a pause, a Race's match end) replayed going back every 3 reads, 12 deep, and with other machines' inputs up to 8 reads late, must give the plain replay's game; `--recording` adds a real one (about 90 s) |

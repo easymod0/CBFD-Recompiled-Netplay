@@ -22,14 +22,15 @@
 // all; at most 20 packets a second from each (bursts of 60); one room each; from each address, at most 10
 // lookups of rooms that aren't there (then one each 6 s), so codes can't be guessed; 6 room lists (then one
 // each 3 s), each of at most signal::max_listed rooms; --max-listed-per-address public rooms from each
-// address at once (more stay private). A room's code isn't
-// given out again for an hour after it closes. A peer without a room that sends nothing for 10 minutes is
+// address at once (more stay private). A room's code isn't given out again for an hour after it closes. A
+// peer that neither hosts a room nor found one that's still open, and sends nothing for 10 minutes, is
 // closed, and any after 12 hours. Anything broken or past a limit closes the connection, after Refused. It
 // logs counts, never addresses, codes or signals.
 //
 // A peer whose match desynced may send a summary of it (DesyncReport: the build, its platform, the read,
-// the regions of memory that differed; no address, memory or inputs), which it logs, up to 4 from each
-// connection, for its operator to see desyncs happen.
+// the regions of memory that differed; no address, memory or inputs), which it logs for its operator to see
+// desyncs happen: up to 4 from each connection, 4 from each address (then one each 5 minutes) and 30 in
+// all (then one each 30 s); the rest are only counted, so the log can't be filled.
 //
 // It speaks every signalling version from signal::oldest_version on, each peer in the one its first packet
 // has (a version without public rooms just can't use them), and keeps the versions apart: a peer only
@@ -81,6 +82,10 @@ namespace {
     constexpr double max_seconds = 12 * 3600.0;
     // Room lists: each looks at every listed room.
     constexpr int max_desync_reports = 4;
+    constexpr double reports_per_second = 1.0 / 300.0;     // from each address, after a burst of 4
+    constexpr double report_burst = 4.0;
+    constexpr double all_reports_per_second = 1.0 / 30.0;  // from everyone, after a burst of 30
+    constexpr double all_report_burst = 30.0;
     constexpr double lists_per_second = 1.0 / 3.0;
     constexpr double list_burst = 6.0;
 
@@ -135,6 +140,7 @@ namespace {
         double last_packet = 0;
         Bucket packets;
         uint64_t room = 0;         // the room it hosts, if any
+        uint64_t found_room = 0;   // the room it last found (it joined that match, most likely)
         uint64_t room_key = 0;
         int desync_reports = 0;    // DesyncReports taken from it
         bool listed = false;       // its room is in the public list (Publish), as `listing` says
@@ -177,6 +183,9 @@ namespace {
         uint64_t rooms_missed = 0;
         uint64_t lists_sent = 0;
         uint64_t desyncs_reported = 0;
+        uint64_t desyncs_unlogged = 0;     // reported past the limits: counted, not logged
+        std::unordered_map<std::string, Bucket> reports;   // each address's, kept like `misses`
+        Bucket all_reports{ all_report_burst, 0 };
 
         // In the peer's version (the newest, before it's said).
         void send(HSteamNetConnection connection, const signal::Packet& packet) {
@@ -340,6 +349,7 @@ namespace {
                 if (host_it != peers.end()) {
                     const Peer& host = host_it->second;
                     rooms_found++;
+                    peer.found_room = f->room;
                     send(connection, signal::RoomFound{ f->room, host.id, host.room_key });
                     return;
                 }
@@ -370,11 +380,14 @@ namespace {
                 peer.listing.room.room = peer.room;
             }
             else if (const signal::DesyncReport* d = std::get_if<signal::DesyncReport>(&*packet)) {
-                // A few each: more are ignored (the log isn't to be filled).
-                if (++peer.desync_reports > max_desync_reports) {
+                // A few each, from each address, and in all: more are only counted (the log isn't to be filled).
+                desyncs_reported++;
+                if (++peer.desync_reports > max_desync_reports ||
+                    !reports.try_emplace(peer.address, Bucket{ report_burst, t }).first->second.take(t, reports_per_second, report_burst) ||
+                    !all_reports.take(t, all_reports_per_second, all_report_burst)) {
+                    desyncs_unlogged++;
                     return;
                 }
-                desyncs_reported++;
                 std::string regions;
                 int count = 0;
                 for (int region = 0; region < memory_regions; region++) {
@@ -442,8 +455,11 @@ namespace {
             const double t = now();
             std::vector<HSteamNetConnection> late;
             for (const auto& [connection, peer] : peers) {
+                // A joiner sends nothing during its match, but stays while the room it found is open (it
+                // may still report a desync, or need the host again).
+                const bool in_match = peer.room != 0 || (peer.found_room != 0 && rooms.contains(peer.found_room));
                 if ((peer.id == 0 && t - peer.connected_at > register_seconds) ||
-                    (peer.room == 0 && t - peer.last_packet > idle_seconds) || t - peer.connected_at > max_seconds) {
+                    (!in_match && t - peer.last_packet > idle_seconds) || t - peer.connected_at > max_seconds) {
                     late.push_back(connection);
                 }
             }
@@ -457,6 +473,7 @@ namespace {
                 }
             }
             std::erase_if(misses, [t](const auto& entry) { return entry.second.tokens + (t - entry.second.at) * misses_per_second >= miss_burst; });
+            std::erase_if(reports, [t](const auto& entry) { return entry.second.tokens + (t - entry.second.at) * reports_per_second >= report_burst; });
             std::erase_if(arrivals, [this, t](const auto& entry) {
                 return entry.second.tokens + (t - entry.second.at) * connections_per_second >= connection_burst;
             });
@@ -560,10 +577,10 @@ int main(int argc, char** argv) {
         }
         if (now() >= next_report) {
             const size_t listed = (size_t)std::count_if(state.peers.begin(), state.peers.end(), [](const auto& p) { return p.second.listed; });
-            std::printf("netplay_server: %zu peers, %zu rooms (%zu listed); %llu signals passed, rooms %llu created, %llu found, %llu missed; %llu lists; %llu desyncs reported\n",
+            std::printf("netplay_server: %zu peers, %zu rooms (%zu listed); %llu signals passed, rooms %llu created, %llu found, %llu missed; %llu lists; %llu desyncs reported (%llu not logged)\n",
                 state.peers.size(), state.rooms.size(), listed, (unsigned long long)state.signals_passed, (unsigned long long)state.rooms_created,
                 (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed, (unsigned long long)state.lists_sent,
-                (unsigned long long)state.desyncs_reported);
+                (unsigned long long)state.desyncs_reported, (unsigned long long)state.desyncs_unlogged);
             std::fflush(stdout);
             next_report = now() + 600;
         }
