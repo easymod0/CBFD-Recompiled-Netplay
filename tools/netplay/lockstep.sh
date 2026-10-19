@@ -41,7 +41,12 @@
 #   kick       the host kicks the joiner during the match: the joiner is told, the host plays to the end
 #   block      a host keeps out a joiner on its block list, and a joiner leaves a host on its own; Quick
 #              Match passes over a public room whose host is on it
-#   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
+#   recover    desync recovery (#21): the mouse match, the second joiner changing a byte of its memory at reads 900
+#              and 2000: each time the host must send it its game, which it loads, and all play on: the host and the
+#              first joiner must match the solo replay, the second from the read it last loaded at
+#   recover-again the 2-player match, the joiner changing its memory at reads 300 and 400: the second desync, so soon
+#              after the first was set right, must end the match
+#   desync     the host (with --netplay-no-recovery) changes a byte of its memory at read 300: both must stop for a desync, and each
 #              write a desync report naming the region changed (64, at 0x80400000) with its memory, which
 #              compare_desyncs.py must find the byte in
 #   desync-room the same through a room: the netplay server must log a summary of it (region 64)
@@ -51,7 +56,7 @@
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
-# 27310 to 27323 on 127.0.0.1 (netplay servers on 27320 to 27323).
+# 27310 to 27323 and 27326 on 127.0.0.1 (netplay servers on 27320 to 27323).
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -398,8 +403,43 @@ if finish "was the last: quitting\|the host ended the match: the host removed th
     grep -q "kicking port 2" "$OUT/kick-host.out" && grep -q "was the last: quitting" "$OUT/kick-host.out" &&
     grep -q "the host ended the match: the host removed this player" "$OUT/kick-join.out"; then :; else echo "  kick: FAILED"; failed=1; fi
 
+echo "recover"
+pads=mouse-1.pads start recover-host --netplay-host 27326 --netplay-address 127.0.0.1 --players 3
+code=$(code_of recover-host)
+pads=mouse-2.pads start recover-join1 --netplay-join "$code"
+i=0
+while ! grep -q "in, on port 2" "$OUT/recover-join1.out" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+pads=mouse-3.pads start recover-join2 --netplay-join "$code" --netplay-desync-at 900 --netplay-desync-at 2000
+if finish "was the last: quitting" recover-host recover-join1 recover-join2; then
+    same recover-host mouse-solo "$MOUSE_READS" || failed=1
+    same recover-join1 mouse-solo "$MOUSE_READS" || failed=1
+    # The second joiner's game is the host's from the read it loaded at: its hashes from there are the solo replay's.
+    loaded=$(sed -n "s/^\[netplay\] the host's game was loaded before read \([0-9]*\).*/\1/p" "$OUT/recover-join2.out" | tail -n 1)
+    if [ -n "$loaded" ] && [ "$loaded" -gt 2000 ] && [ "$(wc -l < "$OUT/recover-join2.log")" -eq "$MOUSE_READS" ] &&
+        [ "$(tail -n +"$((loaded + 1))" "$OUT/mouse-solo.log" | md5sum)" = "$(tail -n +"$((loaded + 1))" "$OUT/recover-join2.log" | md5sum)" ] &&
+        grep -q "desync recovery: 2, each set right" "$OUT/recover-host.out"; then
+        echo "  recover-join2 loaded the host's game twice, last before read $loaded, and is the same as mouse-solo from there"
+    else
+        echo "  recover-join2 didn't load the host's game, or isn't the same as mouse-solo after it (loaded: ${loaded:-none})"
+        failed=1
+    fi
+else
+    failed=1
+fi
+
+echo "recover-again"
+start again-host --netplay-host 27326 --netplay-address 127.0.0.1 --players 2
+start again-join --netplay-join "$(code_of again-host)" --netplay-desync-at 300 --netplay-desync-at 400
+if finish "the netplay match is over" again-host again-join &&
+    grep -q "went another way again" "$OUT/again-host.out" && grep -q "the host's game was loaded before read" "$OUT/again-join.out"; then
+    echo "  $(grep -m1 "went another way again" "$OUT/again-host.out" | sed 's/^\[netplay\] //')"
+else
+    echo "  recover-again: FAILED (the second desync didn't end the match after the first was set right)"
+    failed=1
+fi
+
 echo "desync"
-start desync-host --netplay-host 27312 --netplay-address 127.0.0.1 --players 2 --netplay-desync-at 300
+start desync-host --netplay-host 27312 --netplay-address 127.0.0.1 --players 2 --netplay-desync-at 300 --netplay-no-recovery
 start desync-join --netplay-join "$(code_of desync-host)"
 if finish "the netplay match is over" desync-host desync-join; then
     for name in desync-host desync-join; do
@@ -441,7 +481,7 @@ server=$!
 servers="${servers:-} $server"
 room="--netplay-server 127.0.0.1:27322 --netplay-direct"
 # shellcheck disable=SC2086
-start desync-room-host --netplay-host room $room --players 2 --netplay-desync-at 300
+start desync-room-host --netplay-host room $room --players 2 --netplay-desync-at 300 --netplay-no-recovery
 # shellcheck disable=SC2086
 start desync-room-join --netplay-join "$(room_of desync-room-host)" $room
 if finish "the netplay match is over" desync-room-host desync-room-join &&
@@ -459,4 +499,4 @@ if [ $failed -ne 0 ]; then
     exit 1
 fi
 if [ $KEEP -eq 1 ]; then echo "logs: $OUT"; else rm -rf "$OUT"; fi
-echo "passed: the match gave each copy the same game as the replay alone, and a desync was caught"
+echo "passed: the match gave each copy the same game as the replay alone, a desync was set right, and one was caught"

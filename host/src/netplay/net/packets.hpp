@@ -2,8 +2,10 @@
 // what arrives from the network. Each kind of packet has a fixed size and a version, and decode()
 // checks every field: anything else is refused whole.
 //
-// Peers send inputs only: each its own ports' pads (one port per player on that machine) (the host passes them on to the others), the hashes
-// of the game's memory for the desync check, and the handshake. Never files, mods or save states.
+// Peers send inputs: each its own ports' pads (one port per player on that machine) (the host passes them on to the others), the hashes
+// of the game's memory for the desync check, and the handshake. Never files or mods. The one exception: after a
+// desync, the host sends its game's state to the joiners whose game went another way (Resync, StatePart), which
+// they check (lockstep.cpp) and load in place of theirs.
 //
 // The layout, little-endian: "CN", u16 version, u8 kind, then the kind's fields (see packets.cpp).
 
@@ -14,18 +16,27 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <variant>
+#include <vector>
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 16;
+    constexpr uint16_t protocol_version = 18;
+    // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
+    constexpr size_t max_release_name = 40;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
     // sent reliably, so none is lost: lockstep can't go on without every one.)
     constexpr int input_window = 8;
-    // The largest packet, to size buffers.
+    // The largest packet, to size buffers, but StatePart's (max_message_size).
     constexpr size_t max_packet_size = 288;
+    // The most bytes of a state one StatePart carries, and the largest message of all (a StatePart's).
+    constexpr size_t max_state_part = 64 * 1024;
+    constexpr size_t max_message_size = 25 + max_state_part;
+    // The largest state sent (compressed): a game's 8 MB and the rest, should it not compress.
+    constexpr uint32_t max_state_size = 12 * 1024 * 1024;
     // The most reads a peer's own pads are sent ahead of the game (the input delay).
     constexpr int max_delay = 8;
     // The most reads a peer predicts ahead with rollback (Start).
@@ -118,9 +129,13 @@ namespace conker::netplay {
         uint8_t players = 0;
         bool operator==(const Welcome&) const = default;
     };
-    // Host to joiner: not accepted, then the connection is closed.
+    // Host to joiner: not accepted, then the connection is closed; and the host's release (empty, or 1 to
+    // max_release_name printable characters, no spaces), so a joiner of another one is told which to get.
+    // Its layout (and Reason's numbers) stays the same in every protocol version from 17 on, so a joiner of
+    // another version can read it too (decode_refusal).
     struct Refuse {
         Reason reason = Reason::protocol;
+        std::string release;
         bool operator==(const Refuse&) const = default;
     };
     // One port's pads and movement for reads first_read to first_read + count - 1, and for time sync (rollback),
@@ -215,11 +230,37 @@ namespace conker::netplay {
         bool operator==(const Ready&) const = default;
     };
 
-    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay, Roster, Ready>;
+    // Desync recovery (#21). Host to the joiners: the machines on `ports` (bit n: port n; never the host's port 0)
+    // load the host's game as it is before read `read` in place of theirs (their game went another way), sent to
+    // them in StateParts. Each stops after the read before it until the state is there, which none has made yet as
+    // it hears (the host chooses it as it does a Delay's). The others play on. A later Resync replaces it (the
+    // host couldn't take its state there).
+    struct Resync {
+        uint32_t read = 0;
+        uint8_t ports = 0;
+        bool operator==(const Resync&) const = default;
+    };
+    // Host to a joiner: part of the state a Resync is for, in order: bytes `offset` on of the state (`size` bytes in
+    // all, 1 to max_state_size, compressed), whose XXH3-64 once decompressed is `hash`; 1 to max_state_part bytes,
+    // none past the end. The only packet of no fixed size: a joiner takes messages up to max_message_size from the
+    // host, the host up to max_packet_size from anyone.
+    struct StatePart {
+        uint32_t read = 0;
+        uint32_t size = 0;
+        uint32_t offset = 0;
+        uint64_t hash = 0;
+        std::vector<uint8_t> bytes;
+        bool operator==(const StatePart&) const = default;
+    };
+
+    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay, Roster, Ready, Resync, StatePart>;
 
     // Writes `packet` into `out` and returns its size, or 0 if the packet isn't valid (the same checks
-    // as decode's), so nothing invalid is ever sent.
-    size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out);
+    // as decode's) or doesn't fit, so nothing invalid is ever sent.
+    size_t encode(const Packet& packet, std::span<uint8_t> out);
     // The packet in `data`, or nothing if it isn't exactly one valid packet of this protocol version.
     std::optional<Packet> decode(std::span<const uint8_t> data);
+    // A Refuse of any protocol version from 17 on (its layout is kept), or nothing. A reason this version
+    // doesn't know (a newer one's) is Reason::version.
+    std::optional<Refuse> decode_refusal(std::span<const uint8_t> data);
 }

@@ -14,7 +14,10 @@
 // join (ListRooms): those of a game with the same build, ROM, settings and mods (one hash of them, the
 // fit: the server only compares it) on a platform that plays with theirs (the server decides which mix),
 // and how many more there are of the same game (build and ROM: another hash) with other settings or mods. A listed room
-// has no name on the wire: the game makes one from its number (join_code.hpp: room_name).
+// has no name on the wire: the game makes one from its number (join_code.hpp: room_name). From version 6
+// a room carries its release's name too (hello.hpp: release_name), and the list has the rooms of the same
+// ROM on other builds besides (marked: they can't be joined, but the player sees which release to get),
+// and how many rooms there are of older signalling versions (which can't say their ROM or release).
 //
 // And a player whose game went another way than another's (a desync) may tell the server, which logs it
 // for its operator (DesyncReport): a summary, with no address, memory or inputs in it.
@@ -37,17 +40,21 @@
 
 namespace conker::netplay::signal {
     // Changes whenever any packet's layout or meaning does: a peer with another one is refused.
-    constexpr uint16_t version = 5;
+    constexpr uint16_t version = 6;
     // The oldest version the server still speaks: 2 (no public rooms: Publish, ListRooms and Rooms came with 3;
-    // DesyncReport with 4; a listed room's host player id with 5).
+    // DesyncReport with 4; a listed room's host player id with 5; its release, the ROM's hash alone and the
+    // rooms of other builds with 6).
     constexpr uint16_t oldest_version = 2;
     // The largest signal GameNetworkingSockets sends (4200 bytes of message data at most, plus its
     // own), with room to spare.
     constexpr size_t max_signal = 8192;
     // The most rooms one Rooms lists.
     constexpr size_t max_listed = 32;
+    // The longest release name (hello.hpp's release_name).
+    constexpr size_t max_release = 40;
     // The largest packet, to size buffers and the library's message limit.
     constexpr size_t max_packet_size = 5 + 10 + max_signal;
+    static_assert(5 + 5 + max_listed * (21 + max_release) <= max_packet_size, "a full Rooms fits");
 
     // Peer to server, first and once: the id it's reached by (never 0). The library's identity for this
     // process is made from it (session.hpp: local_id()).
@@ -125,7 +132,9 @@ namespace conker::netplay::signal {
     // in (the host's too, 1 to players), whether the match is being played (joining it isn't possible
     // then), whether its host allows direct connections, and its rollback (packets.hpp: 0 to max_rollback);
     // and from version 5, its host's player id (packets.hpp's Hello: for block lists; 0, not known: a host
-    // of an older version), which versions before it don't carry.
+    // of an older version), which versions before it don't carry. From version 6, its release's name (1 to
+    // max_release printable characters, no spaces), and in a list, whether it's of another build than the
+    // asker's (`other_build`: the server says; never in Publish).
     struct ListedRoom {
         uint64_t room = 0;
         uint8_t players = 2;
@@ -134,30 +143,38 @@ namespace conker::netplay::signal {
         bool direct = false;
         uint8_t rollback = 0;
         uint64_t host = 0;
+        std::string release;
+        bool other_build = false;
         bool operator==(const ListedRoom&) const = default;
     };
     // Peer to server, once its room is made: lists it in public, as `room` says (its number is ignored:
     // the peer's room), for games whose `fit` (not 0) and platform go with its own; again whenever that
-    // changes. It stays listed until its host leaves. `game` (not 0) is its build and ROM's hash alone.
+    // changes. It stays listed until its host leaves. `game` (not 0) is its build and ROM's hash alone; from
+    // version 6, `rom` (not 0) the ROM's alone.
     struct Publish {
         uint64_t fit = 0;
         uint64_t game = 0;
+        uint64_t rom = 0;
         Platform platform = Platform::gnu_linux;
         ListedRoom room;
         bool operator==(const Publish&) const = default;
     };
     // Peer to server, once registered: the listed rooms for a game whose `fit` and `game` (neither 0) and
-    // platform these are? A few each minute.
+    // platform these are (and from version 6, `rom`, not 0)? A few each minute.
     struct ListRooms {
         uint64_t fit = 0;
         uint64_t game = 0;
+        uint64_t rom = 0;
         Platform platform = Platform::gnu_linux;
         bool operator==(const ListRooms&) const = default;
     };
     // Server to peer: the answer, up to max_listed of them (open ones first), and how many listed rooms of
-    // the same game and platforms there are besides, whose fit differs (other settings or mods).
+    // the same game and platforms there are besides, whose fit differs (other settings or mods). From version
+    // 6 the rooms of the same ROM on other builds come after those that fit (other_build), and `older` is
+    // how many listed rooms there are of older signalling versions on platforms that play with the asker's.
     struct Rooms {
         uint16_t others = 0;
+        uint16_t older = 0;
         std::vector<ListedRoom> rooms;
         bool operator==(const Rooms&) const = default;
     };

@@ -15,7 +15,7 @@
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     const std::optional<conker::netplay::Packet> packet = conker::netplay::decode({ data, size });
     if (packet) {
-        uint8_t buffer[conker::netplay::max_packet_size];
+        static uint8_t buffer[conker::netplay::max_message_size];
         const size_t encoded = conker::netplay::encode(*packet, buffer);
         if (encoded != size || std::memcmp(buffer, data, size) != 0) {
             std::abort();

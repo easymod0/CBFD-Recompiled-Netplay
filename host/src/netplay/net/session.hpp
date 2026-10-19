@@ -18,7 +18,8 @@
 // (Start: with the input delay). Then each peer sends its own ports' pads and
 // movement (Inputs) and memory hashes (Hash) to the host, which passes Inputs on to the others: the host is
 // the hub, so joiners only ever connect to it. A peer that sends anything else (another peer's port's
-// inputs, a second Hello) is dropped.
+// inputs, a second Hello) is dropped. After a desync the host may send a joiner its game's state (Resync,
+// StatePart): the one message bigger than the rest, which a joiner takes from the host only.
 //
 // Single-threaded: call poll() often (each controller read, or in a loop) from one thread; it runs the
 // library's callbacks and returns what happened.
@@ -59,6 +60,7 @@ namespace conker::netplay {
         int rollback = 0;       // started: the reads every peer predicts ahead (0: off)
         Reason reason = Reason::quit;
         std::string detail;     // the library's account of a closed connection, for the log
+        std::string release;    // ended by a Refuse: the host's release, if it said (another release, to get)
         bool by_signalling = false; // ended: the signalling server's word (the host isn't there, or the
                                     // server's gone), and `detail` says it for the player
         Packet packet;
@@ -140,6 +142,9 @@ namespace conker::netplay {
         void set_room_settings(bool own_view, int delay, int rollback);
         void set_ready(bool ready);
         void set_blocked(const std::vector<uint64_t>& players) { blocked = players; }
+        // Host: this game's release (hello.hpp's release_name), told to each joiner it refuses (not if it
+        // isn't 1 to max_release_name printable characters).
+        void set_release(const std::string& name);
         bool kick(int port);
         Roster roster() const;
         bool everyone_ready() const;
@@ -172,6 +177,11 @@ namespace conker::netplay {
         void send(const Gone& gone);
         // Host: the input delay changes (Delay), to the joiners still in.
         void send(const Delay& delay);
+        // Host: desync recovery (#21): the joiners on Resync's ports are to load the host's state, to every joiner
+        // still in; then the state itself (compressed, `hash` its XXH3-64 decompressed), in StateParts to the joiners
+        // on `ports`, at a higher rate than the rest until it's all gone.
+        void send(const Resync& resync);
+        void send_state(uint8_t ports, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash);
         // Says goodbye to every peer and closes the connections, once what was sent has arrived (up to 2 s,
         // for a lossy network). Poll a moment before deleting the session or stopping the library.
         void leave(Reason reason);
@@ -195,6 +205,7 @@ namespace conker::netplay {
             uint64_t player = 0;    // host: its Hello's player id and platform, and whether it's ready
             uint8_t platform = 0;
             bool ready = false;
+            bool sending_state = false; // host: a state is on its way to it (at the higher rate)
         };
 
         void on_status_changed(const void* info);
@@ -204,9 +215,15 @@ namespace conker::netplay {
         // Takes every message still unread from `connection` (a peer that closed it).
         void drain(uint32_t connection, std::vector<Event>& events);
         void drop(Peer& peer, Reason reason, std::vector<Event>* events);
+        // A joiner not yet welcomed: Refuse (with this one's release), then closed.
+        void refuse(Peer& peer, Reason reason);
         // Waits until every peer has acknowledged what was sent to it (up to 2 s).
         void flush();
         void send_to(uint32_t connection, const Packet& packet);
+        // Whether something sent on `connection` hasn't arrived yet.
+        bool pending(uint32_t connection) const;
+        // A state's send rate and buffer on `connection` (`state`), or the library's own.
+        void set_send_rate(uint32_t connection, bool state);
         Peer* find(uint32_t connection);
         friend void status_changed_callback(void* info);
 
@@ -227,6 +244,7 @@ namespace conker::netplay {
         uint64_t horizon = 64;
         std::array<uint64_t, max_players> next_inputs{};   // host: the read each port's next Inputs start at
         Hello hello;
+        std::string release;
         uint32_t listen_socket = 0;
         uint32_t poll_group = 0;
         std::vector<Peer> peers;            // host: everyone connected; joiner: the host

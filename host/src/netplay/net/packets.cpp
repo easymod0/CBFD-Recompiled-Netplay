@@ -6,7 +6,8 @@
 //              u8 players (1 to 3), u64 player (not 0), u8 platform (1 to 3)
 //   2 Welcome  u8 ports (bits: some, none at or past players, not port 0),             7 bytes
 //              u8 players (2 to 4)
-//   3 Refuse   u8 reason                                                               6 bytes
+//   3 Refuse   u8 reason, u8 size (0 to 40), the host's release (! to ~), zeros to 40  47 bytes
+//              (the same in every version from 17 on: decode_refusal)
 //   4 Inputs   u8 port (< 4), u32 first read, u8 count (1 to 8), 8 pads of 5 bytes  159 bytes
 //              (u16 buttons, s8 stick x, s8 stick y, u8 err_no), then 8 motions of 13
 //              (s16 mouse x, y, s16 gyro x, y, s8 wheel, u32 controls: only
@@ -24,16 +25,20 @@
 //              0 or 1; none taken at or past players), u8 players (2 to 4),
 //              u8 own view (0 or 1), u8 delay (0 to 8, or 255: auto), u8 rollback (0 to 12)
 //  11 Ready    u8 ready (0 or 1)                                                       6 bytes
+//  12 Resync   u32 read, u8 ports (bits: some, not port 0)                            10 bytes
+//  13 StatePart u32 read, u32 size (1 to max_state_size), u32 offset, u64 hash,   26 to 25 + max_state_part bytes
+//              then 1 to max_state_part bytes, offset + their count not past size
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
 #include "packets.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <type_traits>
 
 namespace conker::netplay {
     namespace {
-        enum Kind : uint8_t { hello = 1, welcome, refuse, inputs, hash, bye, start, gone, delay, roster, ready };
+        enum Kind : uint8_t { hello = 1, welcome, refuse, inputs, hash, bye, start, gone, delay, roster, ready, resync, state_part };
         constexpr size_t header_size = 5;
         constexpr size_t pad_size = 5;
         constexpr size_t motion_size = 13;
@@ -42,7 +47,7 @@ namespace conker::netplay {
             switch (kind) {
                 case hello: return header_size + 50;
                 case welcome: return header_size + 2;
-                case refuse: return header_size + 1;
+                case refuse: return header_size + 2 + max_release_name;
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players;
                 case hash: return header_size + 12 + 2 * memory_regions;
                 case bye: return header_size + 1;
@@ -51,10 +56,14 @@ namespace conker::netplay {
                 case delay: return header_size + 5;
                 case roster: return header_size + 12 * max_players + 4;
                 case ready: return header_size + 1;
+                case resync: return header_size + 5;
             }
             return 0;
         }
         static_assert(size_of(inputs) <= max_packet_size && size_of(hash) <= max_packet_size);
+        // StatePart's fixed fields, before its bytes.
+        constexpr size_t state_part_head = header_size + 20;
+        static_assert(state_part_head + max_state_part == max_message_size);
 
         bool valid_reason(Reason reason) {
             return (uint8_t)reason >= 1 && (uint8_t)reason <= last_reason;
@@ -85,9 +94,15 @@ namespace conker::netplay {
             return p.players >= 2 && p.players <= max_players && p.ports != 0 && (p.ports & 1) == 0 &&
                 (p.ports >> p.players) == 0;
         }
-        bool valid_fields(const Refuse& p) {
-            return valid_reason(p.reason);
+        bool valid_release(const std::string& release) {
+            return release.size() <= max_release_name &&
+                std::all_of(release.begin(), release.end(), [](char c) { return c > ' ' && c <= '~'; });
         }
+        bool valid_fields(const Refuse& p) {
+            return valid_reason(p.reason) && valid_release(p.release);
+        }
+        // The first refusal-carrying version: Refuse's layout is kept from it on.
+        constexpr uint16_t refuse_kept_since = 17;
         bool valid_fields(const Inputs& p) {
             if (p.port >= max_players || p.count < 1 || p.count > input_window ||
                 p.first_read > UINT32_MAX - (uint32_t)(p.count - 1)) {
@@ -116,6 +131,14 @@ namespace conker::netplay {
         bool valid_fields(const Start& p) {
             return p.players >= 2 && p.players <= max_players && p.own_view <= 1 && p.delay <= max_delay &&
                 (p.pairs >> p.players) == 0 && std::popcount(p.pairs) % 2 == 0 && p.rollback <= max_rollback;
+        }
+
+        bool valid_fields(const Resync& p) {
+            return p.ports != 0 && (p.ports & 1) == 0 && (p.ports >> max_players) == 0;
+        }
+        bool valid_fields(const StatePart& p) {
+            return p.size >= 1 && p.size <= max_state_size && !p.bytes.empty() && p.bytes.size() <= max_state_part &&
+                p.offset < p.size && p.bytes.size() <= p.size - p.offset;
         }
 
         bool valid_packet(const Packet& packet) {
@@ -163,8 +186,12 @@ namespace conker::netplay {
         return "an unknown reason";
     }
 
-    size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out) {
+    size_t encode(const Packet& packet, std::span<uint8_t> out) {
         if (!valid_packet(packet)) {
+            return 0;
+        }
+        const StatePart* part = std::get_if<StatePart>(&packet);
+        if (out.size() < (part != nullptr ? state_part_head + part->bytes.size() : size_of((uint8_t)(packet.index() + 1)))) {
             return 0;
         }
         // The kinds are numbered in Packet's order.
@@ -205,7 +232,14 @@ namespace conker::netplay {
                 w.u8(p.ports);
                 w.u8(p.players);
             }
-            else if constexpr (std::is_same_v<T, Refuse> || std::is_same_v<T, Bye>) {
+            else if constexpr (std::is_same_v<T, Refuse>) {
+                w.u8((uint8_t)p.reason);
+                w.u8((uint8_t)p.release.size());
+                for (size_t i = 0; i < max_release_name; i++) {
+                    w.u8(i < p.release.size() ? (uint8_t)p.release[i] : 0);
+                }
+            }
+            else if constexpr (std::is_same_v<T, Bye>) {
                 w.u8((uint8_t)p.reason);
             }
             else if constexpr (std::is_same_v<T, Inputs>) {
@@ -253,6 +287,18 @@ namespace conker::netplay {
                 w.u8(p.pairs);
                 w.u8(p.rollback);
             }
+            else if constexpr (std::is_same_v<T, Resync>) {
+                w.u32(p.read);
+                w.u8(p.ports);
+            }
+            else if constexpr (std::is_same_v<T, StatePart>) {
+                w.u32(p.read);
+                w.u32(p.size);
+                w.u32(p.offset);
+                w.u64(p.hash);
+                std::copy(p.bytes.begin(), p.bytes.end(), w.at);
+                w.at += p.bytes.size();
+            }
         }, packet);
         return (size_t)(w.at - out.data());
     }
@@ -263,7 +309,8 @@ namespace conker::netplay {
             return std::nullopt;
         }
         const uint8_t kind = data[4];
-        if (size_of(kind) == 0 || data.size() != size_of(kind)) {
+        if (kind == state_part ? data.size() <= state_part_head || data.size() > max_message_size
+                               : size_of(kind) == 0 || data.size() != size_of(kind)) {
             return std::nullopt;
         }
         Reader r{ data.data() + header_size };
@@ -307,9 +354,24 @@ namespace conker::netplay {
                 packet = p;
                 break;
             }
-            case refuse:
-                packet = Refuse{ (Reason)r.u8() };
+            case refuse: {
+                Refuse p{ (Reason)r.u8() };
+                const uint8_t length = r.u8();
+                if (length > max_release_name) {
+                    return std::nullopt;
+                }
+                for (size_t i = 0; i < max_release_name; i++) {
+                    const uint8_t c = r.u8();
+                    if (i < length) {
+                        p.release += (char)c;
+                    }
+                    else if (c != 0) {
+                        return std::nullopt;
+                    }
+                }
+                packet = std::move(p);
                 break;
+            }
             case inputs: {
                 Inputs p;
                 p.port = r.u8();
@@ -374,10 +436,47 @@ namespace conker::netplay {
                 packet = p;
                 break;
             }
+            case resync: {
+                Resync p;
+                p.read = r.u32();
+                p.ports = r.u8();
+                packet = p;
+                break;
+            }
+            case state_part: {
+                StatePart p;
+                p.read = r.u32();
+                p.size = r.u32();
+                p.offset = r.u32();
+                p.hash = r.u64();
+                p.bytes.assign(r.at, data.data() + data.size());
+                packet = std::move(p);
+                break;
+            }
         }
         if (!valid_packet(packet)) {
             return std::nullopt;
         }
         return packet;
+    }
+
+    std::optional<Refuse> decode_refusal(std::span<const uint8_t> data) {
+        if (data.size() != size_of(refuse) || data[0] != 'C' || data[1] != 'N' || data[4] != refuse ||
+            (uint16_t)(data[2] | (data[3] << 8)) < refuse_kept_since) {
+            return std::nullopt;
+        }
+        // As this version's, but for the version and a reason it may not know.
+        std::array<uint8_t, size_of(refuse)> own;
+        std::copy(data.begin(), data.end(), own.begin());
+        own[2] = (uint8_t)protocol_version;
+        own[3] = (uint8_t)(protocol_version >> 8);
+        if (!valid_reason((Reason)own[header_size])) {
+            own[header_size] = (uint8_t)Reason::version;
+        }
+        std::optional<Packet> packet = decode(std::span<const uint8_t>(own));
+        if (!packet) {
+            return std::nullopt;
+        }
+        return std::get<Refuse>(*packet);
     }
 }

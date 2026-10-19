@@ -3,7 +3,8 @@
 // - at the top, in the middle: "Waiting for Player 2... 4 s" once a read has waited a moment for the others
 //   (a read waits a few ms most of the time, which isn't worth a word), "Catching up..." once that has gone on
 //   a moment, and for a few seconds each, what happened: "Player 3 left.", "Player 3 stopped answering (they
-//   may have quit).", "Everyone else has left: the match goes on here."
+//   may have quit).", "Everyone else has left: the match goes on here."; "Getting the host's game... 40%" while a
+//   desync is set right here (desync recovery)
 // - with General: Netplay Details on, in the bottom-right corner: the input delay, how far ahead of the others
 //   this machine is (or behind), and each player's round trip (a joiner knows only the host's: the others'
 //   pads come through it), or that they're on this machine or left.
@@ -157,7 +158,10 @@ namespace {
     // The banner's lines for `status` at `t`.
     std::array<std::string, 1 + most_news> banner_lines(const conker::lockstep::Status& status, double t) {
         std::array<std::string, 1 + most_news> lines;
-        if (status.playing && status.waiting_for != 0 && t - status.waiting_since >= waiting_grace) {
+        if (status.getting_state) {
+            lines[0] = "Getting the host's game... " + std::to_string((int)(status.state_progress * 100)) + "%";
+        }
+        else if (status.playing && status.waiting_for != 0 && t - status.waiting_since >= waiting_grace) {
             lines[0] = "Waiting for " + players_text(status.waiting_for) + "... " +
                 std::to_string((int)(t - status.waiting_since)) + " s";
         }

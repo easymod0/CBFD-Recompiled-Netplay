@@ -34,7 +34,9 @@
 //
 // It speaks every signalling version from signal::oldest_version on, each peer in the one its first packet
 // has (a version without public rooms just can't use them), and keeps the versions apart: a peer only
-// reaches the peers of its own, and only finds their rooms.
+// reaches the peers of its own, and only finds their rooms. Except that from version 6 the room list shows
+// the rooms of the same ROM on other builds of version 6 on too, with their releases (they can't be joined
+// from there: the player sees which release to get), and counts those of older versions.
 //
 // It runs until SIGINT or SIGTERM (docker stop).
 
@@ -416,35 +418,58 @@ namespace {
             }
         }
 
-        // The listed rooms for `ask` (from a peer of `version`): of that version, its fit and platform group, open ones first (the fullest, then the
-        // oldest: to fill matches), then those being played; at most signal::max_listed. And how many of
-        // its game and platform group have another fit.
+        // The listed rooms for `ask` (from a peer of `version`), on its platform group: of that version, its
+        // fit, open ones first (the fullest, then the oldest: to fill matches), then those being played; at
+        // most signal::max_listed. And how many of its game have another fit. From version 6, the rooms of
+        // its ROM on other builds (of version 6 on: they can say their release) come after those, and how many
+        // rooms of older versions there are.
         signal::Rooms listed_for(const signal::ListRooms& ask, uint16_t version) const {
             std::vector<const Peer*> fitting;
+            std::vector<const Peer*> other_builds;
             size_t others = 0;
+            size_t older = 0;
             for (const auto& [room, connection] : rooms) {
                 const auto host = peers.find(connection);
-                if (host == peers.end() || !host->second.listed || host->second.version != version ||
+                if (host == peers.end() || !host->second.listed ||
                     platform_group(host->second.listing.platform) != platform_group(ask.platform)) {
                     continue;
                 }
-                if (host->second.listing.fit == ask.fit) {
+                const signal::Publish& listing = host->second.listing;
+                if (host->second.version != version) {
+                    if (version >= 6 && host->second.version >= 6 && listing.rom == ask.rom && listing.game != ask.game) {
+                        other_builds.push_back(&host->second);
+                    }
+                    else if (version >= 6 && host->second.version < 6) {
+                        older++;
+                    }
+                }
+                else if (listing.fit == ask.fit) {
                     fitting.push_back(&host->second);
                 }
-                else if (host->second.listing.game == ask.game) {
+                else if (listing.game == ask.game) {
                     others++;
+                }
+                else if (version >= 6 && listing.rom == ask.rom) {
+                    other_builds.push_back(&host->second);
                 }
             }
             const auto open = [](const Peer* p) { return !p->listing.room.playing && p->listing.room.joined < p->listing.room.players; };
-            std::sort(fitting.begin(), fitting.end(), [&open](const Peer* a, const Peer* b) {
+            const auto order = [&open](const Peer* a, const Peer* b) {
                 if (open(a) != open(b)) return open(a);
                 if (a->listing.room.joined != b->listing.room.joined) return a->listing.room.joined > b->listing.room.joined;
                 return a->listed_at < b->listed_at;
-            });
+            };
+            std::sort(fitting.begin(), fitting.end(), order);
+            std::sort(other_builds.begin(), other_builds.end(), order);
             signal::Rooms out;
             out.others = (uint16_t)std::min<size_t>(others, UINT16_MAX);
-            for (size_t i = 0; i < fitting.size() && i < signal::max_listed; i++) {
+            out.older = (uint16_t)std::min<size_t>(older, UINT16_MAX);
+            for (size_t i = 0; i < fitting.size() && out.rooms.size() < signal::max_listed; i++) {
                 out.rooms.push_back(fitting[i]->listing.room);
+            }
+            for (size_t i = 0; i < other_builds.size() && out.rooms.size() < signal::max_listed; i++) {
+                out.rooms.push_back(other_builds[i]->listing.room);
+                out.rooms.back().other_build = true;
             }
             return out;
         }

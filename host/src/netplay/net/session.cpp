@@ -36,6 +36,16 @@ namespace conker::netplay {
         // everything is sent reliably). An honest peer is never more than a few dozen messages ahead.
         constexpr int recv_buffer_messages = 512;
         constexpr int recv_buffer_bytes = recv_buffer_messages * (int)max_packet_size;
+        // A joiner's from the host, which may send it a state after a desync (StatePart, up to max_message_size):
+        // a few parts' worth, and the rest is resent as it's read. Its only peer is the host, whose state it loads
+        // anyway (lockstep checks it).
+        constexpr int joiner_recv_buffer_bytes = 4 * 1024 * 1024;
+        // The host sending a state: at this rate (the library's own is 256 KB/s, which would take seconds over a
+        // state of 1 or 2 MB), with room to queue it whole, then back to the library's own once it's all gone.
+        constexpr int state_send_rate = 1024 * 1024;
+        constexpr int default_send_rate = 256 * 1024;
+        constexpr int state_send_buffer = (int)max_state_size + 1024 * 1024;
+        constexpr int default_send_buffer = 512 * 1024;
         // The most messages one poll() takes: a flood can't hold the game's thread there.
         constexpr int max_messages_per_poll = 256;
 
@@ -44,10 +54,11 @@ namespace conker::netplay {
         struct ConnectionOptions {
             SteamNetworkingConfigValue_t values[10];
             int count = 4;
-            ConnectionOptions(void (*status_changed)(SteamNetConnectionStatusChangedCallback_t*), const Ice* ice = nullptr) {
+            // `joining`: a joiner's connection to the host, which takes the host's states.
+            ConnectionOptions(void (*status_changed)(SteamNetConnectionStatusChangedCallback_t*), const Ice* ice = nullptr, bool joining = false) {
                 values[0].SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)status_changed);
-                values[1].SetInt32(k_ESteamNetworkingConfig_RecvMaxMessageSize, (int32_t)max_packet_size);
-                values[2].SetInt32(k_ESteamNetworkingConfig_RecvBufferSize, recv_buffer_bytes);
+                values[1].SetInt32(k_ESteamNetworkingConfig_RecvMaxMessageSize, (int32_t)(joining ? max_message_size : max_packet_size));
+                values[2].SetInt32(k_ESteamNetworkingConfig_RecvBufferSize, joining ? joiner_recv_buffer_bytes : recv_buffer_bytes);
                 values[3].SetInt32(k_ESteamNetworkingConfig_RecvBufferMessages, recv_buffer_messages);
                 if (ice != nullptr) {
                     values[count++].SetInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, ice->relay_only
@@ -322,7 +333,7 @@ namespace conker::netplay {
             const auto& ip = endpoint->ip;
             host_address.SetIPv4((uint32_t)ip[0] << 24 | ip[1] << 16 | ip[2] << 8 | ip[3], endpoint->port);
         }
-        ConnectionOptions options(status_changed);
+        ConnectionOptions options(status_changed, nullptr, true);
         const HSteamNetConnection connection = SteamNetworkingSockets()->ConnectByIPAddress(host_address, options.count, options.values);
         if (connection == k_HSteamNetConnection_Invalid) {
             error = "couldn't connect to the host";
@@ -346,7 +357,7 @@ namespace conker::netplay {
         ice_context = std::make_unique<IceContext>();
         ice_context->outbox = through.outbox();
         const SteamNetworkingIdentity host_identity = identity_of(host_id);
-        ConnectionOptions options(status_changed, &ice);
+        ConnectionOptions options(status_changed, &ice, true);
         const HSteamNetConnection connection = SteamNetworkingSockets()->ConnectP2PCustomSignaling(
             new ConnectionSignals(through.outbox(), host_id), &host_identity, 0, options.count, options.values);
         if (connection == k_HSteamNetConnection_Invalid) {
@@ -659,6 +670,15 @@ namespace conker::netplay {
                 next_roster = t + 2.0;
             }
         }
+        // A state sent: the library's own rate again once it has all gone out (inputs keep some unacknowledged).
+        for (Peer& peer : peers) {
+            SteamNetConnectionRealTimeStatus_t status;
+            if (peer.sending_state && SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.connection, &status, 0, nullptr) == k_EResultOK &&
+                status.m_cbPendingReliable < (int)max_packet_size * 8) {
+                set_send_rate(peer.connection, false);
+                peer.sending_state = false;
+            }
+        }
         // Joiners that never said Hello.
         for (size_t i = 0; i < peers.size();) {
             if (is_host && peers[i].port < 0 && peers[i].up && t - peers[i].connected_at > handshake_seconds) {
@@ -679,13 +699,25 @@ namespace conker::netplay {
         std::optional<Packet> packet = decode(data);
         if (packet) {
             handle(*peer, *packet, events);
+            return;
         }
-        else {
-            // Another protocol version is told so; anything else is a broken packet.
-            const bool other_version = data.size() >= 4 && data[0] == 'C' && data[1] == 'N' &&
-                (uint16_t)(data[2] | (data[3] << 8)) != protocol_version;
-            drop(*peer, other_version ? Reason::version : Reason::protocol, &events);
+        // Another protocol version is told so; anything else is a broken packet.
+        const bool other_version = data.size() >= 4 && data[0] == 'C' && data[1] == 'N' &&
+            (uint16_t)(data[2] | (data[3] << 8)) != protocol_version;
+        if (other_version && !is_host && peer->port < 0) {
+            // A host of another version refusing this joiner (its Refuse is kept the same): why, and its release.
+            if (std::optional<Refuse> refusal = decode_refusal(data)) {
+                refusal->reason = Reason::version;
+                handle(*peer, *refusal, events);
+                return;
+            }
         }
+        if (other_version && is_host && peer->port < 0) {
+            // A joiner of another version: refused as any other, so it reads which release this is.
+            refuse(*peer, Reason::version);
+            return;
+        }
+        drop(*peer, other_version ? Reason::version : Reason::protocol, &events);
     }
 
     void Session::drain(uint32_t connection, std::vector<Event>& events) {
@@ -744,10 +776,7 @@ namespace conker::netplay {
                     if (std::popcount(ports) != theirs->players) refusal = Reason::full;
                 }
                 if (refusal) {
-                    send_to(peer.connection, Refuse{ *refusal });
-                    SteamNetworkingSockets()->CloseConnection(peer.connection, k_ESteamNetConnectionEnd_App_Min + (int)*refusal,
-                        describe(*refusal), true);
-                    peers.erase(peers.begin() + (&peer - peers.data()));
+                    refuse(peer, *refusal);
                     return;
                 }
                 peer.port = std::countr_zero(ports);
@@ -838,6 +867,9 @@ namespace conker::netplay {
                 // Refused, or dropped before being welcomed (the host's handshake time ran out): with why.
                 Event event{ Event::Type::ended };
                 event.reason = std::holds_alternative<Refuse>(packet) ? std::get<Refuse>(packet).reason : std::get<Bye>(packet).reason;
+                if (const Refuse* refusal = std::get_if<Refuse>(&packet)) {
+                    event.release = refusal->release;
+                }
                 SteamNetworkingSockets()->CloseConnection(peer.connection, 0, nullptr, false);
                 peers.clear();
                 events.push_back(std::move(event));
@@ -907,8 +939,9 @@ namespace conker::netplay {
             event.packet = packet;
             events.push_back(std::move(event));
         }
-        else if (std::holds_alternative<Delay>(packet)) {
-            // Once started.
+        else if (std::holds_alternative<Delay>(packet) || std::holds_alternative<Resync>(packet) ||
+            std::holds_alternative<StatePart>(packet)) {
+            // Once started (lockstep checks the reads).
             if (!started) {
                 drop(peer, Reason::protocol, &events);
                 return;
@@ -935,20 +968,28 @@ namespace conker::netplay {
         constexpr double flush_seconds = 2.0;
         const double until = now() + flush_seconds;
         while (now() < until) {
-            bool pending = false;
+            bool any = false;
             for (const Peer& peer : peers) {
-                SteamNetConnectionRealTimeStatus_t status;
-                if (SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.connection, &status, 0, nullptr) == k_EResultOK &&
-                    status.m_eState == k_ESteamNetworkingConnectionState_Connected &&
-                    status.m_cbPendingReliable + status.m_cbSentUnackedReliable > 0) {
-                    pending = true;
-                }
+                any = any || pending(peer.connection);
             }
-            if (!pending) {
+            if (!any) {
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+    }
+
+    void Session::set_release(const std::string& name) {
+        const bool valid = name.size() <= max_release_name &&
+            std::all_of(name.begin(), name.end(), [](char c) { return c > ' ' && c <= '~'; });
+        release = valid ? name : std::string();
+    }
+
+    void Session::refuse(Peer& peer, Reason reason) {
+        send_to(peer.connection, Refuse{ reason, release });
+        SteamNetworkingSockets()->CloseConnection(peer.connection, k_ESteamNetConnectionEnd_App_Min + (int)reason,
+            describe(reason), true);
+        peers.erase(peers.begin() + (&peer - peers.data()));
     }
 
     void Session::drop(Peer& peer, Reason reason, std::vector<Event>* events) {
@@ -965,17 +1006,42 @@ namespace conker::netplay {
         peers.erase(peers.begin() + (&peer - peers.data()));
     }
 
+    bool Session::pending(uint32_t connection) const {
+        SteamNetConnectionRealTimeStatus_t status;
+        return SteamNetworkingSockets()->GetConnectionRealTimeStatus(connection, &status, 0, nullptr) == k_EResultOK &&
+            status.m_eState == k_ESteamNetworkingConnectionState_Connected &&
+            status.m_cbPendingReliable + status.m_cbSentUnackedReliable > 0;
+    }
+
+    void Session::set_send_rate(uint32_t connection, bool state) {
+        ISteamNetworkingUtils* utils = SteamNetworkingUtils();
+        const int rate = state ? state_send_rate : default_send_rate;
+        utils->SetConnectionConfigValueInt32(connection, k_ESteamNetworkingConfig_SendRateMin, rate);
+        utils->SetConnectionConfigValueInt32(connection, k_ESteamNetworkingConfig_SendRateMax, rate);
+        utils->SetConnectionConfigValueInt32(connection, k_ESteamNetworkingConfig_SendBufferSize,
+            state ? state_send_buffer : default_send_buffer);
+    }
+
     // Everything is sent reliably (resent until it arrives, in order), and at once: lockstep needs every
     // input, and waits for it anyway.
     void Session::send_to(uint32_t connection, const Packet& packet) {
         uint8_t buffer[max_packet_size];
-        const size_t size = encode(packet, buffer);
+        std::vector<uint8_t> large;
+        std::span<uint8_t> out = buffer;
+        if (std::holds_alternative<StatePart>(packet)) {
+            large.resize(max_message_size);
+            out = large;
+        }
+        const size_t size = encode(packet, out);
         if (size == 0) {
             std::fprintf(stderr, "[netplay] not sending an invalid packet\n");
             return;
         }
-        SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size,
+        const EResult result = SteamNetworkingSockets()->SendMessageToConnection(connection, out.data(), (uint32)size,
             k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
+        if (result != k_EResultOK && result != k_EResultNoConnection && result != k_EResultInvalidParam) {
+            std::fprintf(stderr, "[netplay] a message couldn't be sent (%d)\n", (int)result);
+        }
     }
 
     void Session::send(const Inputs& inputs) {
@@ -998,6 +1064,29 @@ namespace conker::netplay {
         for (const Peer& peer : peers) {
             if (peer.port >= 0) {
                 send_to(peer.connection, gone);
+            }
+        }
+    }
+
+    void Session::send(const Resync& resync) {
+        for (const Peer& peer : peers) {
+            if (peer.port >= 0) {
+                send_to(peer.connection, resync);
+            }
+        }
+    }
+
+    void Session::send_state(uint8_t ports, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash) {
+        for (Peer& peer : peers) {
+            if (peer.port < 0 || (peer.ports & ports) == 0) {
+                continue;
+            }
+            set_send_rate(peer.connection, true);
+            peer.sending_state = true;
+            for (size_t offset = 0; offset < state.size(); offset += max_state_part) {
+                const size_t count = (std::min)(max_state_part, state.size() - offset);
+                send_to(peer.connection, StatePart{ read, (uint32_t)state.size(), (uint32_t)offset, hash,
+                    std::vector<uint8_t>(state.begin() + offset, state.begin() + offset + count) });
             }
         }
     }

@@ -20,9 +20,9 @@ namespace {
 #define CHECK(x) check((x), #x, __LINE__)
 
     std::vector<uint8_t> bytes_of(const Packet& packet) {
-        uint8_t buffer[max_packet_size];
-        const size_t size = encode(packet, buffer);
-        return std::vector<uint8_t>(buffer, buffer + size);
+        std::vector<uint8_t> buffer(max_message_size);
+        buffer.resize(encode(packet, buffer));
+        return buffer;
     }
 
     bool decodes(const std::vector<uint8_t>& data) {
@@ -57,7 +57,9 @@ int main() {
     CHECK(round_trips(Welcome{ 0x02, 2 }, 7));
     CHECK(round_trips(Welcome{ 0x08, 4 }, 7));
     CHECK(round_trips(Welcome{ 0x0E, 4 }, 7));      // three players on one machine
-    CHECK(round_trips(Refuse{ Reason::rom }, 6));
+    CHECK(round_trips(Refuse{ Reason::rom }, 47));
+    CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
+    CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
     CHECK(round_trips(some_inputs(), 159));
     CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 273));
     Hash regions{ 30, 1 };
@@ -118,6 +120,8 @@ int main() {
     CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
+    CHECK(bytes_of(Refuse{ Reason::build, "a release" }).empty());
+    CHECK(bytes_of(Refuse{ Reason::build, std::string(max_release_name + 1, 'a') }).empty());
     CHECK(bytes_of(Bye{ (Reason)(last_reason + 1) }).empty());
     Inputs bad = some_inputs();
     bad.port = 4;
@@ -214,7 +218,7 @@ int main() {
     data = hello;
     data[0] = 'X';
     CHECK(!decodes(data));
-    for (int kind : { 0, 12, 255 }) {
+    for (int kind : { 0, 14, 255 }) {
         data = hello;
         data[4] = (uint8_t)kind;
         CHECK(!decodes(data));
@@ -252,7 +256,50 @@ int main() {
     data = r; data[53] = 5; CHECK(!decodes(data));
     data = r; data[55] = max_delay + 1; CHECK(!decodes(data));
     data = bytes_of(Ready{ 1 }); data[5] = 2; CHECK(!decodes(data));
-    data = bytes_of(Refuse{ Reason::kicked }); CHECK(data.size() == 6 && data[5] == last_reason);
+    data = bytes_of(Refuse{ Reason::kicked }); CHECK(data.size() == 47 && data[5] == last_reason && data[6] == 0);
+
+    // Refuse keeps its layout from version 17 on: read in any of them (decode_refusal), a reason this
+    // version doesn't know as Reason::version; not in an older one, nor with the padding not zero.
+    const std::vector<uint8_t> refusal = bytes_of(Refuse{ Reason::build, "v0.1.6-netplay.15" });
+    CHECK(refusal[6] == 17 && refusal[7] == 'v' && refusal[23] == '5' && refusal[24] == 0 && refusal[46] == 0);
+    CHECK(decode_refusal(refusal) && *decode_refusal(refusal) == (Refuse{ Reason::build, "v0.1.6-netplay.15" }));
+    data = refusal; data[2] = 0x40; data[3] = 0x01;                  // version 320
+    CHECK(!decodes(data) && decode_refusal(data) && decode_refusal(data)->release == "v0.1.6-netplay.15");
+    data[5] = 200;
+    CHECK(decode_refusal(data) && decode_refusal(data)->reason == Reason::version);
+    data = refusal; data[2] = 16; CHECK(!decode_refusal(data));
+    data = refusal; data[30] = 'x'; CHECK(!decodes(data) && !decode_refusal(data));
+    data = refusal; data[6] = 41; CHECK(!decodes(data) && !decode_refusal(data));
+    data = refusal; data[10] = ' '; CHECK(!decodes(data) && !decode_refusal(data));
+    data = refusal; data[5] = 0; CHECK(!decode_refusal(data) || decode_refusal(data)->reason == Reason::version);
+    data = refusal; data.pop_back(); CHECK(!decode_refusal(data));
+    CHECK(!decode_refusal(bytes_of(Ready{ 1 })));
+
+    // Desync recovery: Resync, and StatePart, the one kind of no fixed size.
+    CHECK(round_trips(Resync{ 0x01020304, 0x0A }, 10));
+    data = bytes_of(Resync{ 0x01020304, 0x0A });
+    CHECK(data[4] == 12 && data[5] == 4 && data[8] == 1 && data[9] == 0x0A);
+    CHECK(bytes_of(Resync{ 5, 0 }).empty());                        // nobody
+    CHECK(bytes_of(Resync{ 5, 1 }).empty());                        // the host
+    CHECK(bytes_of(Resync{ 5, 0x10 }).empty());                     // past the ports
+    StatePart part{ 900, 100, 40, 0x1122334455667788ull, std::vector<uint8_t>(60, 0xAB) };
+    CHECK(round_trips(part, 25 + 60));
+    data = bytes_of(part);
+    CHECK(data[4] == 13 && data[5] == 0x84 && data[6] == 3 && data[9] == 100 && data[13] == 40 && data[17] == 0x88 &&
+        data[24] == 0x11 && data[25] == 0xAB && data[84] == 0xAB);
+    StatePart whole{ 1, max_state_size, max_state_size - max_state_part, 7, std::vector<uint8_t>(max_state_part, 1) };
+    CHECK(round_trips(whole, max_message_size));
+    StatePart bad_part = part; bad_part.bytes.push_back(0); CHECK(bytes_of(bad_part).empty());          // past the end
+    bad_part = part; bad_part.bytes.clear(); CHECK(bytes_of(bad_part).empty());
+    bad_part = part; bad_part.size = 0; bad_part.offset = 0; bad_part.bytes = { 1 }; CHECK(bytes_of(bad_part).empty());
+    bad_part = part; bad_part.size = max_state_size + 1; CHECK(bytes_of(bad_part).empty());
+    bad_part = part; bad_part.offset = 100; bad_part.bytes = { 1 }; CHECK(bytes_of(bad_part).empty());
+    bad_part = whole; bad_part.offset--; bad_part.bytes.push_back(1); CHECK(bytes_of(bad_part).empty());   // more than a part holds
+    data = bytes_of(part); data.pop_back(); CHECK(decodes(data));                    // fewer bytes: a smaller part
+    data.resize(25); CHECK(!decodes(data));                                          // no bytes
+    data = bytes_of(part); data.resize(25 + 61); CHECK(!decodes(data));              // past the state's end
+    std::vector<uint8_t> small(max_packet_size);
+    CHECK(encode(part, small) == 85 && encode(whole, small) == 0);                   // too big for the buffer
 
     if (failures == 0) {
         std::printf("packets_test: all passed\n");
