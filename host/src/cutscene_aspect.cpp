@@ -86,6 +86,10 @@ void conker::cutscene_aspect::set_dl_ring(uint32_t slot) {
     bars_dl_next = slot < bars_dl_slots ? slot : 0;
 }
 
+bool conker::cutscene_aspect::pillarboxed() {
+    return pillarbox;
+}
+
 void conker::cutscene_aspect::update(uint8_t* rdram) {
 #if defined(CONKER_RT64)
     if (!conker::graphics_config_ready()) {
