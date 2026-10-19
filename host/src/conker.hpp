@@ -84,6 +84,9 @@ namespace conker {
         // A hash of the mods on but texture packs, in load order: each one's id, version, file and saved
         // settings (0 for none), for netplay's handshake: everyone in a match needs the same.
         uint64_t mods_hash();
+        // The mods on but texture packs, in load order, for the player: "Name 1.2.0, Other 0.3.1" (empty for
+        // none).
+        std::string mods_text();
 #else
         inline bool active() { return false; }
 #endif

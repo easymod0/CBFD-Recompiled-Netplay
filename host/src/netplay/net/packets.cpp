@@ -133,7 +133,7 @@ namespace conker::netplay {
             case Reason::protocol: return "an unexpected or broken packet";
             case Reason::desync: return "the games went out of sync";
             case Reason::timeout: return "the connection timed out";
-            case Reason::mods: return "mods on (netplay allows none but texture packs)";
+            case Reason::mods: return "other mods on than the host's (everyone needs the same mods, versions and mod settings; texture packs aside)";
             case Reason::key: return "not this match's join code";
         }
         return "an unknown reason";

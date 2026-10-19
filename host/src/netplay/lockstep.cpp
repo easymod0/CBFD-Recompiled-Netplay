@@ -67,6 +67,7 @@ namespace {
     std::string join_where;         // a join code, or a room code
     std::string server_option;      // the netplay server's "host:port", for rooms
     bool direct_option = false;     // through the server: direct connections allowed, not only the relay
+    bool public_option = false;     // hosting through a room: it's in the server's public list (--netplay-public)
     int wanted_players = 2;
     int local_option = 1;           // the players on this machine
     bool host_own_view = true;      // hosting: the rule this peer will start the match with
@@ -132,6 +133,14 @@ namespace {
     Rendezvous rendezvous = Rendezvous::none;
     double rendezvous_since = 0;
     std::string room_text;          // hosting: the room's code, once the server has made it
+    // The public room list (browse): a connection to the netplay server of its own, while no match is being
+    // connected, which asks for the list again every few seconds.
+    conker::netplay::Signaller* browser = nullptr;
+    conker::netplay::Hello browse_hello;
+    double next_list = 0;
+    double browse_since = 0;
+    double asked_at = 0;            // the list was last asked for
+    bool browse_heard = false;      // a list has come
     uint8_t own_ports = 0;          // bit n: port n
     int match_players = 0;
     conker::netplay::Hello sent;    // what this peer said in the handshake (begin's)
@@ -925,6 +934,10 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
         direct_option = true;
         return true;
     }
+    if (std::strcmp(option, "--netplay-public") == 0) {
+        public_option = true;
+        return true;
+    }
     if (std::strcmp(option, "--players") == 0) {
         number(2, netplay::max_players, n);
         wanted_players = (int)n;
@@ -1034,9 +1047,10 @@ bool conker::lockstep::active() {
     return host_port > 0 || host_room || !join_where.empty();
 }
 
-void conker::lockstep::set_server(const std::string& server, bool allow_direct) {
+void conker::lockstep::set_server(const std::string& server, bool allow_direct, bool listed) {
     server_option = server;
     direct_option = allow_direct;
+    public_option = listed;
 }
 
 void conker::lockstep::set_host(int port, int players, bool own_view, int input_delay, int local, int rollback) {
@@ -1070,6 +1084,10 @@ bool conker::lockstep::prepare() {
     }
     if ((host_room || netplay::decode_room_code(join_where)) && server_option.empty()) {
         std::fprintf(stderr, "[netplay] a room is on a netplay server: give its address with --netplay-server <host:port>\n");
+        return false;
+    }
+    if (public_option && !host_room) {
+        std::fprintf(stderr, "[netplay] --netplay-public lists a room: it needs --netplay-host room\n");
         return false;
     }
     if (!join_where.empty() && rollback_option > 0) {
@@ -1158,21 +1176,27 @@ std::vector<std::string> conker::lockstep::take_news() {
     return out;
 }
 
+namespace {
+    // Starts the networking the first time (false: `error` says why).
+    bool start_library(std::string& error) {
+        if (!library_started) {
+            if (!conker::netplay::startup(error)) {
+                error = "couldn't start the networking: " + error;
+                return false;
+            }
+            library_started = true;
+        }
+        return true;
+    }
+}
+
 bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     std::scoped_lock lock(session_mutex);
-    // No mods in a match (texture packs aside): a mod is native code the others would have to trust. The
-    // host refuses a joiner with any (the handshake's mods hash); this says so before connecting.
-    if (me.mods != 0) {
-        error = "netplay allows no mods but texture packs: turn them off in the Mods menu.";
+    if (!start_library(error)) {
         return false;
     }
-    if (!library_started) {
-        if (!netplay::startup(error)) {
-            error = "couldn't start the networking: " + error;
-            return false;
-        }
-        library_started = true;
-    }
+    // One connection to the server at a time (the signaller's).
+    stop_browsing();
     if (faking) {
         fake.outage = false;
         netplay::set_fake_network(fake);
@@ -1281,6 +1305,14 @@ namespace {
     // How long the netplay server has to answer each step.
     constexpr double server_seconds = 15.0;
 
+    // Hosting a public room: listed as it is now (the signaller sends that only when it changes).
+    void list_room() {
+        if (public_option && host_room && signaller != nullptr && signaller->room() != 0 && match_players >= 2) {
+            signaller->publish(sent, { 0, (uint8_t)match_players, (uint8_t)std::clamp(joined, 1, match_players), match_started,
+                direct_option, (uint8_t)rollback_option });
+        }
+    }
+
     // Connecting through the netplay server (poll_connect's, with the lock held): registering, then the
     // host's session and room, or the joiner's lookup and then its session. A Progress when that's all there
     // is this time; nothing when the session's to be polled.
@@ -1316,6 +1348,9 @@ namespace {
                     return fail("The netplay server has no relay: allow direct connections, or use another server.");
                 }
                 std::printf("[netplay] on the netplay server%s\n", signaller->turn() ? ", with its relay" : "");
+                if (public_option && host_room && !signaller->has_public_rooms()) {
+                    std::printf("[netplay] the netplay server is older and has no public rooms: this one is private\n");
+                }
                 rendezvous_since = now();
                 if (host_room) {
                     session = new conker::netplay::Session();
@@ -1433,6 +1468,7 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 break;
         }
     }
+    list_room();
     if (match_started) {
         std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s%s\n", match_players,
             ports_text(own_ports).c_str(), delay, match_own_view ? ", everyone sees only their own view" : "",
@@ -1444,8 +1480,10 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
     if (rendezvous == Rendezvous::creating && signaller->room() != 0) {
         rendezvous = Rendezvous::none;
         room_text = netplay::encode_room_code(signaller->room());
-        std::printf("[netplay] room code %s (the others join with it): waiting for the players\n", room_text.c_str());
+        std::printf("[netplay] room code %s (the others join with it%s): waiting for the players\n", room_text.c_str(),
+            public_option ? (", or find it as " + netplay::room_name(signaller->room()) + " in the public list").c_str() : "");
         std::fflush(stdout);
+        list_room();
     }
     // A host that lost the server can't be found by anyone else.
     if (hosting && signaller != nullptr && signaller->state() == netplay::Signaller::State::failed) {
@@ -1492,6 +1530,103 @@ void conker::lockstep::cancel() {
     room_text.clear();
     match_started = false;
     publish();
+}
+
+namespace {
+    // How often the room list is asked for again (the server allows one each 3 s, after a few).
+    constexpr double list_seconds = 5.0;
+}
+
+bool conker::lockstep::browse(const netplay::Hello& me, std::string& error) {
+    std::scoped_lock lock(session_mutex);
+    if (session != nullptr || signaller != nullptr) {
+        error = "a match is being connected";
+        return false;
+    }
+    if (server_option.empty()) {
+        error = "no netplay server is set";
+        return false;
+    }
+    if (!start_library(error)) {
+        return false;
+    }
+    stop_browsing();
+    // A new id each time, as for a match (the server keeps a released one from reuse for a while).
+    if (!netplay::new_id(error)) {
+        return false;
+    }
+    browser = new netplay::Signaller();
+    if (!browser->connect(server_option, error)) {
+        delete browser;
+        browser = nullptr;
+        return false;
+    }
+    browse_hello = me;
+    next_list = 0;
+    browse_since = now();
+    browse_heard = false;
+    return true;
+}
+
+void conker::lockstep::browse_again() {
+    std::scoped_lock lock(session_mutex);
+    next_list = 0;
+}
+
+conker::lockstep::Browse conker::lockstep::poll_browse() {
+    using conker::netplay::Signaller;
+    std::scoped_lock lock(session_mutex);
+    Browse out;
+    if (browser == nullptr) {
+        out.state = Browse::State::failed;
+        out.error = "not looking at the rooms";
+        return out;
+    }
+    browser->poll();
+    if (browser->state() == Signaller::State::failed) {
+        out.state = Browse::State::failed;
+        out.error = browser->error();
+        return out;
+    }
+    if (browser->state() == Signaller::State::ready && !browser->has_public_rooms()) {
+        out.state = Browse::State::failed;
+        out.error = "the netplay server is older and has no public rooms (rooms by code still work)";
+        return out;
+    }
+    if (browser->state() != Signaller::State::ready) {
+        if (now() - browse_since > server_seconds) {
+            out.state = Browse::State::failed;
+            out.error = "the netplay server didn't answer";
+        }
+        return out;
+    }
+    browse_heard = browse_heard || browser->listing() == Signaller::Lookup::found;
+    if (browser->listing() == Signaller::Lookup::waiting && now() - asked_at > server_seconds) {
+        out.state = Browse::State::failed;
+        out.error = "the netplay server stopped answering";
+        return out;
+    }
+    if (browser->listing() != Signaller::Lookup::waiting && now() >= next_list) {
+        browser->list_rooms(browse_hello);
+        asked_at = now();
+        next_list = asked_at + list_seconds;
+    }
+    // The last list, while the next is asked for.
+    if (browse_heard) {
+        out.state = Browse::State::listed;
+        out.others = browser->others();
+        for (const netplay::signal::ListedRoom& room : browser->rooms()) {
+            out.rooms.push_back({ netplay::encode_room_code(room.room), netplay::room_name(room.room), room.players, room.joined,
+                room.playing, room.direct, room.rollback });
+        }
+    }
+    return out;
+}
+
+void conker::lockstep::stop_browsing() {
+    std::scoped_lock lock(session_mutex);
+    delete browser;
+    browser = nullptr;
 }
 
 bool conker::lockstep::connected() {

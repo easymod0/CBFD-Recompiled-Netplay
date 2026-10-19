@@ -102,11 +102,11 @@ same headless or on another machine:
   lose a little at its sides). While the match's rule is that everyone sees only their own view (below),
   each split-screen camera's culls are also made as tall and wide as "my view only" draws it, on every
   machine.
-- **Save states** (F5, F7) are off. **Mods:** none, in netplay matches, recordings and replays: a mod
-  is native code the other players would have to trust, and a recording doesn't say which were on.
-  Netplay won't host or join with one on, and the handshake still carries a hash of each mod's file
-  and saved settings, so the host refuses a player with any ("mods on"). Texture packs only change
-  the picture: they're left out, and can differ.
+- **Save states** (F5, F7) are off. **Mods:** in a netplay match, the same ones for everyone (this
+  fork only): the handshake carries a hash of each mod on (its id, version, file and saved settings,
+  in load order), and the host refuses a player whose mods differ in any of that. The room list only
+  shows rooms with the same mods as yours. None in recordings and replays, as a recording doesn't say
+  which were on. Texture packs only change the picture: they're left out, and can differ.
 - **The renderer** writes nothing into game memory. RT64's Render to RAM copies each frame's
   colour and depth images back into the game's memory, as the N64's RDP did, from the graphics thread
   whenever it gets to the display list. Headless, with no renderer, nothing is written. So a window

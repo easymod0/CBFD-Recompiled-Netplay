@@ -6,7 +6,10 @@ Players who play through a room (rather than by a join code with the host's addr
 - **The signalling server** (`netplay_server`, from `host/src/netplay/net/signal_server.cpp`): players
   register a random id with it. A host makes a room there and gets a room code (`7KQ2-M9XD`, no address
   in it) to send the others; they look the code up to find the host. The room lasts as long as the host
-  stays connected. The server passes GameNetworkingSockets' ICE signals between ids so that two players
+  stays connected. A host may make its room public (this fork's): the server lists it for players whose
+  game is the same (build, ROM, settings and mods, by one hash it only compares) on platforms that play
+  together (Linux with Windows; macOS apart), under a name the game makes from the room's number, so
+  nothing a player typed is shown. The server passes GameNetworkingSockets' ICE signals between ids so that two players
   can find a way to each other, and hands each player TURN credentials of their own. It never sees the
   game's packets. It uses little bandwidth.
 - **coturn**, the TURN relay: when the players' networks don't let them connect directly, or when they
@@ -108,6 +111,16 @@ is always given out at the public address.
 
 `docker compose down` stops them.
 
+## Versions
+
+A game update doesn't need a new server: the server only passes signals on, keeps rooms and compares
+hashes it doesn't read, so it works for any build of the game. Only a change to signalling itself (a
+new kind of packet, for something new the game needs from the server) makes a new signalling version,
+and then the server still speaks the older ones (from version 2), each to the games that speak it, and
+keeps them apart: a game finds rooms of its own version only. A game newer than its server speaks the
+server's version instead, and goes without what's newer (public rooms need version 3: on an older
+server, rooms by code still work). The image is only rebuilt when the server's code changes.
+
 ## What's limited
 
 - **Signalling:** a peer must register within 5 s, with an id nobody else has (nor had in the last
@@ -115,7 +128,8 @@ is always given out at the public address.
   counts as one), 20 new ones in a burst then one each 2 s, 4096 in all, and 20 packets a second each
   (bursts of 60). A connection without a room that's idle for 10 minutes is closed, and any after 12 hours. One room each. From one IP address, at most 10 lookups of room codes that
   aren't there, then one each 6 s, so codes can't be guessed (a code is one of a trillion, and isn't
-  given out again for an hour after its room closes). Anything else closes the connection. The server
+  given out again for an hour after its room closes). At most 6 room lists in a burst, then one each 3 s,
+  of 32 rooms at most; at most 2 public rooms from one address at once (more stay private). Anything else closes the connection. The server
   logs counts, never addresses or codes.
 - **coturn:** only the signalling server's credentials; UDP only (no TCP listener, and no TCP relay,
   which could open connections anywhere); IPv4 relays only; at most 200 KB/s per relay, `TURN_USER_QUOTA` relays per player (32: one per

@@ -8,6 +8,7 @@
 //   netplay_probe code <address:port> <key, hex>
 //   netplay_probe host room --signal <server:port> [--direct 1] [options]   (prints its room code)
 //   netplay_probe join <room code> --signal <server:port> [--direct 1] [options]
+//   netplay_probe list --signal <server:port> [--build/--rom/--profile/--mods <hex>] [--platform <n>]
 //     --reads <n>        how many reads each peer sends (300: 10 s)
 //     --local <n>        players on this peer, each with a port (1 by default)
 //     --loss <percent>   the library drops this share of the packets sent (they're resent)
@@ -25,10 +26,17 @@
 //     --turn-password <p>  (a test) use the server's relay with this password instead of the one it gave
 //     --again 1          (a test, hosting a room) make a room and leave first, then host with a new id, as
 //                        the game does when a player tries again
+//     --public 1         (hosting a room) list it in public, as the players join and the match starts
+//     --platform <n>     (hosting a public room, or listing) say this platform (1 Linux, 2 Windows, 3 macOS)
+//                        instead of this one's
+//     --speak <version>  (a test, with --signal) speak this older signalling version, as an older game does
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
-// that. `code` prints the join code for an address and key.
+// that. `code` prints the join code for an address and key. `list` prints the public rooms a game with
+// those hashes could join ("listed <code> <joined>/<players>", then "playing" and "direct" if so, and
+// "rollback <n>"), then "rooms <count>, others <count>" (those of the same build and ROM with other
+// settings or mods), and exits 0 (1 if it couldn't get them).
 
 #include <bit>
 #include <chrono>
@@ -77,7 +85,8 @@ namespace {
                              "       netplay_probe host room | join <room code>, with --signal <server:port> [--direct 1]\n"
                              "       [--turn-password <p>] (a test: not the server's)\n"
                              "       [--reads 300] [--loss <percent>] [--build <hex>] [--rom <hex>] [--profile <hex>] [--mods <hex>]\n"
-                             "       netplay_probe code <address:port> <key, hex>\n");
+                             "       netplay_probe code <address:port> <key, hex>\n"
+                             "       netplay_probe list --signal <server:port> [--build/--rom/--profile/--mods <hex>] [--platform <n>]\n");
         return 2;
     }
 
@@ -144,11 +153,12 @@ int main(int argc, char** argv) {
         std::printf("%s\n", code.c_str());
         return 0;
     }
-    if (argc < 3 || (std::strcmp(argv[1], "host") != 0 && std::strcmp(argv[1], "join") != 0)) {
+    const bool listing = argc >= 2 && std::strcmp(argv[1], "list") == 0;
+    if (!listing && (argc < 3 || (std::strcmp(argv[1], "host") != 0 && std::strcmp(argv[1], "join") != 0))) {
         return usage();
     }
     const bool hosting = std::strcmp(argv[1], "host") == 0;
-    const std::string where = argv[2];
+    const std::string where = listing ? std::string() : argv[2];
     int players = 2;
     uint32_t reads = 300;
     float loss = 0;
@@ -160,7 +170,10 @@ int main(int argc, char** argv) {
     bool relay_only = true;
     std::string turn_password;
     bool again = false;
-    for (int i = 3; i + 1 < argc; i += 2) {
+    bool listed = false;
+    signal::Platform platform = this_platform();
+    uint16_t speaks = signal::version;
+    for (int i = listing ? 2 : 3; i + 1 < argc; i += 2) {
         const std::string option = argv[i];
         const char* value = argv[i + 1];
         if (option == "--players") players = std::atoi(value);
@@ -177,7 +190,14 @@ int main(int argc, char** argv) {
         else if (option == "--direct") relay_only = std::atoi(value) == 0;
         else if (option == "--turn-password") turn_password = value;
         else if (option == "--again") again = std::atoi(value) != 0;
+        else if (option == "--public") listed = std::atoi(value) != 0;
+        else if (option == "--platform") platform = (signal::Platform)std::atoi(value);
+        else if (option == "--speak") speaks = (uint16_t)std::atoi(value);
         else return usage();
+    }
+    if ((uint8_t)platform < 1 || platform > signal::Platform::last || (listing && signal_server.empty()) ||
+        speaks < signal::oldest_version || speaks > signal::version) {
+        return usage();
     }
     const bool oversize = !hosting && argc == 4 && std::strcmp(argv[3], "--oversize") == 0;
     const bool silent = !hosting && argc == 4 && (std::strcmp(argv[3], "--silent") == 0 || oversize);
@@ -195,6 +215,41 @@ int main(int argc, char** argv) {
         shutdown();
         return silent_result;
     }
+    if (listing) {
+        int list_result = 1;
+        {
+            Signaller signaller;
+            signaller.speak(speaks);
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            const auto wait = [&](auto done) {
+                while (!done() && signaller.state() != Signaller::State::failed && std::chrono::steady_clock::now() < until) {
+                    signaller.poll();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                return done();
+            };
+            if (signaller.connect(signal_server, error) && wait([&] { return signaller.state() == Signaller::State::ready; })) {
+                if (!signaller.has_public_rooms()) {
+                    error = "the server has no public rooms (an older one)";
+                }
+                signaller.list_rooms(me, platform);
+                if (signaller.has_public_rooms() && wait([&] { return signaller.listing() == Signaller::Lookup::found; })) {
+                    for (const signal::ListedRoom& room : signaller.rooms()) {
+                        std::printf("listed %s %d/%d%s%s rollback %d\n", encode_room_code(room.room).c_str(), room.joined, room.players,
+                            room.playing ? " playing" : "", room.direct ? " direct" : "", room.rollback);
+                    }
+                    std::printf("rooms %zu, others %d\n", signaller.rooms().size(), signaller.others());
+                    list_result = 0;
+                }
+            }
+            if (list_result != 0) {
+                std::fprintf(stderr, "couldn't list the rooms: %s\n", signaller.state() == Signaller::State::failed ? signaller.error().c_str() :
+                    !error.empty() ? error.c_str() : "no answer");
+            }
+        }
+        shutdown();
+        return list_result;
+    }
     if (loss > 0) {
         SteamNetworkingUtils()->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, loss);
     }
@@ -203,6 +258,7 @@ int main(int argc, char** argv) {
         // Through a room on the server: registered there first, then the host makes its room and a joiner
         // looks it up.
         Signaller signaller;
+        signaller.speak(speaks);
         Session session;
         bool started = false;
         uint64_t room = 0;
@@ -283,12 +339,20 @@ int main(int argc, char** argv) {
             std::map<int, Received> received;   // by port
             int joined = local;                 // the host counts its own
             bool playing = false;               // started: all the ports are taken
+            // A public room: listed as it is now (again as that changes; unchanged, nothing is sent).
+            const auto list_room = [&] {
+                if (listed && hosting && room != 0) {
+                    signaller.publish(me, { 0, (uint8_t)players, (uint8_t)joined, playing, !relay_only, 0 }, platform);
+                }
+            };
+            list_room();
             bool ended = false;
             uint32_t sent = 0;                  // reads sent so far
             double done_at = 0;
             const auto start = std::chrono::steady_clock::now();
             auto next_tick = start;
             while (!ended) {
+                list_room();
                 for (Event& event : session.poll()) {
                     switch (event.type) {
                         case Event::Type::joined:

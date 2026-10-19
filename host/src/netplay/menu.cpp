@@ -11,6 +11,10 @@
 // sees another's address (unless direct connections are allowed) and no port needs forwarding. The server's
 // address and that choice are settings of their own, kept in netplay.json in the config folder.
 //
+// A room can be public (this fork's): the server lists it, under a name made from its number, for players
+// whose build, ROM, settings and mods are the same, on platforms that play together. The Join tab shows
+// that list while it's open, asked for again every few seconds, and joins a room from it.
+//
 // Or directly: the host's join code is made, once hosting, from the address the host gives and the match's
 // random key: the game can't know its public address without a server to ask, so the host looks it up (or
 // gives its local one, for a match at home). The code is the host's address, so the menu says to share it
@@ -23,6 +27,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -107,6 +112,14 @@ namespace {
         recompui::Element* status_row = nullptr;   // hidden while there's nothing to say
         recompui::Label* status_label = nullptr;
         recompui::Element* direct_rows = nullptr;  // hosting directly: the port and address
+        recompui::Element* room_row = nullptr;     // hosting through a room: private or public
+        recompui::Element* rooms_box = nullptr;    // the public rooms, a row each
+        recompui::Label* rooms_label = nullptr;    // how the list goes, or what it shows
+        std::string shown_rooms;                   // what rooms_box shows, to make it again only when that changes
+        bool browsing = false;                     // the Join tab is open: the public list is polled
+        bool join_tab = false;                     // the Join tab is the one open
+        bool closing = false;                      // the menu is closing: no room list
+        std::optional<conker::netplay::Hello> browse_hello;   // the room list's, made once each time the menu opens
         recompui::Element* host_section = nullptr; // one at a time, by the Host and Join tabs
         recompui::Element* join_section = nullptr;
         recompui::Button* host_button = nullptr;
@@ -116,6 +129,7 @@ namespace {
         int local_players = 1;              // the players on this computer, hosting or joining
         bool hosting = false;               // a match is hosted (connecting, as the host)
         bool host_directly = false;         // hosting: by a join code (a port), not a room on the server
+        bool public_room = false;           // hosting through a room: in the server's public list
         ServerSettings settings = load_settings();
         bool own_view_for_everyone = true;  // hosting: the match's screens rule
         int input_delay = -1;               // hosting: reads, or -1 for auto
@@ -201,36 +215,147 @@ namespace {
             host_button->set_enabled(state == State::idle);
             join_button->set_enabled(state == State::idle);
             cancel_button->set_display(state == State::connecting ? recompui::Display::Flex : recompui::Display::None);
+            // The room list only while nothing is being connected (it's asked for again once it's idle).
+            rooms_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
+            if (state == State::idle && join_tab && !browsing && !closing) {
+                start_browsing();
+            }
             // An update applies the text (and, while connecting, polls).
             queue_update();
         }
 
-        // Hosting or joining: the Hello from the stored ROM, then lockstep's begin.
-        void begin() {
+        // This game's Hello, from the stored ROM (false: there's none yet).
+        bool my_hello(conker::netplay::Hello& hello) {
             std::ifstream file(stored_rom, std::ios::binary);
             const std::vector<uint8_t> rom((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             if (rom.empty()) {
+                return false;
+            }
+            hello = conker::netplay::hello_for_rom(rom);
+            return true;
+        }
+
+        // Hosting or joining: the Hello from the stored ROM, then lockstep's begin.
+        void begin() {
+            stop_browsing();
+            conker::netplay::Hello hello;
+            if (!my_hello(hello)) {
                 set_state(State::idle, "Load the ROM first (Start Game on the launcher).");
                 return;
             }
             std::string error;
-            if (!conker::lockstep::begin(conker::netplay::hello_for_rom(rom), error)) {
+            if (!conker::lockstep::begin(hello, error)) {
                 set_state(State::idle, "Couldn't: " + error);
                 return;
             }
             set_state(State::connecting, "Connecting...");
         }
 
-        // Through the server: false (and says why) if none is set.
-        bool use_server() {
+        // Through the server (hosting a room public if `listed`): false (and says why) if none is set.
+        bool use_server(bool listed = false) {
             settings.server = trimmed(settings.server);
             if (settings.server.empty()) {
                 set_state(State::idle, "Set a netplay server first (Server, above).");
                 return false;
             }
             save_settings(settings);
-            conker::lockstep::set_server(settings.server, settings.allow_direct);
+            conker::lockstep::set_server(settings.server, settings.allow_direct, listed);
             return true;
+        }
+
+        // The public room list: asked for while the Join tab is open and nothing is being connected.
+        void start_browsing() {
+            stop_browsing();
+            shown_rooms.clear();
+            rooms_box->clear_children();
+            settings.server = trimmed(settings.server);
+            // Hashing the ROM and the mods takes a moment: once each time the menu opens (the mods can only
+            // change while it's closed).
+            conker::netplay::Hello hello;
+            if (!browse_hello && my_hello(hello)) {
+                browse_hello = hello;
+            }
+            std::string error;
+            if (settings.server.empty()) {
+                rooms_label->set_text("Set a netplay server (Server, above) to see its public rooms.");
+            }
+            else if (!browse_hello) {
+                rooms_label->set_text("Load the ROM first (Start Game on the launcher) to see the public rooms.");
+            }
+            else {
+                conker::lockstep::set_server(settings.server, settings.allow_direct);
+                if (!conker::lockstep::browse(*browse_hello, error)) {
+                    rooms_label->set_text("Couldn't get the public rooms: " + error + ".");
+                }
+                else {
+                    rooms_label->set_text("Getting the public rooms...");
+                    browsing = true;
+                }
+            }
+            queue_update();
+        }
+
+        void stop_browsing() {
+            if (browsing) {
+                conker::lockstep::stop_browsing();
+                browsing = false;
+            }
+        }
+
+        // The list as it is now: a row each, made again when it changes.
+        void show_rooms(const conker::lockstep::Browse& list) {
+            if (list.state == conker::lockstep::Browse::State::failed) {
+                stop_browsing();
+                shown_rooms.clear();
+                rooms_box->clear_children();
+                rooms_label->set_text("Couldn't get the public rooms: " + list.error + ". Press Refresh to try again.");
+                return;
+            }
+            if (list.state != conker::lockstep::Browse::State::listed) {
+                return;
+            }
+            std::string summary = std::to_string(list.others);
+            for (const conker::lockstep::ListedRoom& room : list.rooms) {
+                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "");
+            }
+            if (summary == shown_rooms) {
+                return;
+            }
+            shown_rooms = summary;
+            const std::string mods = conker::netplay_profile::mods_text();
+            std::string words = list.rooms.empty() ? "No public rooms for this game yet: host one (Public, on the Host tab)." :
+                "Public rooms for this game";
+            words += mods.empty() ? (list.rooms.empty() ? "" : ", with no mods (like yours):") : (list.rooms.empty() ? " Yours would need the same mods: " + mods + "." :
+                ", with the same mods as yours (" + mods + "):");
+            if (list.others > 0) {
+                words += " " + std::to_string(list.others) + (list.others == 1 ? " more room has" : " more rooms have") +
+                    " other settings or mods than yours, so it can't be joined from here.";
+            }
+            rooms_label->set_text(words);
+            rooms_box->clear_children();
+            recompui::ContextId context = recompui::get_current_context();
+            for (const conker::lockstep::ListedRoom& room : list.rooms) {
+                recompui::Element* line = row(rooms_box);
+                const bool open = !room.playing && room.joined < room.players;
+                text(line, room.name, recompui::theme::Typography::LabelMD);
+                std::string about = std::to_string(room.joined) + " of " + std::to_string(room.players) + " players";
+                about += room.playing ? ", playing" : "";
+                about += room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : "";
+                about += room.direct ? ", direct allowed" : ", relay only";
+                text(line, about, recompui::theme::Typography::Body, recompui::theme::color::TextDim);
+                if (open) {
+                    recompui::Button* join_room = context.create_element<recompui::Button>(line, "Join", recompui::ButtonStyle::Secondary);
+                    const std::string code = room.code;
+                    join_room->add_pressed_callback([this, code]() {
+                        if (state != State::idle) {
+                            return;
+                        }
+                        join_text = code;
+                        join_input->set_text(code);
+                        on_join();
+                    });
+                }
+            }
         }
 
         void on_host() {
@@ -243,7 +368,7 @@ namespace {
                 set_state(State::idle, "Give your address first: the join code is made from it.");
                 return;
             }
-            if (!host_directly && !use_server()) {
+            if (!host_directly && !use_server(public_room)) {
                 return;
             }
             if (local_players >= players) {
@@ -286,6 +411,10 @@ namespace {
         void process_event(const recompui::Event& e) override {
             if (e.type != recompui::EventType::Update) {
                 return;
+            }
+            if (browsing && state == State::idle) {
+                show_rooms(conker::lockstep::poll_browse());
+                queue_update();
             }
             if (state == State::connecting) {
                 std::string status;
@@ -332,8 +461,8 @@ namespace {
 
             recompui::Element* intro = column(this, 8.0f);
             text(intro, "Netplay", Typography::Header3);
-            text(intro, "Play multiplayer online. Everyone needs this same build and the same ROM, with no mods on "
-                "(texture packs are fine). The game starts from the beginning.",
+            text(intro, "Play multiplayer online. Everyone needs this same build and the same ROM, and the same mods "
+                "on, at the same versions and settings (texture packs can differ). The game starts from the beginning.",
                 Typography::Body, color::TextDim);
 
             // How it goes: at the top, where it's seen whatever part of the page is scrolled to.
@@ -403,9 +532,21 @@ namespace {
             through_radio->add_index_changed_callback([this](uint32_t index) {
                 host_directly = index == 1;
                 direct_rows->set_display(host_directly ? recompui::Display::Flex : recompui::Display::None);
+                room_row->set_display(host_directly ? recompui::Display::None : recompui::Display::Flex);
                 show_code();
                 queue_update();
             });
+            room_row = column(host, 12.0f);
+            recompui::Element* listed_row = row(room_row);
+            text(listed_row, "Room", Typography::LabelMD);
+            recompui::Radio* listed_radio = context.create_element<recompui::Radio>(listed_row);
+            listed_radio->add_option("Private");
+            listed_radio->add_option("Public");
+            listed_radio->set_index(0);
+            listed_radio->add_index_changed_callback([this](uint32_t index) { public_room = index == 1; });
+            text(room_row, "Private: only those you send the room code to can join. Public: it's also in the server's "
+                "room list, for anyone with this build, ROM, settings and mods, under a made-up name.",
+                Typography::Body, color::TextDim);
             direct_rows = column(host, 12.0f);
             recompui::Element* direct_row = row(direct_rows);
             text(direct_row, "UDP port", Typography::LabelMD);
@@ -489,10 +630,30 @@ namespace {
             });
             join_button = context.create_element<recompui::Button>(join, "Join", recompui::ButtonStyle::Primary);
             join_button->add_pressed_callback([this]() { on_join(); });
+            recompui::Element* public_row = row(join);
+            text(public_row, "Public rooms", Typography::LabelMD);
+            recompui::Button* refresh_button = context.create_element<recompui::Button>(public_row, "Refresh", recompui::ButtonStyle::Tertiary);
+            refresh_button->add_pressed_callback([this]() {
+                if (state == State::idle && browsing) {
+                    conker::lockstep::browse_again();
+                }
+                else if (state == State::idle) {
+                    start_browsing();
+                }
+            });
+            rooms_label = text(join, "", Typography::Body, color::TextDim);
+            rooms_box = column(join, 8.0f);
 
             tabs->set_change_tab_callback([this](int index) {
                 host_section->set_display(index == 0 ? recompui::Display::Flex : recompui::Display::None);
                 join_section->set_display(index == 1 ? recompui::Display::Flex : recompui::Display::None);
+                join_tab = index == 1;
+                if (index == 1 && state == State::idle) {
+                    start_browsing();
+                }
+                else if (index != 1) {
+                    stop_browsing();
+                }
                 queue_update();
             });
             tabs->set_active_tab(0, false);
@@ -516,9 +677,22 @@ namespace {
         }
 
         bool connecting() const { return state == State::connecting; }
-        void cancel_if_connecting() {
+        // The menu closes: whatever it was connecting is given up.
+        void on_close() {
+            closing = true;
+            stop_browsing();
             if (state == State::connecting) {
-                on_cancel();
+                conker::lockstep::cancel();
+                conker::lockstep::set_host(-1, players);
+                set_state(State::idle, "Cancelled.");
+            }
+            closing = false;
+        }
+        // The menu opens again: the room list, if that's the tab open.
+        void on_open() {
+            browse_hello.reset();
+            if (state == State::idle && join_tab) {
+                start_browsing();
             }
         }
     };
@@ -532,14 +706,14 @@ void conker::netplay_menu::init(const std::u8string& id, const std::filesystem::
 }
 
 void conker::netplay_menu::open() {
+    // The launcher's option calls this with the launcher's context open, and only one can be: it's closed
+    // while the menu's is used.
+    recompui::ContextId launcher = recompui::get_current_context();
+    const bool launcher_open = launcher.slot_id != recompui::ContextId::null().slot_id;
+    if (launcher_open) {
+        launcher.close();
+    }
     if (modal == nullptr) {
-        // The launcher's option calls this with the launcher's context open, and only one can be: it's
-        // closed while the menu's is made.
-        recompui::ContextId launcher = recompui::get_current_context();
-        const bool launcher_open = launcher.slot_id != recompui::ContextId::null().slot_id;
-        if (launcher_open) {
-            launcher.close();
-        }
         modal = recompui::Modal::create_modal(recompui::ModalType::Fullscreen);
         recompui::ContextId context = modal->modal_root_context;
         context.open();
@@ -550,15 +724,22 @@ void conker::netplay_menu::open() {
         scroll->set_background_color(recompui::theme::color::Background1);    // the page's, below it too
         page = context.create_element<NetplayPage>(scroll);
         context.close();
-        if (launcher_open) {
-            launcher.open();
-        }
         // Closing it while connecting gives up.
         modal->set_on_close_callback([]() {
             if (page != nullptr) {
-                page->cancel_if_connecting();
+                page->on_close();
             }
         });
+    }
+    else {
+        // Opened again: the room list, if the Join tab is open.
+        recompui::ContextId context = modal->modal_root_context;
+        context.open();
+        page->on_open();
+        context.close();
+    }
+    if (launcher_open) {
+        launcher.open();
     }
     modal->open();
 }

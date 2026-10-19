@@ -40,4 +40,7 @@ namespace conker::netplay {
     std::string encode_room_code(uint64_t room);
     // The room in `code`, or nothing if it isn't one.
     std::optional<uint64_t> decode_room_code(std::string_view code);
+    // A listed room's name, made from its number (two words, "Grumpy Squirrel"): the same in every game,
+    // with nothing a player wrote. Names repeat (a thousand of them); the code doesn't.
+    std::string room_name(uint64_t room);
 }
