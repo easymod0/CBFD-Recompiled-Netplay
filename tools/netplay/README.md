@@ -185,6 +185,8 @@ and, at the read where they first differ, the memory itself:
   packets are resent: lockstep needs every input); Inputs and hashes before the start, beyond the reads
   a peer could have reached, or a hash repeated, drop the peer. The library closes a connection that
   sends a message bigger than the largest packet, and buffers little from each peer.
+- **`lan.cpp`, `lan_packets.cpp`**: LAN discovery's beacon (27 bytes: the fit hash, platform, port, key,
+  players, joined, playing, rollback; every field checked) and its plain UDP sockets.
 - **`join_code.cpp`**: the host's address, port and the match's key as a code with a typo check
   (`SC07-21V9-GW0J-6HB7-H6NW-VVTT`), to join directly; and room codes (`7KQ2-M9XD`: a room's random
   number, 40 bits, with no address in it), to join through a server.
@@ -265,6 +267,19 @@ in the config folder), which shows the room code to send once hosting, or direct
 address, from which it shows the join code); players, input delay; or join by either code. It says how the connecting goes and why a peer was refused, and the game starts on every
 machine once all are in. When a match started there ends (a desync, the host gone), a prompt says why
 instead of the game quitting.
+
+This fork's menu finds matches too (fork issue #29):
+- **Public rooms** (`--netplay-public`): a room hosted Public is in the server's room list, under a name
+  made from its number ("Grumpy Squirrel"). The Join tab lists the rooms this game can join (the same
+  build, ROM, settings and mods, on platforms that play together), refreshed every 5 s, and how many more
+  have other settings or mods.
+- **Quick Match** (`--netplay-quick`): joins the first open public room that fits (trying up to 5), or
+  hosts one in public with the Host tab's settings. A host still alone that sees an older open room leaves
+  its own and joins that, so two players who pressed it at once meet.
+- **On this network** (`--netplay-lan`, hosting on a port): the host broadcasts a beacon each second (UDP
+  port 27016, and to its own machine), and games on the network list the match and join it with no code
+  and no server. Anyone on the network can join it. A firewall on the joiner's machine may need UDP 27016
+  open to hear other machines.
 
 **Screens.** Every machine draws the whole split screen (that keeps the games the same), but a window can
 show only its player's view, drawn across the whole window ("my view only", `host/src/netplay/view.cpp`),

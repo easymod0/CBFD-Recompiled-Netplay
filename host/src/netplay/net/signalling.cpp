@@ -371,6 +371,12 @@ namespace conker::netplay {
         }
     }
 
+    void Signaller::report_desync(const signal::DesyncReport& report) {
+        if (current_state == State::ready && has_desync_reports()) {
+            send_now(report);
+        }
+    }
+
     uint64_t fit_of(const Hello& hello) {
         return mix({ hello.build, hello.rom, hello.profile, hello.mods });
     }
