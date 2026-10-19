@@ -38,6 +38,7 @@
 #              answering, and the two play on as above
 #   leave-couch the couch match with ports 2 and 3 on a joiner that quits at read 1500: the host plays on, both
 #              ports idle from the same read, and must match a solo replay so
+#   kick       the host kicks the joiner during the match: the joiner is told, the host plays to the end
 #   block      a host keeps out a joiner on its block list, and a joiner leaves a host on its own; Quick
 #              Match passes over a public room whose host is on it
 #   desync     the host changes a byte of its memory at read 300: both must stop for a desync, and each
@@ -377,6 +378,16 @@ room_of block-public > /dev/null
 start block-quick --netplay-quick --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-block 4058
 finish "no room to join, so hosting one" block-quick || failed=1
 kill $server 2>/dev/null
+
+echo "kick"
+# The host kicks the joiner during the match (the Esc menu's Kick): the joiner is told, the host plays on to
+# the end.
+pads=1.pads start kick-host --netplay-host 27315 --netplay-address 127.0.0.1 --players 2 --netplay-kick-at 300:2
+pads=2.pads start kick-join --netplay-join "$(code_of kick-host)"
+# (The joiner's match ends there, and with it that copy; the host's goes on to the replay's end.)
+if finish "was the last: quitting\|the host ended the match: the host removed this player" kick-host kick-join &&
+    grep -q "kicking port 2" "$OUT/kick-host.out" && grep -q "was the last: quitting" "$OUT/kick-host.out" &&
+    grep -q "the host ended the match: the host removed this player" "$OUT/kick-join.out"; then :; else echo "  kick: FAILED"; failed=1; fi
 
 echo "desync"
 start desync-host --netplay-host 27312 --netplay-address 127.0.0.1 --players 2 --netplay-desync-at 300

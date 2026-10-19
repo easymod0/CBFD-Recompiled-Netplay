@@ -50,6 +50,8 @@
 //                                then Delay: every peer switches at the same read)
 //   --netplay-desync-at <read>   (a test) changes a byte of game memory at that read (in region 64,
 //                                0x80400003), which the next hash comparison must catch
+//   --netplay-kick-at <read>:<port>  (a test, hosting) kicks that player (2 to 4) at that read, as the Esc
+//                                menu's Netplay tab does: their port plays on idle
 //   --netplay-fake-network <spec>  (a test) fakes a bad network on this peer's side, through the library:
 //                                lag=<ms>, jitter=<ms>, loss=<%>, reorder=<%> and dup=<%> on what it sends,
 //                                outage=<read>:<s> (nothing sent or received for that long from that read)
@@ -175,6 +177,7 @@ namespace conker::lockstep {
         int platform = 0;           // 1 Linux, 2 Windows, 3 macOS
         int round_trip_ms = -1;     // -1: not known (or this machine's)
         bool mine = false;
+        bool left = false;          // in a match: they've left (or were removed)
     };
     struct WaitingRoom {
         bool in = false;
@@ -190,6 +193,12 @@ namespace conker::lockstep {
     void set_ready(bool ready);
     bool kick(int port);
     void block(uint64_t player);
+    // During a match (the Esc menu's Netplay tab): its players as the waiting room last had them, which have
+    // left since (`in`: there's a match). kick works then too (the host's: their ports play on idle, as when
+    // someone leaves), and block (a host kicks them; a joiner only keeps them out of later matches).
+    // leave_match: this machine leaves; the match is over here (the others play on, or end if it hosted).
+    WaitingRoom match_room();
+    void leave_match();
     // The match has started (from the menu or connect).
     bool connected();
     // The Hello begin was given.

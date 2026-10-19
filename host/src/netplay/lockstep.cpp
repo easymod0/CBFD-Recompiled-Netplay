@@ -142,6 +142,9 @@ namespace {
     constexpr double lower_spare_ms = 12.0;
     constexpr uint64_t settle_reads = 90;
     uint64_t desync_at = never;
+    // (a test) the host kicks this port (from 0) at that read (--netplay-kick-at), as the Esc menu's Kick does.
+    uint64_t kick_at = never;
+    int kick_port = -1;
     // --netplay-fake-network's: the network faked from the start, and changes at reads (an outage of
     // `outage_seconds` from read `outage_at`; the lag `lag_then` from read `lag_at`).
     conker::netplay::FakeNetwork fake;
@@ -1123,6 +1126,18 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
         desync_at = (uint64_t)n;
         return true;
     }
+    if (std::strcmp(option, "--netplay-kick-at") == 0) {
+        unsigned long long read = 0;
+        int port = 0;
+        if (value == nullptr || std::sscanf(value, "%llu:%d", &read, &port) != 2 || port < 2 || port > netplay::max_players) {
+            std::fprintf(stderr, "[netplay] --netplay-kick-at needs <read>:<port> (a joiner's port, 2 to %d)\n", netplay::max_players);
+            options_valid = false;
+        }
+        kick_at = read;
+        kick_port = port - 1;
+        if (value != nullptr) i++;
+        return true;
+    }
     if (std::strcmp(option, "--netplay-address") == 0) {
         if (value == nullptr) {
             std::fprintf(stderr, "[netplay] --netplay-address needs this computer's address, as the others reach it\n");
@@ -2070,7 +2085,43 @@ void conker::lockstep::set_ready(bool ready) {
 
 bool conker::lockstep::kick(int port) {
     std::scoped_lock lock(session_mutex);
-    return session != nullptr && !match_started && session->kick(port);
+    return session != nullptr && !ended && session->kick(port);
+}
+
+conker::lockstep::WaitingRoom conker::lockstep::match_room() {
+    std::scoped_lock lock(session_mutex);
+    WaitingRoom room;
+    if (session == nullptr || !match_started || ended) {
+        return room;
+    }
+    const netplay::Roster roster = session->roster();
+    room.in = true;
+    room.hosting = session->hosting();
+    room.players = match_players;
+    room.own_view = match_own_view;
+    room.delay = delay;
+    room.rollback = rollback_option;
+    const std::array<int, netplay::max_players> trips = session->round_trips_by_port();
+    for (int port = 0; port < netplay::max_players && port < match_players; port++) {
+        const netplay::Seat& s = roster.seats[port];
+        Seat& seat = room.seats[port];
+        seat.player = s.player;
+        seat.mine = (own_ports & (1u << port)) != 0;
+        seat.left = gone[port];
+        if (s.player == 0) continue;
+        seat.name = netplay::player_name(s.player);
+        seat.ready = true;
+        seat.platform = s.platform;
+        seat.round_trip_ms = seat.mine || seat.left ? -1 : trips[port];
+    }
+    return room;
+}
+
+void conker::lockstep::leave_match() {
+    std::scoped_lock lock(session_mutex);
+    if (session != nullptr && match_started && !ended) {
+        end_match(Reason::quit, "you left the match");
+    }
 }
 
 void conker::lockstep::block(uint64_t player) {
@@ -2085,8 +2136,9 @@ void conker::lockstep::block(uint64_t player) {
         return;
     }
     session->set_blocked(blocked_players);
-    // A host kicks them now (a joiner leaves at its next poll: poll_connect).
-    if (session->hosting() && !match_started) {
+    // A host kicks them now, before the match or in it (a joiner leaves at its next poll, before the match:
+    // poll_connect; in one, it plays on).
+    if (session->hosting() && !ended) {
         const netplay::Roster roster = session->roster();
         for (int port = 0; port < netplay::max_players; port++) {
             if (roster.seats[port].player == player) {
@@ -2229,6 +2281,10 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
     }
     last_made = read;
+    if (read == kick_at && session != nullptr && session->hosting()) {
+        std::printf("[netplay] read %llu: kicking %s, as --netplay-kick-at asked\n", (unsigned long long)read, ports_text(1u << kick_port).c_str());
+        session->kick(kick_port);
+    }
     if (read == desync_at) {
         rdram[recomp::save_states::game_memory_size / 2] ^= 0x5A;
         std::printf("[netplay] read %llu: game memory changed, as --netplay-desync-at asked\n", (unsigned long long)read);
