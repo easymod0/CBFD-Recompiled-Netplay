@@ -76,13 +76,41 @@ namespace {
     // The netplay server players use unless they set another.
     constexpr const char* default_server = "conker.jesp.ca:27100";
 
+    // What the Host tab and Players on this computer were last set to, to be so again next time.
+    struct HostChoices {
+        int players = 2;
+        bool public_room = false;
+        int input_delay = -1;       // -1: auto
+        int rollback = 0;
+        bool own_view = true;
+        bool directly = false;
+        int port = default_port;
+        std::string address;
+        bool lan_visible = true;
+        int local_players = 1;
+    };
+
+    // The match this player joined last (not one they hosted), to come back to it after the game quit (#21):
+    // its code, the players on this computer then (they get their places back only with as many), and when it
+    // started. Forgotten once it ends in a way that can't be come back from.
+    struct LastMatch {
+        std::string code;
+        int local_players = 1;
+        int64_t started = 0;        // seconds since 1970
+    };
+    // Rejoin last match is offered this long after the match started.
+    constexpr int64_t last_match_seconds = 2 * 60 * 60;
+
     // The server settings, kept in netplay.json in the config folder, with this player's id (random, made the
-    // first time: others see a name made from it) and their block list (player ids).
+    // first time: others see a name made from it), their block list (player ids), the Host tab's choices and
+    // the match joined last.
     struct ServerSettings {
         std::string server = default_server;
         bool allow_direct = false;
         uint64_t player = 0;
         std::vector<uint64_t> blocked;
+        HostChoices host;
+        LastMatch last;
     };
 
     std::string hex_id(uint64_t id) {
@@ -109,6 +137,38 @@ namespace {
                     if (player != 0) settings.blocked.push_back(player);
                 }
             }
+            // Each value only if it's one the menu offers.
+            const auto number = [](const nlohmann::json& object, const char* key, int low, int high, int& value) {
+                if (object.contains(key) && object[key].is_number_integer() && object[key].get<int>() >= low && object[key].get<int>() <= high) {
+                    value = object[key].get<int>();
+                }
+            };
+            const auto flag = [](const nlohmann::json& object, const char* key, bool& value) {
+                if (object.contains(key) && object[key].is_boolean()) value = object[key].get<bool>();
+            };
+            if (json.contains("host") && json["host"].is_object()) {
+                const nlohmann::json& host = json["host"];
+                HostChoices& choices = settings.host;
+                number(host, "players", 2, conker::netplay::max_players, choices.players);
+                flag(host, "public", choices.public_room);
+                number(host, "input_delay", -1, 4, choices.input_delay);
+                number(host, "rollback", 0, 12, choices.rollback);
+                choices.rollback -= choices.rollback % 4;
+                flag(host, "own_view", choices.own_view);
+                flag(host, "directly", choices.directly);
+                number(host, "port", 1, 65535, choices.port);
+                if (host.contains("address") && host["address"].is_string()) choices.address = host["address"].get<std::string>().substr(0, 64);
+                flag(host, "lan_visible", choices.lan_visible);
+                number(host, "local_players", 1, conker::netplay::max_players - 1, choices.local_players);
+            }
+            if (json.contains("last_match") && json["last_match"].is_object()) {
+                const nlohmann::json& last = json["last_match"];
+                if (last.contains("code") && last["code"].is_string() && last.contains("started") && last["started"].is_number_integer()) {
+                    settings.last.code = last["code"].get<std::string>().substr(0, 64);
+                    settings.last.started = last["started"].get<int64_t>();
+                    number(last, "local_players", 1, conker::netplay::max_players - 1, settings.last.local_players);
+                }
+            }
         }
         return settings;
     }
@@ -118,8 +178,18 @@ namespace {
         if (file) {
             nlohmann::json blocked = nlohmann::json::array();
             for (const uint64_t player : settings.blocked) blocked.push_back(hex_id(player));
-            file << nlohmann::json{ { "server", settings.server }, { "allow_direct", settings.allow_direct },
-                { "player", hex_id(settings.player) }, { "blocked", blocked } }.dump(4) << "\n";
+            const HostChoices& choices = settings.host;
+            nlohmann::json json{ { "server", settings.server }, { "allow_direct", settings.allow_direct },
+                { "player", hex_id(settings.player) }, { "blocked", blocked },
+                { "host", { { "players", choices.players }, { "public", choices.public_room }, { "input_delay", choices.input_delay },
+                    { "rollback", choices.rollback }, { "own_view", choices.own_view }, { "directly", choices.directly },
+                    { "port", choices.port }, { "address", choices.address }, { "lan_visible", choices.lan_visible },
+                    { "local_players", choices.local_players } } } };
+            if (!settings.last.code.empty()) {
+                json["last_match"] = { { "code", settings.last.code }, { "local_players", settings.last.local_players },
+                    { "started", settings.last.started } };
+            }
+            file << json.dump(4) << "\n";
         }
     }
 
@@ -135,6 +205,15 @@ namespace {
             save_settings(settings);
         }
         conker::lockstep::block(player);
+    }
+
+    // The match joined last (`code` empty: forgets it), kept at once: the game may never come back to the menu.
+    void remember_match(const std::string& code, int local_players) {
+        ServerSettings settings = load_settings();
+        settings.last = LastMatch{ code, local_players,
+            code.empty() ? 0 : (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count() };
+        save_settings(settings);
     }
 
     // The settings, with a player id made the first time.
@@ -187,6 +266,12 @@ namespace {
         recompui::Label* status_label = nullptr;
         recompui::Element* direct_rows = nullptr;  // hosting directly: the port and address
         recompui::Element* room_row = nullptr;     // hosting through a room: private or public
+        recompui::Radio* here_radio = nullptr;     // Players on this computer
+        recompui::Element* rejoin_row = nullptr;   // Rejoin last match, while there's one to come back to
+        recompui::Label* rejoin_label = nullptr;
+        recompui::Label* clipboard_hint = nullptr; // the code field was filled from the clipboard
+        std::string clipboard_code;                // what it was filled with
+        std::string copied_code;                   // a code this menu put on the clipboard (Copy): not offered back
         recompui::Element* advanced_box = nullptr; // the Host tab's More options
         recompui::Button* advanced_button = nullptr;
         recompui::Label* advanced_summary = nullptr;   // what they're set to, while they're hidden
@@ -328,10 +413,74 @@ namespace {
             queue_update();
         }
 
-        // Saves the settings, with the block list as it's kept (the Esc menu's Netplay tab may have added to it).
+        // Saves the settings, with the block list and the match joined last as they're kept (the Esc menu's
+        // Netplay tab may have added to the one, the end of a match changed the other).
         void save() {
-            settings.blocked = load_settings().blocked;
+            const ServerSettings kept = load_settings();
+            settings.blocked = kept.blocked;
+            settings.last = kept.last;
             save_settings(settings);
+        }
+
+        // One line of `text`, without the spaces around it, at most 64 characters (the codes read dashes and
+        // spaces anyway).
+        static std::string one_line(std::string text) {
+            return trimmed(text.substr(0, text.find_first_of("\r\n"))).substr(0, 64);
+        }
+
+        void set_join_text(const std::string& code) {
+            join_text = code;
+            join_input->set_text(code);
+            queue_update();     // which applies the field's new value
+        }
+
+        // A room code or a join code on the clipboard (one this menu didn't copy) fills the empty code field.
+        void offer_clipboard() {
+            if (state != State::idle || join_text.find_first_not_of(' ') != std::string::npos || !SDL_HasClipboardText()) {
+                return;
+            }
+            char* pasted = SDL_GetClipboardText();
+            if (pasted == nullptr) {
+                return;
+            }
+            const std::string code = one_line(pasted);
+            SDL_free(pasted);
+            if (code.empty() || code == copied_code ||
+                (!conker::netplay::decode_room_code(code) && !conker::netplay::decode_join_code(code))) {
+                return;
+            }
+            clipboard_code = code;
+            set_join_text(code);
+            clipboard_hint->set_display(recompui::Display::Block);
+        }
+
+        // Rejoin last match, while the match joined last may still be played.
+        void show_rejoin() {
+            const LastMatch last = load_settings().last;
+            const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            const int64_t minutes = (now - last.started) / 60;
+            const bool offered = !last.code.empty() && now >= last.started && now - last.started < last_match_seconds;
+            rejoin_row->set_display(offered ? recompui::Display::Flex : recompui::Display::None);
+            if (!offered) {
+                return;
+            }
+            const std::optional<uint64_t> room = conker::netplay::decode_room_code(last.code);
+            std::string about = room ? conker::netplay::room_name(*room) + " (" + last.code + ")" : last.code;
+            about += minutes < 1 ? ", started just now" : minutes == 1 ? ", started a minute ago" :
+                ", started " + std::to_string(minutes) + " minutes ago";
+            rejoin_label->set_text(about);
+        }
+
+        void on_rejoin() {
+            const LastMatch last = load_settings().last;
+            if (state != State::idle || last.code.empty()) {
+                return;
+            }
+            // As many players on this computer as then: the host gives the places back only so.
+            local_players = last.local_players;
+            here_radio->set_index((uint32_t)(local_players - 1));
+            set_join_text(last.code);
+            on_join();
         }
 
         // This game's Hello, from the stored ROM (false: there's none yet).
@@ -718,6 +867,9 @@ namespace {
                     std::to_string(local_players + 1) + " or more players: someone has to join.");
                 return;
             }
+            settings.host = HostChoices{ players, public_room, input_delay, rollback, own_view_for_everyone, host_directly,
+                host_directly ? port : settings.host.port, trimmed(address_text), lan_visible, local_players };
+            save();
             conker::lockstep::set_host(port, players, own_view_for_everyone, input_delay, local_players, rollback);
             conker::lockstep::set_lan(host_directly && lan_visible);
             hosting = true;
@@ -738,6 +890,8 @@ namespace {
                 set_state(State::idle, "That isn't a room code (8 characters) or a join code (24 or 44): check it.");
                 return;
             }
+            settings.host.local_players = local_players;
+            save();
             conker::lockstep::set_join(join_text, local_players);
             begin();
         }
@@ -748,6 +902,8 @@ namespace {
             if (!use_server()) {
                 return;
             }
+            settings.host.local_players = local_players;
+            save();
             conker::lockstep::set_quick(local_players + 1, true, -1, local_players, 0);
             begin();
         }
@@ -819,6 +975,8 @@ namespace {
                         set_state(State::idle, status);
                         break;
                     case conker::lockstep::Progress::started:
+                        // Joined (not hosted): Rejoin last match, should the game quit or lose the host.
+                        remember_match(conker::lockstep::joined_code(), local_players);
                         set_state(State::starting, "Starting the game...");
                         conker::harness::begin_menu_match([](const std::string& why) {
                             std::lock_guard lock(over_mutex);
@@ -877,6 +1035,7 @@ namespace {
             copy_button->add_pressed_callback([this]() {
                 // Said on the button: the status line is busy while waiting for players.
                 if (!shown_code.empty() && SDL_SetClipboardText(shown_code.c_str()) == 0) {
+                    copied_code = shown_code;
                     copy_button->set_text("Copied");
                     queue_update();
                 }
@@ -885,8 +1044,34 @@ namespace {
             waiting_box = column(lobby_box, 10.0f);
             waiting_box->set_display(recompui::Display::None);
 
+            // The Host tab and Players on this computer as they were last.
+            const HostChoices& choices = settings.host;
+            players = choices.players;
+            public_room = choices.public_room;
+            input_delay = choices.input_delay;
+            rollback = choices.rollback;
+            own_view_for_everyone = choices.own_view;
+            host_directly = choices.directly;
+            port_text = std::to_string(choices.port);
+            address_text = choices.address;
+            lan_visible = choices.lan_visible;
+            local_players = choices.local_players;
+
             // While idle: what the match is to be, and Host or Join.
             setup_box = column(content, 28.0f);
+            rejoin_row = row(setup_box);
+            recompui::Button* rejoin_button = context.create_element<recompui::Button>(rejoin_row, "Rejoin last match",
+                recompui::ButtonStyle::Primary);
+            rejoin_button->set_white_space(recompui::WhiteSpace::Nowrap);
+            rejoin_button->add_pressed_callback([this]() { on_rejoin(); });
+            rejoin_label = text(rejoin_row, "", Typography::Body, color::TextDim);
+            recompui::Button* forget_button = context.create_element<recompui::Button>(rejoin_row, "Forget", recompui::ButtonStyle::Tertiary);
+            forget_button->add_pressed_callback([this]() {
+                remember_match("", 1);
+                show_rejoin();
+                queue_update();
+            });
+            rejoin_row->set_display(recompui::Display::None);
             text(setup_box, "Play multiplayer online. Everyone needs this same build, the same ROM and the same mods "
                 "and settings (texture packs can differ). The game starts from the beginning.", Typography::Body, color::TextDim);
 
@@ -894,11 +1079,11 @@ namespace {
             recompui::Element* here = column(setup_box, 8.0f);
             recompui::Element* here_row = row(here);
             text(here_row, "Players on this computer", Typography::LabelMD);
-            recompui::Radio* here_radio = context.create_element<recompui::Radio>(here_row);
+            here_radio = context.create_element<recompui::Radio>(here_row);
             for (int n = 1; n < conker::netplay::max_players; n++) {
                 here_radio->add_option(std::to_string(n));
             }
-            here_radio->set_index(0);
+            here_radio->set_index((uint32_t)(local_players - 1));
             here_radio->add_index_changed_callback([this](uint32_t index) { local_players = 1 + (int)index; });
             text(here, "One controller each; the first player also has the keyboard, mouse and gyro.", Typography::Body,
                 color::TextDim);
@@ -926,24 +1111,25 @@ namespace {
             recompui::Element* join_row = row(join);
             text(join_row, "Have a code?", Typography::LabelMD);
             join_input = input(join_row, "", 360.0f);
-            join_input->add_text_changed_callback([this](const std::string& value) { join_text = value; });
+            join_input->add_text_changed_callback([this](const std::string& value) {
+                join_text = value;
+                if (value != clipboard_code) {
+                    clipboard_hint->set_display(recompui::Display::None);
+                }
+            });
             recompui::Button* paste_button = context.create_element<recompui::Button>(join_row, "Paste", recompui::ButtonStyle::Tertiary);
             paste_button->add_pressed_callback([this]() {
                 char* pasted = SDL_GetClipboardText();
                 if (pasted != nullptr) {
-                    // One line, without the spaces around it (the code reads dashes and spaces anyway).
-                    std::string text = pasted;
+                    const std::string code = one_line(pasted);
                     SDL_free(pasted);
-                    text = text.substr(0, text.find_first_of("\r\n"));
-                    while (!text.empty() && text.back() == ' ') text.pop_back();
-                    while (!text.empty() && text.front() == ' ') text.erase(text.begin());
-                    join_text = text.substr(0, 64);
-                    join_input->set_text(join_text);
-                    queue_update();     // which applies the field's new value
+                    set_join_text(code);
                 }
             });
             join_button = context.create_element<recompui::Button>(join_row, "Join", recompui::ButtonStyle::Secondary);
             join_button->add_pressed_callback([this]() { on_join(); });
+            clipboard_hint = text(join, "The code on your clipboard: press Join to join it.", Typography::Body, color::TextDim);
+            clipboard_hint->set_display(recompui::Display::None);
             recompui::Element* public_row = row(join);
             text(public_row, "Open matches", Typography::LabelMD);
             recompui::Button* refresh_button = context.create_element<recompui::Button>(public_row, "Refresh", recompui::ButtonStyle::Tertiary);
@@ -970,14 +1156,14 @@ namespace {
             for (int n = 2; n <= conker::netplay::max_players; n++) {
                 count_radio->add_option(std::to_string(n));
             }
-            count_radio->set_index(0);
+            count_radio->set_index((uint32_t)(players - 2));
             count_radio->add_index_changed_callback([this](uint32_t index) { players = 2 + (int)index; });
             room_row = row(host);
             text(room_row, "Who can join", Typography::LabelMD);
             recompui::Radio* listed_radio = context.create_element<recompui::Radio>(room_row);
             listed_radio->add_option("Private: people with the code");
             listed_radio->add_option("Public: in the room list");
-            listed_radio->set_index(0);
+            listed_radio->set_index(public_room ? 1 : 0);
             listed_radio->add_index_changed_callback([this](uint32_t index) { public_room = index == 1; });
             advanced_button = context.create_element<recompui::Button>(host, "More options", recompui::ButtonStyle::Tertiary);
             advanced_button->set_white_space(recompui::WhiteSpace::Nowrap);
@@ -996,7 +1182,7 @@ namespace {
             for (int reads = 0; reads <= 4; reads++) {
                 delay_radio->add_option(std::to_string(reads));
             }
-            delay_radio->set_index(0);
+            delay_radio->set_index((uint32_t)(input_delay + 1));
             delay_radio->add_index_changed_callback([this](uint32_t index) {
                 input_delay = (int)index - 1;
                 show_advanced();
@@ -1011,7 +1197,7 @@ namespace {
             for (int reads = 4; reads <= 12; reads += 4) {
                 rollback_radio->add_option(std::to_string(reads));
             }
-            rollback_radio->set_index(0);
+            rollback_radio->set_index((uint32_t)(rollback / 4));
             rollback_radio->add_index_changed_callback([this](uint32_t index) {
                 rollback = 4 * (int)index;
                 show_advanced();
@@ -1023,7 +1209,7 @@ namespace {
             recompui::Radio* screens_radio = context.create_element<recompui::Radio>(screens_row);
             screens_radio->add_option("Everyone sees only their own view");
             screens_radio->add_option("Players choose");
-            screens_radio->set_index(0);
+            screens_radio->set_index(own_view_for_everyone ? 0 : 1);
             screens_radio->add_index_changed_callback([this](uint32_t index) {
                 own_view_for_everyone = index == 0;
                 show_advanced();
@@ -1033,7 +1219,7 @@ namespace {
             recompui::Radio* through_radio = context.create_element<recompui::Radio>(through_row);
             through_radio->add_option("Through the server");
             through_radio->add_option("Without a server");
-            through_radio->set_index(0);
+            through_radio->set_index(host_directly ? 1 : 0);
             through_radio->add_index_changed_callback([this](uint32_t index) {
                 host_directly = index == 1;
                 show_advanced();
@@ -1046,7 +1232,7 @@ namespace {
             port_input = input(direct_row, port_text, 120.0f);
             port_input->add_text_changed_callback([this](const std::string& value) { port_text = value; });
             text(direct_row, "Your address", Typography::LabelMD);
-            address_input = input(direct_row, "", 320.0f);
+            address_input = input(direct_row, address_text, 320.0f);
             address_input->add_text_changed_callback([this](const std::string& value) {
                 address_text = value;
                 show_code();
@@ -1056,8 +1242,7 @@ namespace {
             recompui::Radio* lan_radio = context.create_element<recompui::Radio>(lan_row);
             lan_radio->add_option("Hidden");
             lan_radio->add_option("Visible");
-            lan_radio->set_index(1);
-            lan_visible = true;
+            lan_radio->set_index(lan_visible ? 1 : 0);
             lan_radio->add_index_changed_callback([this](uint32_t index) {
                 lan_visible = index == 1;
                 show_advanced();
@@ -1121,6 +1306,7 @@ namespace {
                 join_tab = index == 0;
                 if (join_tab && state == State::idle) {
                     start_browsing();
+                    offer_clipboard();
                 }
                 else if (!join_tab) {
                     stop_browsing();
@@ -1155,8 +1341,10 @@ namespace {
         // The menu opens again: the room list, if that's the tab open.
         void on_open() {
             browse_hello.reset();
+            show_rejoin();
             if (state == State::idle && join_tab && !testing) {
                 start_browsing();
+                offer_clipboard();
             }
         }
     };
@@ -1327,9 +1515,15 @@ void conker::netplay_menu::update() {
     if (!why.empty()) {
         why[0] = (char)std::toupper((unsigned char)why[0]);
     }
-    // A joiner that left, or lost the host, may come back while the others play on (#21).
-    const std::string back = conker::lockstep::can_come_back()
-        ? " If the others are still playing, you can come back: start the game again, and join the same room or code."
+    // A joiner that left, or lost the host, may come back while the others play on (#21): Rejoin last match
+    // is offered next time. Otherwise there's nothing to come back to.
+    const bool can_come_back = conker::lockstep::can_come_back();
+    if (!can_come_back) {
+        remember_match("", 1);
+    }
+    const std::string back = can_come_back
+        ? " If the others are still playing, you can come back: start the game again, and press Rejoin last match on "
+          "the Netplay menu."
         : "";
     recompui::open_info_prompt("The match is over",
         why + ". The game goes on without anyone's input from here: quit when you like." + back, "Quit",

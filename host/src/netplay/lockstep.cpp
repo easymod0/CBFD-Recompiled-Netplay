@@ -3247,6 +3247,11 @@ bool conker::lockstep::can_come_back() {
         end_reason != Reason::desync && end_reason != Reason::kicked;
 }
 
+std::string conker::lockstep::joined_code() {
+    std::scoped_lock lock(session_mutex);
+    return session != nullptr && !session->hosting() ? join_where : std::string();
+}
+
 void conker::lockstep::leave() {
     std::scoped_lock lock(session_mutex);
     print_waits();

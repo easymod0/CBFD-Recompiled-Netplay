@@ -335,6 +335,8 @@ namespace conker::lockstep {
     // Whether this machine, a joiner, may be able to come back to the match that ended here (#21): it left, or lost
     // the host, rather than the host ending it, removing it, or a desync.
     bool can_come_back();
+    // The room code or join code this machine joined its match by, to come back to it later; empty when hosting.
+    std::string joined_code();
     // Says goodbye (after the last read of a replay): what's been sent still arrives.
     void leave();
     // Says goodbye if not yet, and stops the networking, as the game quits.
