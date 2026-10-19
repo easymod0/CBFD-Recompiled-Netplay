@@ -12,9 +12,13 @@
 // address and that choice are settings of their own, kept in netplay.json in the config folder.
 //
 // A room can be public (this fork's): the server lists it, under a name made from its number, for players
-// whose build, ROM, settings and mods are the same, on platforms that play together. The Join tab shows
+// whose build, ROM, settings and mods are the same, on platforms that play together. The Play tab shows
 // that list while it's open, asked for again every few seconds, and joins a room from it. Quick Match joins
-// the first open one that fits, or hosts one in public with the Host tab's settings (lockstep's).
+// the first open one that fits, or hosts one in public with settings of its own (a place for one more player,
+// lockstep's defaults).
+//
+// The tabs: Play (Quick Match, a code, the lists), Host (the match's players and who can join, the rest
+// under More options) and Settings (the server, peer-to-peer, the connection test, this window's screen).
 //
 // Once hosting or in, the setup gives way to the lobby: the room or join code to share (hosting), and the
 // waiting room, which shows who's there (by names made from their player ids), whether they're ready, their
@@ -22,7 +26,7 @@
 // The title and the status line stay above the page's scrolling part. The host can kick a player; anyone can
 // block one (kept in netplay.json: a host refuses them, a joiner leaves a room they're in).
 //
-// A match hosted directly can be visible on this network: games there list it on their Join tab (heard
+// A match hosted directly can be visible on this network: games there list it on their Play tab (heard
 // from its beacon: lan.hpp) and join it with no code and no server.
 //
 // Or directly: the host's join code is made, once hosting, from the address the host gives and the match's
@@ -183,25 +187,30 @@ namespace {
         recompui::Label* status_label = nullptr;
         recompui::Element* direct_rows = nullptr;  // hosting directly: the port and address
         recompui::Element* room_row = nullptr;     // hosting through a room: private or public
+        recompui::Element* advanced_box = nullptr; // the Host tab's More options
+        recompui::Button* advanced_button = nullptr;
+        recompui::Label* advanced_summary = nullptr;   // what they're set to, while they're hidden
+        bool advanced_open = false;
         recompui::Element* rooms_box = nullptr;    // the public rooms, a row each
         recompui::Label* rooms_label = nullptr;    // how the list goes, or what it shows
         std::string shown_rooms;                   // what rooms_box shows, to make it again only when that changes
-        bool browsing = false;                     // the Join tab is open: the public list is polled
+        bool browsing = false;                     // the Play tab is open: the public list is polled
         recompui::Element* lan_box = nullptr;      // the matches on this network, a row each
         recompui::Label* lan_label = nullptr;
         std::string shown_lan;
-        bool lan_listening = false;                // the Join tab is open: this network's matches are polled
+        bool lan_listening = false;                // the Play tab is open: this network's matches are polled
         bool testing = false;                      // Test connection runs (the room list waits for it)
         recompui::Element* test_box = nullptr;     // its findings, a line each
         recompui::Button* test_button = nullptr;
         std::chrono::steady_clock::time_point lan_since;   // listening since
         bool lan_shown = false;                    // the list (or that it's empty) is on show
         bool lan_visible = false;                  // hosting directly: visible on this network
-        bool join_tab = false;                     // the Join tab is the one open
+        bool join_tab = false;                     // the Play tab is the one open (from the menu's first on_open)
         bool closing = false;                      // the menu is closing: no room list
         std::optional<conker::netplay::Hello> browse_hello;   // the room list's, made once each time the menu opens
-        recompui::Element* host_section = nullptr; // one at a time, by the Host and Join tabs
-        recompui::Element* join_section = nullptr;
+        recompui::Element* join_section = nullptr; // one at a time, by the Play, Host and Settings tabs
+        recompui::Element* host_section = nullptr;
+        recompui::Element* settings_section = nullptr;
         recompui::Button* host_button = nullptr;
         recompui::Button* join_button = nullptr;
         recompui::Button* cancel_button = nullptr;
@@ -268,7 +277,7 @@ namespace {
             shown_code = code;
             copy_button->set_display(code.empty() ? recompui::Display::None : recompui::Display::Flex);
             code_box->set_display(hosting ? recompui::Display::Flex : recompui::Display::None);
-            const std::string lan = lan_visible ? " Players on this network also find the match on their Join tab." : "";
+            const std::string lan = lan_visible ? " Players on this network also find the match on their Play tab." : "";
             if (!host_directly) {
                 code_title->set_text("Room code");
                 code_label->set_text(code.empty() ? "Making a room..." : code);
@@ -279,8 +288,8 @@ namespace {
                 // Only with the match visible on this network (on_host asks for an address otherwise).
                 code_title->set_text("On this network");
                 code_label->set_text("Visible");
-                code_hint->set_text("Players on this network find the match on their Join tab. Give your address (Host "
-                    "tab) for a join code too.");
+                code_hint->set_text("Players on this network find the match on their Play tab. Give your address (Host "
+                    "tab, More options) for a join code too.");
             }
             else if (code.empty()) {
                 code_title->set_text("Join code");
@@ -470,7 +479,7 @@ namespace {
         bool use_server(bool listed = false) {
             settings.server = trimmed(settings.server);
             if (settings.server.empty()) {
-                set_state(State::idle, "Set a netplay server first (Server, above).");
+                set_state(State::idle, "Set a netplay server first (Settings tab).");
                 return false;
             }
             save();
@@ -478,7 +487,7 @@ namespace {
             return true;
         }
 
-        // The public room list: asked for while the Join tab is open and nothing is being connected.
+        // The public room list: asked for while the Play tab is open and nothing is being connected.
         void start_browsing() {
             // Not while the connection test has the server.
             if (testing) {
@@ -512,7 +521,7 @@ namespace {
                 lan_shown = false;
             }
             if (settings.server.empty()) {
-                rooms_label->set_text("Set a netplay server (Server, above) to see its public rooms.");
+                rooms_label->set_text("Set a netplay server (Settings tab) to see its public rooms.");
             }
             else if (!browse_hello) {
                 rooms_label->set_text("Load the ROM first (Start Game on the launcher) to see the public rooms.");
@@ -671,7 +680,7 @@ namespace {
             shown_rooms = summary;
             const std::string mods = conker::netplay_profile::mods_text();
             const bool none = std::none_of(list.rooms.begin(), list.rooms.end(), [](const auto& room) { return !room.other_build; });
-            std::string words = none ? "No public rooms for this game yet: host one (Public, on the Host tab)." :
+            std::string words = none ? "No public rooms for this game yet: Quick Match opens one, or host one (Public, on the Host tab)." :
                 "Public rooms for this game";
             words += mods.empty() ? (none ? "" : ", with no mods (like yours):") : (none ? " Yours would need the same mods: " + mods + "." :
                 ", with the same mods as yours (" + mods + "):");
@@ -697,7 +706,8 @@ namespace {
                 return;
             }
             if (host_directly && !lan_visible && address_text.find_first_not_of(' ') == std::string::npos) {
-                set_state(State::idle, "Give your address first: the join code is made from it (or make the match visible on this network).");
+                set_state(State::idle, "Give your address first (More options): the join code is made from it, or make the "
+                    "match visible on this network.");
                 return;
             }
             if (!host_directly && !use_server(public_room)) {
@@ -732,17 +742,29 @@ namespace {
             begin();
         }
 
+        // Not the Host tab's settings: the room it may host has a place for one more player, with lockstep's
+        // defaults (its own view for everyone, input delay auto, no rollback).
         void on_quick() {
             if (!use_server()) {
                 return;
             }
-            if (local_players >= players) {
-                set_state(State::idle, "Quick Match may host: with " + std::to_string(local_players) + " players on this computer, "
-                    "set Players (Host tab) to " + std::to_string(local_players + 1) + " or more.");
-                return;
-            }
-            conker::lockstep::set_quick(players, own_view_for_everyone, input_delay, local_players, rollback);
+            conker::lockstep::set_quick(local_players + 1, true, -1, local_players, 0);
             begin();
+        }
+
+        // What More options are set to, said under its button while they're hidden.
+        void show_advanced() {
+            advanced_box->set_display(advanced_open ? recompui::Display::Flex : recompui::Display::None);
+            advanced_summary->set_display(advanced_open ? recompui::Display::None : recompui::Display::Block);
+            advanced_button->set_text(advanced_open ? "Fewer options" : "More options");
+            std::string about = input_delay < 0 ? "Input delay auto" : "Input delay " + std::to_string(input_delay);
+            about += rollback > 0 ? ", rollback " + std::to_string(rollback) : ", no rollback";
+            about += own_view_for_everyone ? ", everyone sees only their own view" : ", players choose their screen";
+            about += !host_directly ? ", through the server" : lan_visible ? ", without a server, visible on this network" :
+                ", without a server";
+            advanced_summary->set_text(about + ".");
+            room_row->set_display(host_directly ? recompui::Display::None : recompui::Display::Flex);
+            direct_rows->set_display(host_directly ? recompui::Display::Flex : recompui::Display::None);
         }
 
         void on_cancel(const std::string& status = "Cancelled.") {
@@ -865,12 +887,11 @@ namespace {
 
             // While idle: what the match is to be, and Host or Join.
             setup_box = column(content, 28.0f);
-            text(setup_box, "Play multiplayer online. Everyone needs this same build and the same ROM, and the same mods "
-                "on, at the same versions and settings (texture packs can differ). The game starts from the beginning.",
-                Typography::Body, color::TextDim);
+            text(setup_box, "Play multiplayer online. Everyone needs this same build, the same ROM and the same mods "
+                "and settings (texture packs can differ). The game starts from the beginning.", Typography::Body, color::TextDim);
 
-            // Who plays on this computer, hosting or joining.
-            recompui::Element* here = column(setup_box, 12.0f);
+            // Who plays on this computer, whichever way the match is found.
+            recompui::Element* here = column(setup_box, 8.0f);
             recompui::Element* here_row = row(here);
             text(here_row, "Players on this computer", Typography::LabelMD);
             recompui::Radio* here_radio = context.create_element<recompui::Radio>(here_row);
@@ -879,143 +900,32 @@ namespace {
             }
             here_radio->set_index(0);
             here_radio->add_index_changed_callback([this](uint32_t index) { local_players = 1 + (int)index; });
-            text(here, "One controller each, in the order they first press a button. The first player also has the "
-                "keyboard, mouse and gyro.", Typography::Body, color::TextDim);
+            text(here, "One controller each; the first player also has the keyboard, mouse and gyro.", Typography::Body,
+                color::TextDim);
 
-            // The netplay server, for rooms.
-            recompui::Element* server = column(setup_box, 12.0f);
-            recompui::Element* server_row = row(server);
-            text(server_row, "Server", Typography::LabelMD);
-            recompui::TextInput* server_input = input(server_row, settings.server, 320.0f);
-            server_input->add_text_changed_callback([this](const std::string& value) {
-                settings.server = value;
-                save();
-            });
-            text(server_row, "Connections", Typography::LabelMD);
-            recompui::Radio* direct_radio = context.create_element<recompui::Radio>(server_row);
-            direct_radio->add_option("Relay only");
-            direct_radio->add_option("Allow direct");
-            direct_radio->set_index(settings.allow_direct ? 1 : 0);
-            direct_radio->add_index_changed_callback([this](uint32_t index) {
-                settings.allow_direct = index == 1;
-                save();
-            });
-            test_button = context.create_element<recompui::Button>(server_row, "Test connection", recompui::ButtonStyle::Tertiary);
-            test_button->add_pressed_callback([this]() { on_test(); });
-            text(server, "Rooms are made on a netplay server (its address and port). Relay only: your game reaches the "
-                "others through the server's relay, so nobody sees your address. Allow direct: straight to each "
-                "other when your networks allow it, which can be quicker, but the others see your address.",
-                Typography::Body, color::TextDim);
-            test_box = column(server, 4.0f);
-
-            // Hosting or joining: a tab each, so only the one chosen's settings show.
             recompui::TabSet* tabs = context.create_element<recompui::TabSet>(setup_box);
             tabs->set_flex_shrink(0.0f);
-            tabs->add_tab("Host a match");
-            tabs->add_tab("Join a match");
+            tabs->add_tab("Play");
+            tabs->add_tab("Host");
+            tabs->add_tab("Settings");
 
-            // Hosting.
-            recompui::Element* host = column(setup_box, 12.0f);
-            host_section = host;
-            recompui::Element* host_row = row(host);
-            text(host_row, "Players", Typography::LabelMD);
-            recompui::Radio* count_radio = context.create_element<recompui::Radio>(host_row);
-            for (int n = 2; n <= conker::netplay::max_players; n++) {
-                count_radio->add_option(std::to_string(n));
-            }
-            count_radio->set_index(0);
-            count_radio->add_index_changed_callback([this](uint32_t index) { players = 2 + (int)index; });
-            text(host_row, "Through", Typography::LabelMD);
-            recompui::Radio* through_radio = context.create_element<recompui::Radio>(host_row);
-            through_radio->add_option("A room on the server");
-            through_radio->add_option("Directly");
-            through_radio->set_index(0);
-            through_radio->add_index_changed_callback([this](uint32_t index) {
-                host_directly = index == 1;
-                direct_rows->set_display(host_directly ? recompui::Display::Flex : recompui::Display::None);
-                room_row->set_display(host_directly ? recompui::Display::None : recompui::Display::Flex);
-                show_code();
-                queue_update();
-            });
-            room_row = column(host, 12.0f);
-            recompui::Element* listed_row = row(room_row);
-            text(listed_row, "Room", Typography::LabelMD);
-            recompui::Radio* listed_radio = context.create_element<recompui::Radio>(listed_row);
-            listed_radio->add_option("Private");
-            listed_radio->add_option("Public");
-            listed_radio->set_index(0);
-            listed_radio->add_index_changed_callback([this](uint32_t index) { public_room = index == 1; });
-            text(room_row, "Private: only those you send the room code to can join. Public: it's also in the server's "
-                "room list, for anyone with this build, ROM, settings and mods, under a made-up name.",
-                Typography::Body, color::TextDim);
-            direct_rows = column(host, 12.0f);
-            recompui::Element* direct_row = row(direct_rows);
-            text(direct_row, "UDP port", Typography::LabelMD);
-            port_input = input(direct_row, port_text, 120.0f);
-            port_input->add_text_changed_callback([this](const std::string& value) { port_text = value; });
-            text(direct_row, "Your address", Typography::LabelMD);
-            address_input = input(direct_row, "", 320.0f);
-            address_input->add_text_changed_callback([this](const std::string& value) {
-                address_text = value;
-                show_code();
-            });
-            recompui::Element* screens_row = row(host);
-            text(screens_row, "Screens", Typography::LabelMD);
-            recompui::Radio* screens_radio = context.create_element<recompui::Radio>(screens_row);
-            screens_radio->add_option("Everyone sees only their own view");
-            screens_radio->add_option("Players choose");
-            screens_radio->set_index(0);
-            screens_radio->add_index_changed_callback([this](uint32_t index) { own_view_for_everyone = index == 0; });
-            recompui::Element* delay_row = row(host);
-            text(delay_row, "Input delay", Typography::LabelMD);
-            recompui::Radio* delay_radio = context.create_element<recompui::Radio>(delay_row);
-            delay_radio->add_option("Auto");
-            for (int reads = 0; reads <= 4; reads++) {
-                delay_radio->add_option(std::to_string(reads));
-            }
-            delay_radio->set_index(0);
-            delay_radio->add_index_changed_callback([this](uint32_t index) { input_delay = (int)index - 1; });
-            text(host, "Auto suits most matches (0 at home). Raise it if the game stutters waiting for a player.",
-                Typography::Body, color::TextDim);
-            recompui::Element* rollback_row = row(host);
-            text(rollback_row, "Rollback", Typography::LabelMD);
-            recompui::Radio* rollback_radio = context.create_element<recompui::Radio>(rollback_row);
-            // Off, 4, 8 or 12 reads.
-            rollback_radio->add_option("Off");
-            for (int reads = 4; reads <= 12; reads += 4) {
-                rollback_radio->add_option(std::to_string(reads));
-            }
-            rollback_radio->set_index(0);
-            rollback_radio->add_index_changed_callback([this](uint32_t index) { rollback = 4 * (int)index; });
-            text(host, "Rollback (experimental): instead of waiting for the others' input, every player's game guesses "
-                "it up to that many reads ahead (about 30 a second) and goes back to correct a wrong guess, so lag is "
-                "felt less.", Typography::Body, color::TextDim);
-            recompui::Element* lan_row = row(direct_rows);
-            text(lan_row, "On this network", Typography::LabelMD);
-            recompui::Radio* lan_radio = context.create_element<recompui::Radio>(lan_row);
-            lan_radio->add_option("Hidden");
-            lan_radio->add_option("Visible");
-            lan_radio->set_index(0);
-            lan_radio->add_index_changed_callback([this](uint32_t index) {
-                lan_visible = index == 1;
-                show_code();
-                queue_update();
-            });
-            text(direct_rows, "Visible: games on this network (at home, at a LAN party) list the match on their Join tab "
-                "and join it with no code: anyone on the network can join it.", Typography::Body, color::TextDim);
-            text(direct_rows, "Directly, with no server: for players outside your home, forward the UDP port on your "
-                "router and use your public address (any \"what is my IP\" site). The join code contains your IP "
-                "address: share it only with people you trust.", Typography::Body, color::TextDim);
-            direct_rows->set_display(recompui::Display::None);
-            host_button = context.create_element<recompui::Button>(host, "Host", recompui::ButtonStyle::Primary);
-            host_button->add_pressed_callback([this]() { on_host(); });
-
-            // Joining.
-            recompui::Element* join = column(setup_box, 12.0f);
+            // Playing: Quick Match, a code, or a match from the lists.
+            recompui::Element* join = column(setup_box, 16.0f);
             join_section = join;
+            recompui::Element* quick_row = row(join);
+            recompui::Button* quick_button = context.create_element<recompui::Button>(quick_row, "Quick Match", recompui::ButtonStyle::Primary);
+            quick_button->set_white_space(recompui::WhiteSpace::Nowrap);
+            // Where a controller starts.
+            quick_button->set_as_primary_focus();
+            quick_button->add_pressed_callback([this]() {
+                if (state == State::idle) {
+                    on_quick();
+                }
+            });
+            text(quick_row, "Joins an open public room, or opens one and waits for a player.", Typography::Body, color::TextDim);
             recompui::Element* join_row = row(join);
-            text(join_row, "Room or join code", Typography::LabelMD);
-            join_input = input(join_row, "", 520.0f);
+            text(join_row, "Have a code?", Typography::LabelMD);
+            join_input = input(join_row, "", 360.0f);
             join_input->add_text_changed_callback([this](const std::string& value) { join_text = value; });
             recompui::Button* paste_button = context.create_element<recompui::Button>(join_row, "Paste", recompui::ButtonStyle::Tertiary);
             paste_button->add_pressed_callback([this]() {
@@ -1032,19 +942,10 @@ namespace {
                     queue_update();     // which applies the field's new value
                 }
             });
-            join_button = context.create_element<recompui::Button>(join, "Join", recompui::ButtonStyle::Primary);
+            join_button = context.create_element<recompui::Button>(join_row, "Join", recompui::ButtonStyle::Secondary);
             join_button->add_pressed_callback([this]() { on_join(); });
-            recompui::Element* quick_row = row(join);
-            recompui::Button* quick_button = context.create_element<recompui::Button>(quick_row, "Quick Match", recompui::ButtonStyle::Primary);
-            quick_button->add_pressed_callback([this]() {
-                if (state == State::idle) {
-                    on_quick();
-                }
-            });
-            text(join, "Quick Match joins the first open public room for this game, or hosts one, in public, with the "
-                "Host tab's settings, and waits for players there.", Typography::Body, color::TextDim);
             recompui::Element* public_row = row(join);
-            text(public_row, "Public rooms", Typography::LabelMD);
+            text(public_row, "Open matches", Typography::LabelMD);
             recompui::Button* refresh_button = context.create_element<recompui::Button>(public_row, "Refresh", recompui::ButtonStyle::Tertiary);
             refresh_button->add_pressed_callback([this]() {
                 if (state == State::idle && browsing) {
@@ -1060,35 +961,181 @@ namespace {
             lan_label = text(join, "", Typography::Body, color::TextDim);
             lan_box = column(join, 8.0f);
 
+            // Hosting: how many play and who can join; the rest under More options.
+            recompui::Element* host = column(setup_box, 12.0f);
+            host_section = host;
+            recompui::Element* host_row = row(host);
+            text(host_row, "Players in the match", Typography::LabelMD);
+            recompui::Radio* count_radio = context.create_element<recompui::Radio>(host_row);
+            for (int n = 2; n <= conker::netplay::max_players; n++) {
+                count_radio->add_option(std::to_string(n));
+            }
+            count_radio->set_index(0);
+            count_radio->add_index_changed_callback([this](uint32_t index) { players = 2 + (int)index; });
+            room_row = row(host);
+            text(room_row, "Who can join", Typography::LabelMD);
+            recompui::Radio* listed_radio = context.create_element<recompui::Radio>(room_row);
+            listed_radio->add_option("Private: people with the code");
+            listed_radio->add_option("Public: in the room list");
+            listed_radio->set_index(0);
+            listed_radio->add_index_changed_callback([this](uint32_t index) { public_room = index == 1; });
+            advanced_button = context.create_element<recompui::Button>(host, "More options", recompui::ButtonStyle::Tertiary);
+            advanced_button->set_white_space(recompui::WhiteSpace::Nowrap);
+            advanced_button->add_pressed_callback([this]() {
+                advanced_open = !advanced_open;
+                show_advanced();
+                queue_update();
+            });
+            advanced_summary = text(host, "", Typography::Body, color::TextDim);
+            advanced_box = column(host, 12.0f);
+            advanced_box->set_padding_left(24.0f);
+            recompui::Element* delay_row = row(advanced_box);
+            text(delay_row, "Input delay", Typography::LabelMD);
+            recompui::Radio* delay_radio = context.create_element<recompui::Radio>(delay_row);
+            delay_radio->add_option("Auto");
+            for (int reads = 0; reads <= 4; reads++) {
+                delay_radio->add_option(std::to_string(reads));
+            }
+            delay_radio->set_index(0);
+            delay_radio->add_index_changed_callback([this](uint32_t index) {
+                input_delay = (int)index - 1;
+                show_advanced();
+            });
+            text(advanced_box, "Auto suits most matches. Raise it if the game stutters waiting for a player.",
+                Typography::Body, color::TextDim);
+            recompui::Element* rollback_row = row(advanced_box);
+            text(rollback_row, "Rollback", Typography::LabelMD);
+            recompui::Radio* rollback_radio = context.create_element<recompui::Radio>(rollback_row);
+            // Off, 4, 8 or 12 reads.
+            rollback_radio->add_option("Off");
+            for (int reads = 4; reads <= 12; reads += 4) {
+                rollback_radio->add_option(std::to_string(reads));
+            }
+            rollback_radio->set_index(0);
+            rollback_radio->add_index_changed_callback([this](uint32_t index) {
+                rollback = 4 * (int)index;
+                show_advanced();
+            });
+            text(advanced_box, "Experimental: guesses the others' input up to that many reads ahead (about 30 a second) and "
+                "corrects a wrong guess, so lag is felt less.", Typography::Body, color::TextDim);
+            recompui::Element* screens_row = row(advanced_box);
+            text(screens_row, "Screens", Typography::LabelMD);
+            recompui::Radio* screens_radio = context.create_element<recompui::Radio>(screens_row);
+            screens_radio->add_option("Everyone sees only their own view");
+            screens_radio->add_option("Players choose");
+            screens_radio->set_index(0);
+            screens_radio->add_index_changed_callback([this](uint32_t index) {
+                own_view_for_everyone = index == 0;
+                show_advanced();
+            });
+            recompui::Element* through_row = row(advanced_box);
+            text(through_row, "Host", Typography::LabelMD);
+            recompui::Radio* through_radio = context.create_element<recompui::Radio>(through_row);
+            through_radio->add_option("Through the server");
+            through_radio->add_option("Without a server");
+            through_radio->set_index(0);
+            through_radio->add_index_changed_callback([this](uint32_t index) {
+                host_directly = index == 1;
+                show_advanced();
+                show_code();
+                queue_update();
+            });
+            direct_rows = column(advanced_box, 12.0f);
+            recompui::Element* direct_row = row(direct_rows);
+            text(direct_row, "UDP port", Typography::LabelMD);
+            port_input = input(direct_row, port_text, 120.0f);
+            port_input->add_text_changed_callback([this](const std::string& value) { port_text = value; });
+            text(direct_row, "Your address", Typography::LabelMD);
+            address_input = input(direct_row, "", 320.0f);
+            address_input->add_text_changed_callback([this](const std::string& value) {
+                address_text = value;
+                show_code();
+            });
+            recompui::Element* lan_row = row(direct_rows);
+            text(lan_row, "On this network", Typography::LabelMD);
+            recompui::Radio* lan_radio = context.create_element<recompui::Radio>(lan_row);
+            lan_radio->add_option("Hidden");
+            lan_radio->add_option("Visible");
+            lan_radio->set_index(1);
+            lan_visible = true;
+            lan_radio->add_index_changed_callback([this](uint32_t index) {
+                lan_visible = index == 1;
+                show_advanced();
+                show_code();
+                queue_update();
+            });
+            text(direct_rows, "Visible: anyone on this network (at home, at a LAN party) sees the match on their Play tab and "
+                "can join it with no code. Leave the address blank for that alone.", Typography::Body, color::TextDim);
+            text(direct_rows, "For players outside your network, forward the UDP port on your router and give your public "
+                "address (any \"what is my IP\" site). The join code contains it: share it only with people you trust.",
+                Typography::Body, color::TextDim);
+            host_button = context.create_element<recompui::Button>(host, "Host", recompui::ButtonStyle::Primary);
+            host_button->add_pressed_callback([this]() { on_host(); });
+
+            // Settings: the netplay server, how players connect through it, and this window's screen.
+            recompui::Element* setup = column(setup_box, 16.0f);
+            settings_section = setup;
+            recompui::Element* server = column(setup, 8.0f);
+            recompui::Element* server_row = row(server);
+            text(server_row, "Server", Typography::LabelMD);
+            recompui::TextInput* server_input = input(server_row, settings.server, 320.0f);
+            server_input->add_text_changed_callback([this](const std::string& value) {
+                settings.server = value;
+                save();
+            });
+            test_button = context.create_element<recompui::Button>(server_row, "Test connection", recompui::ButtonStyle::Tertiary);
+            test_button->set_white_space(recompui::WhiteSpace::Nowrap);
+            test_button->add_pressed_callback([this]() { on_test(); });
+            text(server, "The netplay server (address and port) makes the rooms and relays the matches.", Typography::Body,
+                color::TextDim);
+            test_box = column(server, 4.0f);
+            recompui::Element* direct = column(setup, 8.0f);
+            recompui::Element* direct_choice = row(direct);
+            text(direct_choice, "Connections", Typography::LabelMD);
+            recompui::Radio* direct_radio = context.create_element<recompui::Radio>(direct_choice);
+            direct_radio->add_option("Relay only");
+            direct_radio->add_option("Peer-to-peer when possible");
+            direct_radio->set_index(settings.allow_direct ? 1 : 0);
+            direct_radio->add_index_changed_callback([this](uint32_t index) {
+                settings.allow_direct = index == 1;
+                save();
+            });
+            text(direct, "Relay only: nobody sees your address. Peer-to-peer can be quicker, but the others see your address.",
+                Typography::Body, color::TextDim);
+            // What this window shows of the split screen.
+            recompui::Element* display = column(setup, 8.0f);
+            recompui::Element* display_row = row(display);
+            text(display_row, "Your screen", Typography::LabelMD);
+            recompui::Radio* display_radio = context.create_element<recompui::Radio>(display_row);
+            display_radio->add_option("Split screen");
+            display_radio->add_option("My view only");
+            display_radio->set_index(conker::netplay_view::is_mine_only() ? 1 : 0);
+            display_radio->add_index_changed_callback([](uint32_t index) { conker::netplay_view::set_mine_only(index == 1); });
+            text(display, "My view only fills the window with your view, unless the host's Screens choose it for everyone.",
+                Typography::Body, color::TextDim);
+
             tabs->set_change_tab_callback([this](int index) {
-                host_section->set_display(index == 0 ? recompui::Display::Flex : recompui::Display::None);
-                join_section->set_display(index == 1 ? recompui::Display::Flex : recompui::Display::None);
-                join_tab = index == 1;
-                if (index == 1 && state == State::idle) {
+                join_section->set_display(index == 0 ? recompui::Display::Flex : recompui::Display::None);
+                host_section->set_display(index == 1 ? recompui::Display::Flex : recompui::Display::None);
+                settings_section->set_display(index == 2 ? recompui::Display::Flex : recompui::Display::None);
+                join_tab = index == 0;
+                if (join_tab && state == State::idle) {
                     start_browsing();
                 }
-                else if (index != 1) {
+                else if (!join_tab) {
                     stop_browsing();
                 }
                 queue_update();
             });
             tabs->set_active_tab(0, false);
-            join_section->set_display(recompui::Display::None);
-
-            // What this window shows of the split screen.
-            recompui::Element* display = column(setup_box, 12.0f);
-            text(display, "Your screen", Typography::LabelLG);
-            recompui::Radio* display_radio = context.create_element<recompui::Radio>(display);
-            display_radio->add_option("Split screen");
-            display_radio->add_option("My view only");
-            display_radio->set_index(conker::netplay_view::is_mine_only() ? 1 : 0);
-            display_radio->add_index_changed_callback([](uint32_t index) { conker::netplay_view::set_mine_only(index == 1); });
-            text(display, "\"My view only\" fills the window with your view (two players here: one above the other). "
-                "The host's Screens setting can choose it for everyone.",
-                Typography::Body, color::TextDim);
+            host_section->set_display(recompui::Display::None);
+            settings_section->set_display(recompui::Display::None);
+            show_advanced();
 
             set_state(State::idle, "");
             show_code();
+            // The Play tab is open, its lists asked for once the menu is shown (on_open).
+            join_tab = true;
             queue_update();
         }
 
@@ -1255,17 +1302,16 @@ void conker::netplay_menu::open() {
             }
         });
     }
-    else {
-        // Opened again: the room list, if the Join tab is open.
-        recompui::ContextId context = modal->modal_root_context;
-        context.open();
-        page->on_open();
-        context.close();
-    }
+    modal->open();
+    // The room list, if the Play tab is open: only once the modal is shown (started before, while the page is
+    // made or opened again, it kept the modal from showing).
+    recompui::ContextId context = modal->modal_root_context;
+    context.open();
+    page->on_open();
+    context.close();
     if (launcher_open) {
         launcher.open();
     }
-    modal->open();
 }
 
 void conker::netplay_menu::update() {
