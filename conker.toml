@@ -480,6 +480,13 @@ func = "func_1502C6E8"
 before_vram = 0x1502C92C
 text = "{ extern void conker_model_detail(uint8_t*, recomp_context*); conker_model_detail(rdram, ctx); }"
 
+# Shadow smoothing: func_15184368 moves a shadow's light point 0.3 of the way to the nearest light each time; at
+# 0x15184658 that step has just been loaded into $f14, and it's made smaller (host/src/shadow_smoothing.cpp).
+[[patches.hook]]
+func = "func_15184368"
+before_vram = 0x15184658
+text = "{ extern void conker_shadow_light_step(uint8_t*, recomp_context*); conker_shadow_light_step(rdram, ctx); }"
+
 # Frame interpolation: each game object's drawing (func_1502CCFC) is wrapped in an
 # RT64 matrix group naming the object, so RT64 pairs its matrices with the same
 # object's last frame instead of guessing (host/src/interpolation.cpp).
