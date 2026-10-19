@@ -133,4 +133,23 @@ namespace conker::netplay {
         }
         return room;
     }
+
+    std::string room_name(uint64_t room) {
+        static constexpr const char* adjectives[32] = {
+            "Grumpy", "Sleepy", "Brave", "Fuzzy", "Sneaky", "Jolly", "Rusty", "Lucky", "Muddy", "Shiny",
+            "Bouncy", "Clumsy", "Dizzy", "Fancy", "Gentle", "Hasty", "Mighty", "Nimble", "Plucky", "Quiet",
+            "Rowdy", "Silly", "Spooky", "Sturdy", "Tiny", "Wobbly", "Zesty", "Cheeky", "Crafty", "Dapper",
+            "Frosty", "Golden",
+        };
+        static constexpr const char* nouns[32] = {
+            "Squirrel", "Panther", "Weasel", "Hedgehog", "Bat", "Wasp", "Bee", "Teddy", "Haybale", "Acorn",
+            "Barrel", "Cog", "Cheese", "Pumpkin", "Scarecrow", "Raptor", "Tank", "Castle", "Windmill", "Barn",
+            "Beehive", "Sunflower", "Mushroom", "Frying Pan", "Toilet", "Scythe", "Anchor", "Lantern", "Kettle",
+            "Cannon", "Bucket", "Trophy",
+        };
+        // Mixed first, so near numbers don't share a word.
+        uint64_t x = room * 0x9E3779B97F4A7C15ull;
+        x ^= x >> 29;
+        return std::string(adjectives[x & 31]) + " " + nouns[(x >> 5) & 31];
+    }
 }

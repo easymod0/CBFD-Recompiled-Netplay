@@ -10,8 +10,14 @@
 // that someone could rejoin it later). And the server may offer each peer its TURN relay, with credentials
 // of its own that expire (Turn).
 //
+// A room's host may list it in public too (Publish), and anyone can ask for the listed rooms they could
+// join (ListRooms): those of a game with the same build, ROM, settings and mods (one hash of them, the
+// fit: the server only compares it) on a platform that plays with theirs (the server decides which mix),
+// and how many more there are of the same game (build and ROM: another hash) with other settings or mods. A listed room
+// has no name on the wire: the game makes one from its number (join_code.hpp: room_name).
+//
 // The layout, little-endian: "CS", u16 version, u8 kind, then the kind's fields (see signal_packets.cpp).
-// New kinds (a lobby's) come with a new version.
+// New kinds come with a new version.
 
 #pragma once
 
@@ -25,10 +31,12 @@
 
 namespace conker::netplay::signal {
     // Changes whenever any packet's layout or meaning does: a peer with another one is refused.
-    constexpr uint16_t version = 2;
+    constexpr uint16_t version = 3;
     // The largest signal GameNetworkingSockets sends (4200 bytes of message data at most, plus its
     // own), with room to spare.
     constexpr size_t max_signal = 8192;
+    // The most rooms one Rooms lists.
+    constexpr size_t max_listed = 32;
     // The largest packet, to size buffers and the library's message limit.
     constexpr size_t max_packet_size = 5 + 10 + max_signal;
 
@@ -102,8 +110,48 @@ namespace conker::netplay::signal {
         bool operator==(const Turn&) const = default;
     };
 
+    // The game's platform, as a listed room's host and a peer asking for the list report it.
+    enum class Platform : uint8_t { gnu_linux = 1, windows, macos, last = macos };   // not "linux": GCC defines it
+    // A listed room as everyone sees it: its number (the room code's), its match's players, how many are
+    // in (the host's too, 1 to players), whether the match is being played (joining it isn't possible
+    // then), whether its host allows direct connections, and its rollback (packets.hpp: 0 to max_rollback).
+    struct ListedRoom {
+        uint64_t room = 0;
+        uint8_t players = 2;
+        uint8_t joined = 1;
+        bool playing = false;
+        bool direct = false;
+        uint8_t rollback = 0;
+        bool operator==(const ListedRoom&) const = default;
+    };
+    // Peer to server, once its room is made: lists it in public, as `room` says (its number is ignored:
+    // the peer's room), for games whose `fit` (not 0) and platform go with its own; again whenever that
+    // changes. It stays listed until its host leaves. `game` (not 0) is its build and ROM's hash alone.
+    struct Publish {
+        uint64_t fit = 0;
+        uint64_t game = 0;
+        Platform platform = Platform::gnu_linux;
+        ListedRoom room;
+        bool operator==(const Publish&) const = default;
+    };
+    // Peer to server, once registered: the listed rooms for a game whose `fit` and `game` (neither 0) and
+    // platform these are? A few each minute.
+    struct ListRooms {
+        uint64_t fit = 0;
+        uint64_t game = 0;
+        Platform platform = Platform::gnu_linux;
+        bool operator==(const ListRooms&) const = default;
+    };
+    // Server to peer: the answer, up to max_listed of them (open ones first), and how many listed rooms of
+    // the same game and platforms there are besides, whose fit differs (other settings or mods).
+    struct Rooms {
+        uint16_t others = 0;
+        std::vector<ListedRoom> rooms;
+        bool operator==(const Rooms&) const = default;
+    };
+
     using Packet = std::variant<Register, Signal, Unreachable, Refused, Registered, CreateRoom, RoomCreated, FindRoom,
-        RoomFound, NoRoom, Turn>;
+        RoomFound, NoRoom, Turn, Publish, ListRooms, Rooms>;
 
     // The packet's bytes into `out` (max_packet_size): their size, or 0 for a packet that isn't valid.
     size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out);

@@ -13,18 +13,26 @@
 //   9 RoomFound    u64 room (1 to max_room), u64 host, u64 key (not 0)             29 bytes
 //  10 NoRoom       u64 room (1 to max_room)                                        13 bytes
 //  11 Turn         3 times: u8 size (1 to max_text), size characters (! to ~)  8 + sizes bytes
+//  12 Publish      u64 fit, u64 game (neither 0), u8 platform (1 to Platform::last), a room   34 bytes
+//  13 ListRooms    u64 fit, u64 game (neither 0), u8 platform (1 to Platform::last)          22 bytes
+//  14 Rooms        u16 others, u8 count (0 to max_listed), count rooms          8 + 12 * count bytes
+// A room (ListedRoom): u64 room (1 to max_room; Publish's 0 or any), u8 players (2 to max_players),
+// u8 joined (1 to players), u8 flags (bit 0 playing, bit 1 direct; the others 0), u8 rollback (0 to
+// max_rollback).
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
 #include "signal_packets.hpp"
 #include "join_code.hpp"
+#include "packets.hpp"
 
 #include <algorithm>
 
 namespace conker::netplay::signal {
     namespace {
         enum Kind : uint8_t { register_ = 1, signal, unreachable, refused, registered, create_room, room_created, find_room,
-            room_found, no_room, turn };
+            room_found, no_room, turn, publish, list_rooms, rooms };
         constexpr size_t header_size = 5;
+        constexpr size_t room_size = 12;
 
         struct Writer {
             uint8_t* p;
@@ -41,6 +49,32 @@ namespace conker::netplay::signal {
 
         bool valid_id(uint64_t id) { return id != 0; }
         bool valid_room(uint64_t room) { return room != 0 && room <= max_room; }
+        bool valid_platform(Platform platform) { return (uint8_t)platform >= 1 && platform <= Platform::last; }
+        // A listed room's fields but its number (Publish's is the server's to fill in).
+        bool valid_listing(const ListedRoom& room) {
+            return room.players >= 2 && room.players <= max_players && room.joined >= 1 && room.joined <= room.players &&
+                room.rollback <= max_rollback;
+        }
+        void write_room(Writer& w, const ListedRoom& room) {
+            w.u64(room.room);
+            w.u8(room.players);
+            w.u8(room.joined);
+            w.u8((uint8_t)((room.playing ? 1 : 0) | (room.direct ? 2 : 0)));
+            w.u8(room.rollback);
+        }
+        // A room, if its fields but the number are valid (the caller checks that).
+        std::optional<ListedRoom> read_room(Reader& r) {
+            ListedRoom room;
+            room.room = r.u64();
+            room.players = r.u8();
+            room.joined = r.u8();
+            const uint8_t flags = r.u8();
+            room.rollback = r.u8();
+            room.playing = (flags & 1) != 0;
+            room.direct = (flags & 2) != 0;
+            if ((flags & ~3) != 0 || !valid_listing(room)) return std::nullopt;
+            return room;
+        }
         bool valid_text(const std::string& text) {
             return !text.empty() && text.size() <= max_text &&
                 std::all_of(text.begin(), text.end(), [](char c) { return c > ' ' && c <= '~'; });
@@ -87,6 +121,33 @@ namespace conker::netplay::signal {
             for (const std::string* text : { &p->servers, &p->user, &p->password }) {
                 w.u8((uint8_t)text->size());
                 w.p = std::copy(text->begin(), text->end(), w.p);
+            }
+        }
+        else if (const Publish* p = std::get_if<Publish>(&packet)) {
+            if (p->fit == 0 || p->game == 0 || !valid_platform(p->platform) || !valid_listing(p->room)) return 0;
+            w.u8(publish);
+            w.u64(p->fit);
+            w.u64(p->game);
+            w.u8((uint8_t)p->platform);
+            write_room(w, p->room);
+        }
+        else if (const ListRooms* p = std::get_if<ListRooms>(&packet)) {
+            if (p->fit == 0 || p->game == 0 || !valid_platform(p->platform)) return 0;
+            w.u8(list_rooms);
+            w.u64(p->fit);
+            w.u64(p->game);
+            w.u8((uint8_t)p->platform);
+        }
+        else if (const Rooms* p = std::get_if<Rooms>(&packet)) {
+            if (p->rooms.size() > max_listed) return 0;
+            for (const ListedRoom& room : p->rooms) {
+                if (!valid_room(room.room) || !valid_listing(room)) return 0;
+            }
+            w.u8(rooms);
+            w.u16(p->others);
+            w.u8((uint8_t)p->rooms.size());
+            for (const ListedRoom& room : p->rooms) {
+                write_room(w, room);
             }
         }
         else {
@@ -157,6 +218,39 @@ namespace conker::netplay::signal {
                     if (!valid_text(*text)) return std::nullopt;
                 }
                 if (r.p != end) return std::nullopt;
+                return p;
+            }
+            case publish: {
+                if (size != 17 + room_size) return std::nullopt;
+                Publish p;
+                p.fit = r.u64();
+                p.game = r.u64();
+                p.platform = (Platform)r.u8();
+                const std::optional<ListedRoom> room = read_room(r);
+                if (p.fit == 0 || p.game == 0 || !valid_platform(p.platform) || !room) return std::nullopt;
+                p.room = *room;
+                return p;
+            }
+            case list_rooms: {
+                if (size != 17) return std::nullopt;
+                ListRooms p;
+                p.fit = r.u64();
+                p.game = r.u64();
+                p.platform = (Platform)r.u8();
+                if (p.fit == 0 || p.game == 0 || !valid_platform(p.platform)) return std::nullopt;
+                return p;
+            }
+            case rooms: {
+                if (size < 3) return std::nullopt;
+                Rooms p;
+                p.others = r.u16();
+                const uint8_t count = r.u8();
+                if (count > max_listed || size != 3 + count * room_size) return std::nullopt;
+                for (int i = 0; i < count; i++) {
+                    const std::optional<ListedRoom> room = read_room(r);
+                    if (!room || !valid_room(room->room)) return std::nullopt;
+                    p.rooms.push_back(*room);
+                }
                 return p;
             }
             default:

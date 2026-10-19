@@ -3,7 +3,10 @@
 // id (Signal); the server passes them on, from the sender's id, or says the other isn't there
 // (Unreachable). It keeps rooms too: a host creates one for its match (CreateRoom, with the match's key)
 // and gets a room code to pass on; a joiner looks it up (FindRoom) and gets the host's id and the key. A
-// room lasts as long as its host's connection. It never sees the game's packets, nor the TURN relay's
+// room lasts as long as its host's connection. A host may list its room in public (Publish), and anyone may
+// ask for the listed rooms they could join (ListRooms): those whose game fits theirs (the same hash of
+// build, ROM and settings) on a platform that plays with theirs (Linux and Windows together; macOS apart
+// until it's tested with them). It never sees the game's packets, nor the TURN relay's
 // traffic (coturn, beside it: tools/netplay/server/).
 //
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]
@@ -16,7 +19,8 @@
 // a peer that leaves can't be posed as straight away); at most --max-per-address connections at once from
 // one IP address (an IPv6 one's /64), --connection-burst new ones (then one each 2 s), and --max-peers in
 // all; at most 20 packets a second from each (bursts of 60); one room each; from each address, at most 10
-// lookups of rooms that aren't there (then one each 6 s), so codes can't be guessed. A room's code isn't
+// lookups of rooms that aren't there (then one each 6 s), so codes can't be guessed; 6 room lists (then one
+// each 3 s), each of at most signal::max_listed rooms. A room's code isn't
 // given out again for an hour after it closes. A peer without a room that sends nothing for 10 minutes is
 // closed, and any after 12 hours. Anything broken or past a limit closes the connection, after Refused. It
 // logs counts, never addresses, codes or signals.
@@ -64,6 +68,15 @@ namespace {
     // only signals while connecting), and any connection after max_seconds (longer than any match).
     constexpr double idle_seconds = 600.0;
     constexpr double max_seconds = 12 * 3600.0;
+    // Room lists: each looks at every listed room.
+    constexpr double lists_per_second = 1.0 / 3.0;
+    constexpr double list_burst = 6.0;
+
+    // Whether games on these platforms play together: Linux and Windows have, live; macOS hasn't been
+    // tried with them.
+    int platform_group(signal::Platform platform) {
+        return platform == signal::Platform::macos ? 1 : 0;
+    }
 
     volatile std::sig_atomic_t stopping = 0;
     void on_signal(int) { stopping = 1; }
@@ -110,6 +123,10 @@ namespace {
         Bucket packets;
         uint64_t room = 0;         // the room it hosts, if any
         uint64_t room_key = 0;
+        bool listed = false;       // its room is in the public list (Publish), as `listing` says
+        signal::Publish listing;
+        double listed_at = 0;
+        Bucket lists;
     };
 
     struct Server {
@@ -139,6 +156,7 @@ namespace {
         uint64_t rooms_created = 0;
         uint64_t rooms_found = 0;
         uint64_t rooms_missed = 0;
+        uint64_t lists_sent = 0;
 
         void send(HSteamNetConnection connection, const signal::Packet& packet) {
             uint8_t buffer[signal::max_packet_size];
@@ -197,6 +215,7 @@ namespace {
                     peer.address = address;
                     peer.connected_at = peer.last_packet = now();
                     peer.packets = { signal_burst, peer.connected_at };
+                    peer.lists = { list_burst, peer.connected_at };
                     peers[info->m_hConn] = peer;
                     break;
                 }
@@ -293,10 +312,63 @@ namespace {
                 }
                 send(connection, signal::NoRoom{ f->room });
             }
+            else if (const signal::Publish* p = std::get_if<signal::Publish>(&*packet)) {
+                if (peer.room == 0) {
+                    refuse(connection, signal::Refusal::protocol);
+                    return;
+                }
+                if (!peer.listed) {
+                    peer.listed_at = t;
+                }
+                peer.listed = true;
+                peer.listing = *p;
+                peer.listing.room.room = peer.room;
+            }
+            else if (const signal::ListRooms* l = std::get_if<signal::ListRooms>(&*packet)) {
+                if (!peer.lists.take(t, lists_per_second, list_burst)) {
+                    refuse(connection, signal::Refusal::busy);
+                    return;
+                }
+                send(connection, listed_for(*l));
+                lists_sent++;
+            }
             else {
                 // A server's packet.
                 refuse(connection, signal::Refusal::protocol);
             }
+        }
+
+        // The listed rooms for `ask`: of its fit and platform group, open ones first (the fullest, then the
+        // oldest: to fill matches), then those being played; at most signal::max_listed. And how many of
+        // its game and platform group have another fit.
+        signal::Rooms listed_for(const signal::ListRooms& ask) const {
+            std::vector<const Peer*> fitting;
+            size_t others = 0;
+            for (const auto& [room, connection] : rooms) {
+                const auto host = peers.find(connection);
+                if (host == peers.end() || !host->second.listed ||
+                    platform_group(host->second.listing.platform) != platform_group(ask.platform)) {
+                    continue;
+                }
+                if (host->second.listing.fit == ask.fit) {
+                    fitting.push_back(&host->second);
+                }
+                else if (host->second.listing.game == ask.game) {
+                    others++;
+                }
+            }
+            const auto open = [](const Peer* p) { return !p->listing.room.playing && p->listing.room.joined < p->listing.room.players; };
+            std::sort(fitting.begin(), fitting.end(), [&open](const Peer* a, const Peer* b) {
+                if (open(a) != open(b)) return open(a);
+                if (a->listing.room.joined != b->listing.room.joined) return a->listing.room.joined > b->listing.room.joined;
+                return a->listed_at < b->listed_at;
+            });
+            signal::Rooms out;
+            out.others = (uint16_t)std::min<size_t>(others, UINT16_MAX);
+            for (size_t i = 0; i < fitting.size() && i < signal::max_listed; i++) {
+                out.rooms.push_back(fitting[i]->listing.room);
+            }
+            return out;
         }
 
         // Peers that never registered, idle or too old; ids and rooms released long enough ago to be given
@@ -418,9 +490,10 @@ int main(int argc, char** argv) {
             next_expiry = now() + 1;
         }
         if (now() >= next_report) {
-            std::printf("netplay_server: %zu peers, %zu rooms; %llu signals passed, rooms %llu created, %llu found, %llu missed\n",
-                state.peers.size(), state.rooms.size(), (unsigned long long)state.signals_passed, (unsigned long long)state.rooms_created,
-                (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed);
+            const size_t listed = (size_t)std::count_if(state.peers.begin(), state.peers.end(), [](const auto& p) { return p.second.listed; });
+            std::printf("netplay_server: %zu peers, %zu rooms (%zu listed); %llu signals passed, rooms %llu created, %llu found, %llu missed; %llu lists\n",
+                state.peers.size(), state.rooms.size(), listed, (unsigned long long)state.signals_passed, (unsigned long long)state.rooms_created,
+                (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed, (unsigned long long)state.lists_sent);
             std::fflush(stdout);
             next_report = now() + 600;
         }

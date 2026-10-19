@@ -8,6 +8,10 @@
 // joiner looks the code up to learn the host's id and the match's key. The server may offer its TURN relay
 // too, with credentials for this process: ice() makes the session's Ice from them.
 //
+// A host may list its room in public (publish), and anyone can ask for the listed rooms they could join
+// (list_rooms): those of a game with the same build, ROM and settings (fit_of), on a platform that plays
+// with this one.
+//
 // A host keeps it connected for as long as its match lasts, so that its room stays open and someone can
 // still reach it then (a player rejoining, later).
 //
@@ -44,6 +48,21 @@ namespace conker::netplay {
     // "host:port" (a name, IPv4 or [IPv6]) to an address the library takes ("1.2.3.4:5000" or "[::1]:5000"),
     // resolving a name; or empty, with `error`.
     std::string resolve_address(const std::string& host_port, std::string& error);
+
+    // This build's platform, for the room list.
+    constexpr signal::Platform this_platform() {
+#if defined(_WIN32)
+        return signal::Platform::windows;
+#elif defined(__APPLE__)
+        return signal::Platform::macos;
+#else
+        return signal::Platform::gnu_linux;
+#endif
+    }
+    // What a listed room must match for a game whose Hello is `hello` (its build, ROM, settings and mods;
+    // not its key nor players): one hash of them, never 0. game_of: of its build and ROM alone.
+    uint64_t fit_of(const Hello& hello);
+    uint64_t game_of(const Hello& hello);
 
     class Signaller {
     public:
@@ -91,6 +110,18 @@ namespace conker::netplay {
         Lookup lookup() const { return room_lookup; }
         const signal::RoomFound& found() const { return found_room; }
 
+        // Once the room is made: lists it in public as `room` says (its number is filled in), for games
+        // like `hello`'s (fit_of), on `platform` (another than this one's: a test); again whenever that
+        // changes (an unchanged one isn't sent).
+        void publish(const Hello& hello, const signal::ListedRoom& room, signal::Platform platform = this_platform());
+        // Once ready: asks for the listed rooms a game like `hello`'s on `platform` could join (the server
+        // allows a few each minute). listing() says how it went (found: the rooms are in rooms(), and
+        // others() says how many more of the same game have other settings or mods).
+        void list_rooms(const Hello& hello, signal::Platform platform = this_platform());
+        Lookup listing() const { return room_listing; }
+        const std::vector<signal::ListedRoom>& rooms() const { return listed.rooms; }
+        int others() const { return listed.others; }
+
         // Closes the connection.
         void close();
 
@@ -123,5 +154,8 @@ namespace conker::netplay {
         uint64_t created_room = 0;
         Lookup room_lookup = Lookup::none;
         signal::RoomFound found_room;
+        std::optional<signal::Publish> published;   // the last sent
+        Lookup room_listing = Lookup::none;
+        signal::Rooms listed;
     };
 }

@@ -6,9 +6,12 @@
 
 #include "signal_packets.hpp"
 #include "join_code.hpp"
+#include "packets.hpp"
 
 using namespace conker::netplay::signal;
 using conker::netplay::max_room;
+using conker::netplay::max_players;
+using conker::netplay::max_rollback;
 
 namespace {
     int failures = 0;
@@ -55,6 +58,15 @@ int main() {
     CHECK(round_trips(Turn{ "203.0.113.7:3478", "1700000000:0123456789abcdef", "pass/word+=" }, 8 + 16 + 27 + 11));
     CHECK(round_trips(Turn{ std::string(max_text, 'a'), "u", std::string(max_text, '~') }, 8 + 2 * max_text + 1));
 
+    const ListedRoom room{ 77, 4, 2, false, true, 8 };
+    CHECK(round_trips(Publish{ 0xABCDull, 0x1234ull, Platform::windows, room }, 34));
+    CHECK(round_trips(Publish{ 1, 1, Platform::last, { 0, 2, 2, true, false, max_rollback } }, 34));
+    CHECK(round_trips(ListRooms{ 5, 6, Platform::gnu_linux }, 22));
+    CHECK(round_trips(Rooms{}, 8));
+    CHECK(round_trips(Rooms{ 65535, {} }, 8));
+    CHECK(round_trips(Rooms{ 3, { room, { max_room, (uint8_t)max_players, 1, true, true, 0 } } }, 8 + 2 * 12));
+    CHECK(round_trips(Rooms{ 0, std::vector<ListedRoom>(max_listed, room) }, 8 + 12 * max_listed));
+
     // The layout: "CS", the version, the kind, little-endian fields.
     const std::vector<uint8_t> reg = bytes_of(Register{ 0x0102030405060708ull });
     CHECK(reg == (std::vector<uint8_t>{ 'C', 'S', (uint8_t)version, (uint8_t)(version >> 8), 1, 8, 7, 6, 5, 4, 3, 2, 1 }));
@@ -90,7 +102,7 @@ int main() {
     CHECK(!other_version(reg));
     bad = reg; bad[0] = 'X'; CHECK(!decodes(bad));
     bad = reg; bad[4] = 0; CHECK(!decodes(bad));
-    bad = reg; bad[4] = 12; CHECK(!decodes(bad));
+    bad = reg; bad[4] = 15; CHECK(!decodes(bad));
     bad = reg; bad.push_back(0); CHECK(!decodes(bad));
     bad = reg; bad.pop_back(); CHECK(!decodes(bad));
     CHECK(!decodes({}));
@@ -131,6 +143,57 @@ int main() {
     bad = { 'C', 'S', (uint8_t)version, (uint8_t)(version >> 8), 11 }; CHECK(!decodes(bad));
     bad = bytes_of(Turn{ std::string(max_text, 'a'), "u", "p" }); bad[5] = (uint8_t)(max_text + 1); bad.insert(bad.begin() + 6, 'a');
     CHECK(!decodes(bad));
+
+    // Listing: the layout, and every field out of range.
+    const std::vector<uint8_t> pub = bytes_of(Publish{ 0x0102030405060708ull, 0x1112131415161718ull, Platform::macos, room });
+    CHECK(pub.size() == 34 && pub[4] == 12 && pub[5] == 8 && pub[13] == 0x18 && pub[21] == 3 && pub[22] == 77 && pub[30] == 4 &&
+        pub[31] == 2 && pub[32] == 2 && pub[33] == 8);
+    CHECK(bytes_of(Publish{ 0, 1, Platform::windows, room }).empty());
+    CHECK(bytes_of(Publish{ 1, 0, Platform::windows, room }).empty());
+    CHECK(bytes_of(Publish{ 1, 1, (Platform)0, room }).empty());
+    CHECK(bytes_of(Publish{ 1, 1, (Platform)((int)Platform::last + 1), room }).empty());
+    CHECK(bytes_of(Publish{ 1, 1, Platform::windows, { 0, 1, 1, false, false, 0 } }).empty());          // 1 player
+    CHECK(bytes_of(Publish{ 1, 1, Platform::windows, { 0, max_players + 1, 1, false, false, 0 } }).empty());
+    CHECK(bytes_of(Publish{ 1, 1, Platform::windows, { 0, 2, 0, false, false, 0 } }).empty());          // nobody in
+    CHECK(bytes_of(Publish{ 1, 1, Platform::windows, { 0, 2, 3, false, false, 0 } }).empty());          // more in than play
+    CHECK(bytes_of(Publish{ 1, 1, Platform::windows, { 0, 2, 1, false, false, max_rollback + 1 } }).empty());
+    CHECK(bytes_of(ListRooms{ 0, 1, Platform::windows }).empty());
+    CHECK(bytes_of(ListRooms{ 1, 0, Platform::windows }).empty());
+    CHECK(bytes_of(ListRooms{ 1, 1, (Platform)4 }).empty());
+    CHECK(bytes_of(Rooms{ 0, { { 0, 2, 1, false, false, 0 } } }).empty());                             // room 0
+    CHECK(bytes_of(Rooms{ 0, { { max_room + 1, 2, 1, false, false, 0 } } }).empty());
+    CHECK(bytes_of(Rooms{ 0, std::vector<ListedRoom>(max_listed + 1, room) }).empty());
+    bad = pub; for (int i = 5; i < 13; i++) bad[i] = 0; CHECK(!decodes(bad));                     // fit 0
+    bad = pub; for (int i = 13; i < 21; i++) bad[i] = 0; CHECK(!decodes(bad));                    // game 0
+    bad = pub; bad[21] = 0; CHECK(!decodes(bad));
+    bad = pub; bad[21] = 4; CHECK(!decodes(bad));
+    bad = pub; bad[30] = 1; bad[31] = 1; CHECK(!decodes(bad));
+    bad = pub; bad[30] = max_players + 1; CHECK(!decodes(bad));
+    bad = pub; bad[31] = 0; CHECK(!decodes(bad));
+    bad = pub; bad[31] = 5; CHECK(!decodes(bad));
+    bad = pub; bad[32] = 4; CHECK(!decodes(bad));                                                  // an unknown flag
+    bad = pub; bad[33] = max_rollback + 1; CHECK(!decodes(bad));
+    bad = pub; bad.push_back(0); CHECK(!decodes(bad));
+    bad = pub; bad.pop_back(); CHECK(!decodes(bad));
+    // Publish's room number is anything: the server fills it in.
+    bad = pub; for (int i = 22; i < 30; i++) bad[i] = 0xFF; CHECK(decodes(bad));
+    const std::vector<uint8_t> ask = bytes_of(ListRooms{ 9, 10, Platform::windows });
+    CHECK(ask.size() == 22 && ask[5] == 9 && ask[13] == 10 && ask[21] == 2);
+    bad = ask; bad[21] = 0; CHECK(!decodes(bad));
+    bad = ask; bad[5] = 0; CHECK(!decodes(bad));
+    bad = ask; bad[13] = 0; CHECK(!decodes(bad));
+    bad = ask; bad.push_back(0); CHECK(!decodes(bad));
+    const std::vector<uint8_t> list = bytes_of(Rooms{ 0x0102, { room, room } });
+    CHECK(list.size() == 32 && list[4] == 14 && list[5] == 2 && list[6] == 1 && list[7] == 2 && list[8] == 77);
+    bad = list; bad[7] = 3; CHECK(!decodes(bad));                                                  // a count past what follows
+    bad = list; bad[7] = 1; CHECK(!decodes(bad));
+    bad = list; bad.pop_back(); CHECK(!decodes(bad));
+    bad = list; for (int i = 20; i < 28; i++) bad[i] = 0; CHECK(!decodes(bad));                   // the second's room 0
+    bad = list; bad[25] = 0x10; CHECK(!decodes(bad));                                              // past max_room (byte 5 of 8)
+    bad = list; bad[30] = 8; CHECK(!decodes(bad));                                                 // an unknown flag
+    bad = { 'C', 'S', (uint8_t)version, (uint8_t)(version >> 8), 14, 0 }; CHECK(!decodes(bad));
+    bad = bytes_of(Rooms{ 0, std::vector<ListedRoom>(max_listed, room) }); bad[7] = max_listed + 1;
+    bad.insert(bad.end(), list.begin() + 8, list.begin() + 20); CHECK(!decodes(bad));
 
     if (failures == 0) {
         std::printf("signal_packets_test: all passed\n");

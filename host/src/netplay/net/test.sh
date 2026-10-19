@@ -7,8 +7,8 @@
 # must be dropped, as must one sending Inputs for a port that isn't its own, one that never says Hello, which must be dropped too, and one sending a message bigger
 # than any packet, which the library must close. Then a match through ICE, by a room on the signalling
 # server netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh);
-# a room gone with its host, a relay-only host on a server without one, and guessing room codes, which
-# the server stops.
+# a room gone with its host, the public room list (by game, mods and platform), a relay-only host on a
+# server without one, and guessing room codes, which the server stops.
 #   sh host/src/netplay/net/test.sh <build folder>
 set -u
 bin=$1
@@ -115,7 +115,7 @@ refused() {
 }
 refused refused-key 27207 --key "not this match's join code"
 refused refused-rom 27202 --rom "a different ROM"
-refused refused-mods 27204 --mods "mods on"
+refused refused-mods 27204 --mods "other mods on than the host's"
 # More players on a joiner than the match has ports left (a match of 2: the host and one).
 refused refused-full 27212 --local "the match is full"
 
@@ -214,6 +214,53 @@ expect() {
 expect ice-closed "no room $room on the server" join "$room" --signal 127.0.0.1:27220 --direct 1
 # Relay-only, but this server has no relay.
 expect ice-norelay "offers no TURN relay" host room --signal 127.0.0.1:27220
+# The public room list: a listed room of this game (3 players), one with other mods (counted, not listed),
+# one on macOS (apart from Linux and Windows) and one not listed. The list shows the first as players join
+# it, and as it's played.
+# listed <name> <expected "rooms n, others n"> <grep for a room line, or -> <probe options...>
+listed() {
+    name=$1; count=$2; line=$3; shift 3
+    "$probe" list --signal 127.0.0.1:27220 "$@" > "$name.txt" 2>&1
+    if grep -qx "$count" "$name.txt" && { [ "$line" = - ] || grep -q "^listed $line" "$name.txt"; }; then echo "$name: passed"; else
+        echo "$name: FAILED (wanted $count, $line)"; cat "$name.txt"; failed=1; fi
+}
+"$probe" host room --players 3 --public 1 --signal 127.0.0.1:27220 --direct 1 --reads 60 > lobby.host.txt 2>&1 &
+lobby_host=$!
+lobby_room=$(room_of lobby.host.txt)
+others=
+"$probe" host room --public 1 --mods 2 --signal 127.0.0.1:27220 --direct 1 > lobby.mods.txt 2>&1 &
+others="$others $!"
+"$probe" host room --public 1 --platform 3 --signal 127.0.0.1:27220 --direct 1 > lobby.mac.txt 2>&1 &
+others="$others $!"
+"$probe" host room --signal 127.0.0.1:27220 --direct 1 > lobby.private.txt 2>&1 &
+others="$others $!"
+room_of lobby.mods.txt > /dev/null; room_of lobby.mac.txt > /dev/null; room_of lobby.private.txt > /dev/null
+sleep 0.5
+listed lobby-list "rooms 1, others 1" "$lobby_room 1/3 direct rollback 0"
+listed lobby-windows "rooms 1, others 1" "$lobby_room 1/3"
+listed lobby-mac "rooms 1, others 0" - --platform 3
+grep -q "^listed $lobby_room" lobby-mac.txt && { echo "lobby-mac: FAILED (Linux's room listed)"; failed=1; }
+listed lobby-build "rooms 0, others 0" - --build 2
+"$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 60 > lobby.join1.txt 2>&1 &
+lobby_joiners=$!
+sleep 2
+listed lobby-joined "rooms 1, others 1" "$lobby_room 2/3"
+"$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 60 > lobby.join2.txt 2>&1 &
+lobby_joiners="$lobby_joiners $!"
+sleep 2
+listed lobby-playing "rooms 1, others 1" "$lobby_room 3/3 playing"
+for pid in $lobby_host $lobby_joiners; do
+    wait "$pid" || { echo "lobby-match: FAILED"; failed=1; }
+done
+# Killed, the others' connections only time out on the server (the library's 10 s): until then, their
+# rooms are listed.
+kill $others 2>/dev/null
+i=0
+while [ $i -lt 30 ] && ! "$probe" list --signal 127.0.0.1:27220 2>&1 | grep -qx "rooms 0, others 0"; do
+    sleep 1
+    i=$((i + 1))
+done
+listed lobby-gone "rooms 0, others 0" -
 # Guessing codes: after 10 that aren't there (one above; a slow machine's may be refilled, one each 6 s),
 # the server closes the connection.
 i=0

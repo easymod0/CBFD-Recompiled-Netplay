@@ -2,6 +2,7 @@
 
 #include "signalling.hpp"
 
+#include <initializer_list>
 #include <thread>
 #include <utility>
 
@@ -107,6 +108,9 @@ namespace conker::netplay {
         creating_room = false;
         asked_room = created_room = 0;
         room_lookup = Lookup::none;
+        published.reset();
+        room_listing = Lookup::none;
+        listed = {};
         const size_t colon = server.rfind(':');
         if (colon == std::string::npos || colon == 0 || colon + 1 == server.size()) {
             error = "\"" + server + "\" isn't a server's name and port";
@@ -251,6 +255,10 @@ namespace conker::netplay {
                     n != nullptr && room_lookup == Lookup::waiting && n->room == asked_room) {
                     room_lookup = Lookup::missing;
                 }
+                else if (const signal::Rooms* l = std::get_if<signal::Rooms>(&*packet); l != nullptr && room_listing == Lookup::waiting) {
+                    listed = *l;
+                    room_listing = Lookup::found;
+                }
                 else if (const signal::Refused* r = std::get_if<signal::Refused>(&*packet)) {
                     switch (r->reason) {
                         case signal::Refusal::version: fail("the server runs another version"); break;
@@ -300,6 +308,49 @@ namespace conker::netplay {
         asked_room = room;
         room_lookup = Lookup::waiting;
         send_now(signal::FindRoom{ room });
+    }
+
+    void Signaller::publish(const Hello& hello, const signal::ListedRoom& room, signal::Platform platform) {
+        if (current_state != State::ready || created_room == 0) {
+            return;
+        }
+        signal::Publish packet{ fit_of(hello), game_of(hello), platform, room };
+        packet.room.room = created_room;
+        if (published != packet) {
+            published = packet;
+            send_now(packet);
+        }
+    }
+
+    void Signaller::list_rooms(const Hello& hello, signal::Platform platform) {
+        if (current_state != State::ready || room_listing == Lookup::waiting) {
+            return;
+        }
+        room_listing = Lookup::waiting;
+        send_now(signal::ListRooms{ fit_of(hello), game_of(hello), platform });
+    }
+
+    namespace {
+        // splitmix64 over the hashes, in order; never 0.
+        uint64_t mix(std::initializer_list<uint64_t> parts) {
+            uint64_t hash = 0;
+            for (const uint64_t part : parts) {
+                uint64_t x = hash ^ part;
+                x += 0x9E3779B97F4A7C15ull;
+                x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+                x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+                hash = x ^ (x >> 31);
+            }
+            return hash != 0 ? hash : 1;
+        }
+    }
+
+    uint64_t fit_of(const Hello& hello) {
+        return mix({ hello.build, hello.rom, hello.profile, hello.mods });
+    }
+
+    uint64_t game_of(const Hello& hello) {
+        return mix({ hello.build, hello.rom });
     }
 
     Ice Signaller::ice(bool relay_only) const {
