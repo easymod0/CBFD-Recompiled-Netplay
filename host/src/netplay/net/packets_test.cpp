@@ -54,9 +54,10 @@ int main() {
     // Each kind, at its documented size.
     CHECK(round_trips(Hello{ 0x0123456789ABCDEFull, 2, 3, 4, 5, 1, 9, 1 }, 55));
     CHECK(round_trips(Hello{ 1, 2, 3, 4, 5, 3, ~0ull, 3 }, 55));
-    CHECK(round_trips(Welcome{ 0x02, 2 }, 7));
-    CHECK(round_trips(Welcome{ 0x08, 4 }, 7));
-    CHECK(round_trips(Welcome{ 0x0E, 4 }, 7));      // three players on one machine
+    CHECK(round_trips(Welcome{ 0x02, 2 }, 11));
+    CHECK(round_trips(Welcome{ 0x08, 4 }, 11));
+    CHECK(round_trips(Welcome{ 0x0E, 4 }, 11));     // three players on one machine
+    CHECK(round_trips(Welcome{ 0x0C, 4, 1, 1, 0x0C, max_rollback }, 11));    // coming back to a match under way
     CHECK(round_trips(Refuse{ Reason::rom }, 47));
     CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
     CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
@@ -104,6 +105,13 @@ int main() {
     CHECK(bytes_of(Welcome{ 0, 3 }).empty());       // no port
     CHECK(bytes_of(Welcome{ 0x02, 1 }).empty());    // players below 2
     CHECK(bytes_of(Welcome{ 0x02, 5 }).empty());    // players above 4
+    CHECK(bytes_of(Welcome{ 0x02, 2, 2 }).empty());         // rejoin is 0 or 1
+    CHECK(bytes_of(Welcome{ 0x02, 2, 0, 1 }).empty());      // a match's rules only when rejoining
+    CHECK(bytes_of(Welcome{ 0x02, 2, 0, 0, 0, 4 }).empty());
+    CHECK(bytes_of(Welcome{ 0x02, 2, 1, 2 }).empty());      // own view 0 or 1
+    CHECK(bytes_of(Welcome{ 0x02, 2, 1, 0, 0x04 }).empty());        // pairs past the players
+    CHECK(bytes_of(Welcome{ 0x02, 3, 1, 0, 0x01 }).empty());        // an odd number of them
+    CHECK(bytes_of(Welcome{ 0x02, 2, 1, 0, 0, max_rollback + 1 }).empty());
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 0, 1, 1 }).empty());  // nobody playing on the joiner
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 4, 1, 1 }).empty());  // nobody left for the host
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 0, 1 }).empty());  // no player id
@@ -298,6 +306,38 @@ int main() {
     data = bytes_of(part); data.pop_back(); CHECK(decodes(data));                    // fewer bytes: a smaller part
     data.resize(25); CHECK(!decodes(data));                                          // no bytes
     data = bytes_of(part); data.resize(25 + 61); CHECK(!decodes(data));              // past the state's end
+
+    // Rejoining: Back, and Rejoin.
+    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 10));
+    data = bytes_of(Back{ 0x06, 0x01020304 });
+    CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1);
+    CHECK(bytes_of(Back{ 0, 5 }).empty());                          // nobody
+    CHECK(bytes_of(Back{ 0x03, 5 }).empty());                       // the host
+    CHECK(bytes_of(Back{ 0x10, 5 }).empty());                       // past the ports
+    Rejoin rejoin;
+    rejoin.read = 1000;
+    rejoin.at = 1004;
+    rejoin.delay_from = 600;
+    rejoin.delay_before = 2;
+    rejoin.delay_after = max_delay;
+    rejoin.idle_from = { no_read, 1000, no_read, 1003 };
+    rejoin.pads[1] = { 0x8001, -5, 7, 0 };
+    rejoin.pads[3] = { 0, 0, 0, err_no_controller };
+    rejoin.motions[1] = { -300, 200, 1, -1, -3, 0x2C05 };
+    rejoin.motions[2].controls = swap_sticks_bit;
+    CHECK(round_trips(rejoin, 107));
+    data = bytes_of(rejoin);
+    CHECK(data[4] == 15 && data[5] == 0xE8 && data[6] == 3 && data[9] == 0xEC && data[13] == 0x58 && data[17] == 2 &&
+        data[18] == max_delay && data[19] == 0xFF && data[41] == 0xE8 && data[45] == 1 && data[46] == 0x80);
+    Rejoin bad_rejoin = rejoin; bad_rejoin.at = 999; CHECK(bytes_of(bad_rejoin).empty());                   // the host before it
+    bad_rejoin = rejoin; bad_rejoin.delay_after = max_delay + 1; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.delay_before = max_delay + 1; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.idle_from[1] = 999; CHECK(bytes_of(bad_rejoin).empty());          // idle before it
+    bad_rejoin = rejoin; bad_rejoin.pads[0].buttons = reserved_buttons; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.pads[0].err_no = 1; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.motions[0].controls = swap_sticks_bit << 1; CHECK(bytes_of(bad_rejoin).empty());
+    data = bytes_of(rejoin); data.pop_back(); CHECK(!decodes(data));
+
     std::vector<uint8_t> small(max_packet_size);
     CHECK(encode(part, small) == 85 && encode(whole, small) == 0);                   // too big for the buffer
 

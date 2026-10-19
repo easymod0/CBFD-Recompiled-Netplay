@@ -163,8 +163,9 @@ namespace {
     uint64_t late_mispredicted = 0;
     constexpr uint64_t late_boot_reads = 30;
 
-    // Desync recovery (#21, lockstep.hpp): a joiner's state from the host, to load at the next safe point that can (the
-    // game is given no read until then: `resync_holds` counts the ones it held), and the read it's before.
+    // Desync recovery and coming back (#21, lockstep.hpp): a joiner's state from the host, to load at the next safe point
+    // that can (the game is given no read until then: `resync_holds` counts the ones it held), and the read it's before
+    // (the game goes on from there: coming back, from a read of the match, past its own as it started).
     std::vector<uint8_t> resync_state;
     std::vector<uint8_t> resync_host;
     uint64_t resync_read = UINT64_MAX;
@@ -763,6 +764,8 @@ namespace {
                     std::printf("[harness] the host's game loaded before read %llu (after %llu reads held)\n",
                         (unsigned long long)resync_read, (unsigned long long)resync_holds);
                     reads = resync_read;
+                    // (Nor any hash of it logged: coming back, its reads were this machine's game starting.)
+                    late_logged = std::max(late_logged, reads);
                     // Nothing from the game it replaced: no state to go back to, nothing being played again, but this
                     // one (with rollback, a prediction from here may need it).
                     for (Snapshot& snapshot : snapshots) snapshot.read = UINT64_MAX;
@@ -1134,8 +1137,8 @@ namespace {
             }
             return;
         }
-        if (conker::lockstep::take_state(read + 1, resync_state, resync_host)) {
-            resync_read = read + 1;
+        if (const uint64_t state_read = conker::lockstep::take_state(read + 1, resync_state, resync_host); state_read != UINT64_MAX) {
+            resync_read = state_read;
             resync_holds = 0;
             resync_error = "not tried yet";
         }

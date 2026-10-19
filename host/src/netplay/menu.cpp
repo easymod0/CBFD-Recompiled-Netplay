@@ -541,6 +541,8 @@ namespace {
             recompui::ContextId context = recompui::get_current_context();
             recompui::Element* line = row(box);
             const bool open = !room.playing && room.joined < room.players && !room.other_build;
+            // Playing: only a player who left it can get back in (the host refuses anyone else).
+            const bool under_way = room.playing && !room.other_build;
             text(line, room.name, recompui::theme::Typography::LabelMD);
             std::string about = std::to_string(room.joined) + " of " + std::to_string(room.players) + " players";
             about += room.playing ? ", playing" : "";
@@ -555,8 +557,9 @@ namespace {
                 recompui::Button* get = context.create_element<recompui::Button>(line, "Get " + room.release, recompui::ButtonStyle::Secondary);
                 get->add_pressed_callback([url]() { SDL_OpenURL(url.c_str()); });
             }
-            if (open) {
-                recompui::Button* join_room = context.create_element<recompui::Button>(line, "Join", recompui::ButtonStyle::Secondary);
+            if (open || under_way) {
+                recompui::Button* join_room = context.create_element<recompui::Button>(line, open ? "Join" : "Rejoin",
+                    recompui::ButtonStyle::Secondary);
                 join_room->add_pressed_callback([this, code]() {
                     if (state != State::idle) {
                         return;
@@ -1205,7 +1208,11 @@ void conker::netplay_menu::update() {
     if (!why.empty()) {
         why[0] = (char)std::toupper((unsigned char)why[0]);
     }
+    // A joiner that left, or lost the host, may come back while the others play on (#21).
+    const std::string back = conker::lockstep::can_come_back()
+        ? " If the others are still playing, you can come back: start the game again, and join the same room or code."
+        : "";
     recompui::open_info_prompt("The match is over",
-        why + ". The game goes on without anyone's input from here: quit when you like.", "Quit",
+        why + ". The game goes on without anyone's input from here: quit when you like." + back, "Quit",
         []() { ultramodern::quit(); });
 }

@@ -59,7 +59,7 @@
 //                                outage=<read>:<s> (nothing sent or received for that long from that read)
 //                                and lag-at=<read>:<ms> (the lag changes), separated by commas. It only makes
 //                                this player's own match worse, so it's in every build, like the above
-//   --netplay-stall-at <read>:<ms>  (a test) the game stops at that read for that long, as on a hitch
+//   --netplay-stall-at <read>:<ms>  (a test) the game stops at that read for that long, as on a hitch (again for more)
 //   --rollback <reads>           (hosting; issue #22) instead of waiting for the others' inputs, every peer
 //                                predicts them (each player's last) up to <reads> reads ahead of the last read
 //                                it has them all for, 0 (the default: they wait) to 12; when one comes that
@@ -75,7 +75,11 @@
 //
 // A joiner's machine that leaves (or stops answering) leaves the others playing: the host tells them from which
 // read its ports get no input (Gone), and every machine gives them an idle pad from there. The host leaving
-// ends the match.
+// ends the match. A player who left (not kicked) can come back (#21), by joining again with the same player id
+// (--netplay-player, or the menu's) and as many players: their game starts at once, the host tells the others from
+// which read their ports play again (Back: past any input that can have come), and sends them its game as it is
+// before that read, with the match as it is then (Rejoin), which they load once their game has started; meanwhile
+// the others wait for their inputs from that read, as for desync recovery.
 //
 // A peer that falls behind the others (a hitch: loading, the system) catches up on its own: it runs the
 // timeline faster than real time until the others' inputs are no further ahead of it than the delay.
@@ -277,14 +281,17 @@ namespace conker::lockstep {
     int rollback_window();
     uint64_t take_rollback();
     uint64_t verified_reads();
-    // Desync recovery (#21): the host's game, sent to a joiner whose game went another way, which loads it. Host:
-    // the read whose state the harness is to take, at a safe point before it (UINT64_MAX: none), and give_state
-    // with it (the runtime's state and the host's own). Joiner: take_state, with the read the game is about to make,
-    // gives the host's state for before it once it has come (and is checked), for the harness to load at the next
-    // safe point; then state_loaded (it's at that read now), or state_failed (it couldn't be: this machine leaves).
+    // Desync recovery (#21): the host's game, sent to a joiner whose game went another way, which loads it; and to
+    // a player coming back to a match under way, whose game has just started. Host: the read whose state the harness
+    // is to take, at a safe point before it (UINT64_MAX: none), and give_state with it (the runtime's state and the
+    // host's own). Joiner: take_state, with the read the game is about to make, gives the host's state once it has
+    // come (and is checked), and returns the read it's before (UINT64_MAX: none yet), for the harness to load at the
+    // next safe point and go on from that read: the one about to be made, after a desync; coming back, any (the
+    // reads made till then are this machine's alone, its game starting). Then state_loaded (it's at that read now),
+    // or state_failed (it couldn't be: this machine leaves).
     uint64_t state_wanted();
     void give_state(uint64_t read, const std::vector<uint8_t>& runtime, const std::vector<uint8_t>& host);
-    bool take_state(uint64_t read, std::vector<uint8_t>& runtime, std::vector<uint8_t>& host);
+    uint64_t take_state(uint64_t next_read, std::vector<uint8_t>& runtime, std::vector<uint8_t>& host);
     void state_loaded(uint64_t read);
     void state_failed(const char* why);
     // A replay's last read (the harness's): each input before it is waited for near it, so it ends right.
@@ -312,7 +319,7 @@ namespace conker::lockstep {
         std::array<int, netplay::max_players> round_trip_ms{ -1, -1, -1, -1 };
         uint8_t left = 0;
         uint8_t left_silently = 0;
-        // Desync recovery: this machine is getting the host's game (how much of it has come, 0 to 1).
+        // Desync recovery, or coming back: this machine is getting the host's game (how much of it has come, 0 to 1).
         bool getting_state = false;
         double state_progress = 0;
     };
@@ -325,6 +332,9 @@ namespace conker::lockstep {
     void end(netplay::Reason reason, const char* why);
     // Why the match ended, in a sentence for the player (after on_read returned false).
     const std::string& why_ended();
+    // Whether this machine, a joiner, may be able to come back to the match that ended here (#21): it left, or lost
+    // the host, rather than the host ending it, removing it, or a desync.
+    bool can_come_back();
     // Says goodbye (after the last read of a replay): what's been sent still arrives.
     void leave();
     // Says goodbye if not yet, and stops the networking, as the game quits.
