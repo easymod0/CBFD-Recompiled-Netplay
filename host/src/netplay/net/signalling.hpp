@@ -60,9 +60,11 @@ namespace conker::netplay {
 #endif
     }
     // What a listed room must match for a game whose Hello is `hello` (its build, ROM, settings and mods;
-    // not its key nor players): one hash of them, never 0. game_of: of its build and ROM alone.
+    // not its key nor players): one hash of them, never 0. game_of: of its build and ROM alone; rom_of: of
+    // its ROM alone (signalling version 6: the rooms of other builds).
     uint64_t fit_of(const Hello& hello);
     uint64_t game_of(const Hello& hello);
+    uint64_t rom_of(const Hello& hello);
 
     class Signaller {
     public:
@@ -110,17 +112,19 @@ namespace conker::netplay {
         Lookup lookup() const { return room_lookup; }
         const signal::RoomFound& found() const { return found_room; }
 
-        // Once the room is made: lists it in public as `room` says (its number is filled in), for games
-        // like `hello`'s (fit_of), on `platform` (another than this one's: a test); again whenever that
-        // changes (an unchanged one isn't sent).
+        // Once the room is made: lists it in public as `room` says (its number and host are filled in; its
+        // release must be valid), for games like `hello`'s (fit_of), on `platform` (another than this one's:
+        // a test); again whenever that changes (an unchanged one isn't sent).
         void publish(const Hello& hello, const signal::ListedRoom& room, signal::Platform platform = this_platform());
         // Once ready: asks for the listed rooms a game like `hello`'s on `platform` could join (the server
-        // allows a few each minute). listing() says how it went (found: the rooms are in rooms(), and
-        // others() says how many more of the same game have other settings or mods).
+        // allows a few each minute). listing() says how it went (found: the rooms are in rooms(), those of
+        // other builds last, and others() says how many more of the same game have other settings or mods;
+        // older() how many are on older versions of the game, which can't say which).
         void list_rooms(const Hello& hello, signal::Platform platform = this_platform());
         Lookup listing() const { return room_listing; }
         const std::vector<signal::ListedRoom>& rooms() const { return listed.rooms; }
         int others() const { return listed.others; }
+        int older() const { return listed.older; }
 
         // Speaks an older signalling version (signal::oldest_version on), as an older game does: a test of the
         // server's. Before connect.
@@ -131,6 +135,8 @@ namespace conker::netplay {
         bool has_public_rooms() const { return speaks >= 3; }
         // Whether the server takes desync summaries (report_desync; version 4), once ready.
         bool has_desync_reports() const { return speaks >= 4; }
+        // The signalling version it speaks with the server (once ready: the server's, if older).
+        uint16_t version() const { return speaks; }
         // Once ready: tells the server this match desynced (it logs a summary for its operator; a few each
         // connection). False if it wasn't sent (the server is older, it isn't ready, or `report` isn't valid).
         bool report_desync(const signal::DesyncReport& report);

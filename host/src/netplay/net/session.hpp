@@ -59,6 +59,7 @@ namespace conker::netplay {
         int rollback = 0;       // started: the reads every peer predicts ahead (0: off)
         Reason reason = Reason::quit;
         std::string detail;     // the library's account of a closed connection, for the log
+        std::string release;    // ended by a Refuse: the host's release, if it said (another release, to get)
         bool by_signalling = false; // ended: the signalling server's word (the host isn't there, or the
                                     // server's gone), and `detail` says it for the player
         Packet packet;
@@ -140,6 +141,9 @@ namespace conker::netplay {
         void set_room_settings(bool own_view, int delay, int rollback);
         void set_ready(bool ready);
         void set_blocked(const std::vector<uint64_t>& players) { blocked = players; }
+        // Host: this game's release (hello.hpp's release_name), told to each joiner it refuses (not if it
+        // isn't 1 to max_release_name printable characters).
+        void set_release(const std::string& name);
         bool kick(int port);
         Roster roster() const;
         bool everyone_ready() const;
@@ -204,6 +208,8 @@ namespace conker::netplay {
         // Takes every message still unread from `connection` (a peer that closed it).
         void drain(uint32_t connection, std::vector<Event>& events);
         void drop(Peer& peer, Reason reason, std::vector<Event>* events);
+        // A joiner not yet welcomed: Refuse (with this one's release), then closed.
+        void refuse(Peer& peer, Reason reason);
         // Waits until every peer has acknowledged what was sent to it (up to 2 s).
         void flush();
         void send_to(uint32_t connection, const Packet& packet);
@@ -227,6 +233,7 @@ namespace conker::netplay {
         uint64_t horizon = 64;
         std::array<uint64_t, max_players> next_inputs{};   // host: the read each port's next Inputs start at
         Hello hello;
+        std::string release;
         uint32_t listen_socket = 0;
         uint32_t poll_group = 0;
         std::vector<Peer> peers;            // host: everyone connected; joiner: the host

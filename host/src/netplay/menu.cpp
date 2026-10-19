@@ -181,6 +181,9 @@ namespace {
         recompui::Label* lan_label = nullptr;
         std::string shown_lan;
         bool lan_listening = false;                // the Join tab is open: this network's matches are polled
+        bool testing = false;                      // Test connection runs (the room list waits for it)
+        recompui::Element* test_box = nullptr;     // its findings, a line each
+        recompui::Button* test_button = nullptr;
         std::chrono::steady_clock::time_point lan_since;   // listening since
         bool lan_shown = false;                    // the list (or that it's empty) is on show
         bool lan_visible = false;                  // hosting directly: visible on this network
@@ -289,7 +292,7 @@ namespace {
             // The room list only while nothing is being connected (it's asked for again once it's idle).
             rooms_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
             lan_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
-            if (state == State::idle && join_tab && !browsing && !closing) {
+            if (state == State::idle && join_tab && !browsing && !closing && !testing) {
                 start_browsing();
             }
             // An update applies the text (and, while connecting, polls).
@@ -316,6 +319,7 @@ namespace {
         // Hosting or joining: the Hello from the stored ROM, then lockstep's begin.
         void begin() {
             stop_browsing();
+            stop_test();
             conker::netplay::Hello hello;
             if (!my_hello(hello)) {
                 set_state(State::idle, "Load the ROM first (Start Game on the launcher).");
@@ -419,6 +423,10 @@ namespace {
 
         // The public room list: asked for while the Join tab is open and nothing is being connected.
         void start_browsing() {
+            // Not while the connection test has the server.
+            if (testing) {
+                return;
+            }
             stop_browsing();
             shown_rooms.clear();
             rooms_box->clear_children();
@@ -467,6 +475,51 @@ namespace {
             queue_update();
         }
 
+        // Test connection: the server, its relay, the NAT and the LAN port (lockstep::start_connection_test). The
+        // room list stops while it runs (one connection to the server at a time).
+        void on_test() {
+            if (state != State::idle || testing) {
+                return;
+            }
+            stop_browsing();
+            settings.server = trimmed(settings.server);
+            conker::lockstep::set_server(settings.server, settings.allow_direct);
+            test_box->clear_children();
+            std::string error;
+            if (!conker::lockstep::start_connection_test(error)) {
+                text(test_box, "Couldn't test the connection: " + error + ".", recompui::theme::Typography::Body);
+                return;
+            }
+            text(test_box, "Testing the connection (up to 30 seconds)...", recompui::theme::Typography::Body, recompui::theme::color::TextDim);
+            testing = true;
+            test_button->set_enabled(false);
+            queue_update();
+        }
+
+        // Stopped before it's done (a match begins, the menu closes): nothing to show.
+        void stop_test() {
+            if (testing) {
+                conker::lockstep::stop_connection_test();
+                testing = false;
+                test_button->set_enabled(true);
+                test_box->clear_children();
+            }
+        }
+
+        void show_test(const conker::netplay::ConnectionReport& report) {
+            using Verdict = conker::netplay::ConnectionReport::Verdict;
+            test_box->clear_children();
+            text(test_box, report.summary, recompui::theme::Typography::LabelMD);
+            const std::pair<const std::string*, Verdict> lines[] = { { &report.server_text, report.server }, { &report.relay_text, report.relay },
+                { &report.direct_text, report.direct }, { &report.lan_text, report.lan } };
+            for (const auto& [line, verdict] : lines) {
+                if (!line->empty()) {
+                    text(test_box, (verdict == Verdict::good ? "Yes: " : verdict == Verdict::bad ? "No: " : "") + *line,
+                        recompui::theme::Typography::Body, recompui::theme::color::TextDim);
+                }
+            }
+        }
+
         void stop_browsing() {
             if (browsing) {
                 conker::lockstep::stop_browsing();
@@ -482,17 +535,26 @@ namespace {
             }
         }
 
-        // A row for a match to join by `code`: its name, how it's going, and Join if it's open.
+        // A row for a match to join by `code`: its name, how it's going, and Join if it's open. A room of
+        // another build says which release it is instead, with a button to get it (a fork release).
         void add_room_row(recompui::Element* box, const conker::lockstep::ListedRoom& room, const std::string& code) {
             recompui::ContextId context = recompui::get_current_context();
             recompui::Element* line = row(box);
-            const bool open = !room.playing && room.joined < room.players;
+            const bool open = !room.playing && room.joined < room.players && !room.other_build;
             text(line, room.name, recompui::theme::Typography::LabelMD);
             std::string about = std::to_string(room.joined) + " of " + std::to_string(room.players) + " players";
             about += room.playing ? ", playing" : "";
             about += room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : "";
             about += box == lan_box ? "" : room.direct ? ", direct allowed" : ", relay only";
+            if (room.other_build) {
+                about += ", on " + room.release + " (yours: " + conker::netplay::release_name() + "): everyone needs the same release";
+            }
             text(line, about, recompui::theme::Typography::Body, recompui::theme::color::TextDim);
+            const std::string url = conker::netplay::release_url(room.release);
+            if (room.other_build && !url.empty()) {
+                recompui::Button* get = context.create_element<recompui::Button>(line, "Get " + room.release, recompui::ButtonStyle::Secondary);
+                get->add_pressed_callback([url]() { SDL_OpenURL(url.c_str()); });
+            }
             if (open) {
                 recompui::Button* join_room = context.create_element<recompui::Button>(line, "Join", recompui::ButtonStyle::Secondary);
                 join_room->add_pressed_callback([this, code]() {
@@ -539,22 +601,27 @@ namespace {
             if (list.state != conker::lockstep::Browse::State::listed) {
                 return;
             }
-            std::string summary = std::to_string(list.others);
+            std::string summary = std::to_string(list.others) + " " + std::to_string(list.older);
             for (const conker::lockstep::ListedRoom& room : list.rooms) {
-                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "");
+                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + (room.other_build ? "o" : "");
             }
             if (summary == shown_rooms) {
                 return;
             }
             shown_rooms = summary;
             const std::string mods = conker::netplay_profile::mods_text();
-            std::string words = list.rooms.empty() ? "No public rooms for this game yet: host one (Public, on the Host tab)." :
+            const bool none = std::none_of(list.rooms.begin(), list.rooms.end(), [](const auto& room) { return !room.other_build; });
+            std::string words = none ? "No public rooms for this game yet: host one (Public, on the Host tab)." :
                 "Public rooms for this game";
-            words += mods.empty() ? (list.rooms.empty() ? "" : ", with no mods (like yours):") : (list.rooms.empty() ? " Yours would need the same mods: " + mods + "." :
+            words += mods.empty() ? (none ? "" : ", with no mods (like yours):") : (none ? " Yours would need the same mods: " + mods + "." :
                 ", with the same mods as yours (" + mods + "):");
             if (list.others > 0) {
                 words += " " + std::to_string(list.others) + (list.others == 1 ? " more room has" : " more rooms have") +
                     " other settings or mods than yours, so it can't be joined from here.";
+            }
+            if (list.older > 0) {
+                words += " " + std::to_string(list.older) + (list.older == 1 ? " more room is" : " more rooms are") +
+                    " on an older release than yours (" + conker::netplay::release_name() + ") and can't say which game, so it can't be joined from here.";
             }
             rooms_label->set_text(words);
             rooms_box->clear_children();
@@ -630,6 +697,21 @@ namespace {
         void process_event(const recompui::Event& e) override {
             if (e.type != recompui::EventType::Update) {
                 return;
+            }
+            if (testing) {
+                conker::netplay::ConnectionReport report;
+                if (conker::lockstep::poll_connection_test(report)) {
+                    conker::lockstep::stop_connection_test();
+                    testing = false;
+                    test_button->set_enabled(true);
+                    show_test(report);
+                    if (state == State::idle && join_tab && !closing) {
+                        start_browsing();
+                    }
+                }
+                else {
+                    queue_update();
+                }
             }
             if (browsing && state == State::idle) {
                 show_rooms(conker::lockstep::poll_browse());
@@ -729,10 +811,13 @@ namespace {
                 settings.allow_direct = index == 1;
                 save();
             });
+            test_button = context.create_element<recompui::Button>(server_row, "Test connection", recompui::ButtonStyle::Tertiary);
+            test_button->add_pressed_callback([this]() { on_test(); });
             text(server, "Rooms are made on a netplay server (its address and port). Relay only: your game reaches the "
                 "others through the server's relay, so nobody sees your address. Allow direct: straight to each "
                 "other when your networks allow it, which can be quicker, but the others see your address.",
                 Typography::Body, color::TextDim);
+            test_box = column(server, 4.0f);
 
             // Hosting or joining: a tab each, so only the one chosen's settings show.
             recompui::TabSet* tabs = context.create_element<recompui::TabSet>(this);
@@ -933,6 +1018,7 @@ namespace {
         void on_close() {
             closing = true;
             stop_browsing();
+            stop_test();
             if (state == State::connecting) {
                 conker::lockstep::cancel();
                 conker::lockstep::set_host(-1, players);
@@ -943,7 +1029,7 @@ namespace {
         // The menu opens again: the room list, if that's the tab open.
         void on_open() {
             browse_hello.reset();
-            if (state == State::idle && join_tab) {
+            if (state == State::idle && join_tab && !testing) {
                 start_browsing();
             }
         }

@@ -14,11 +14,14 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <variant>
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 16;
+    constexpr uint16_t protocol_version = 17;
+    // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
+    constexpr size_t max_release_name = 40;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -118,9 +121,13 @@ namespace conker::netplay {
         uint8_t players = 0;
         bool operator==(const Welcome&) const = default;
     };
-    // Host to joiner: not accepted, then the connection is closed.
+    // Host to joiner: not accepted, then the connection is closed; and the host's release (empty, or 1 to
+    // max_release_name printable characters, no spaces), so a joiner of another one is told which to get.
+    // Its layout (and Reason's numbers) stays the same in every protocol version from 17 on, so a joiner of
+    // another version can read it too (decode_refusal).
     struct Refuse {
         Reason reason = Reason::protocol;
+        std::string release;
         bool operator==(const Refuse&) const = default;
     };
     // One port's pads and movement for reads first_read to first_read + count - 1, and for time sync (rollback),
@@ -222,4 +229,7 @@ namespace conker::netplay {
     size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out);
     // The packet in `data`, or nothing if it isn't exactly one valid packet of this protocol version.
     std::optional<Packet> decode(std::span<const uint8_t> data);
+    // A Refuse of any protocol version from 17 on (its layout is kept), or nothing. A reason this version
+    // doesn't know (a newer one's) is Reason::version.
+    std::optional<Refuse> decode_refusal(std::span<const uint8_t> data);
 }

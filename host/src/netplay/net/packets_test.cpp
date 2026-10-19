@@ -57,7 +57,9 @@ int main() {
     CHECK(round_trips(Welcome{ 0x02, 2 }, 7));
     CHECK(round_trips(Welcome{ 0x08, 4 }, 7));
     CHECK(round_trips(Welcome{ 0x0E, 4 }, 7));      // three players on one machine
-    CHECK(round_trips(Refuse{ Reason::rom }, 6));
+    CHECK(round_trips(Refuse{ Reason::rom }, 47));
+    CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
+    CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
     CHECK(round_trips(some_inputs(), 159));
     CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 273));
     Hash regions{ 30, 1 };
@@ -118,6 +120,8 @@ int main() {
     CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
+    CHECK(bytes_of(Refuse{ Reason::build, "a release" }).empty());
+    CHECK(bytes_of(Refuse{ Reason::build, std::string(max_release_name + 1, 'a') }).empty());
     CHECK(bytes_of(Bye{ (Reason)(last_reason + 1) }).empty());
     Inputs bad = some_inputs();
     bad.port = 4;
@@ -252,7 +256,24 @@ int main() {
     data = r; data[53] = 5; CHECK(!decodes(data));
     data = r; data[55] = max_delay + 1; CHECK(!decodes(data));
     data = bytes_of(Ready{ 1 }); data[5] = 2; CHECK(!decodes(data));
-    data = bytes_of(Refuse{ Reason::kicked }); CHECK(data.size() == 6 && data[5] == last_reason);
+    data = bytes_of(Refuse{ Reason::kicked }); CHECK(data.size() == 47 && data[5] == last_reason && data[6] == 0);
+
+    // Refuse keeps its layout from version 17 on: read in any of them (decode_refusal), a reason this
+    // version doesn't know as Reason::version; not in an older one, nor with the padding not zero.
+    const std::vector<uint8_t> refusal = bytes_of(Refuse{ Reason::build, "v0.1.6-netplay.15" });
+    CHECK(refusal[6] == 17 && refusal[7] == 'v' && refusal[23] == '5' && refusal[24] == 0 && refusal[46] == 0);
+    CHECK(decode_refusal(refusal) && *decode_refusal(refusal) == (Refuse{ Reason::build, "v0.1.6-netplay.15" }));
+    data = refusal; data[2] = 0x40; data[3] = 0x01;                  // version 320
+    CHECK(!decodes(data) && decode_refusal(data) && decode_refusal(data)->release == "v0.1.6-netplay.15");
+    data[5] = 200;
+    CHECK(decode_refusal(data) && decode_refusal(data)->reason == Reason::version);
+    data = refusal; data[2] = 16; CHECK(!decode_refusal(data));
+    data = refusal; data[30] = 'x'; CHECK(!decodes(data) && !decode_refusal(data));
+    data = refusal; data[6] = 41; CHECK(!decodes(data) && !decode_refusal(data));
+    data = refusal; data[10] = ' '; CHECK(!decodes(data) && !decode_refusal(data));
+    data = refusal; data[5] = 0; CHECK(!decode_refusal(data) || decode_refusal(data)->reason == Reason::version);
+    data = refusal; data.pop_back(); CHECK(!decode_refusal(data));
+    CHECK(!decode_refusal(bytes_of(Ready{ 1 })));
 
     if (failures == 0) {
         std::printf("packets_test: all passed\n");

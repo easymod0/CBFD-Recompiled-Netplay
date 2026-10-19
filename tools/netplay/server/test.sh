@@ -170,6 +170,16 @@ $compose logs net 2>&1 | grep -q "behind NAT: public address $TEST_PUBLIC_IP on 
 check nat-detected $ok
 relay nat-two 2 --reads 150
 relay nat-three-lossy 3 --reads 150 --loss 20
+# The menu's connection test: the server, and its relay working (through it to itself). Whether direct
+# connections would work isn't checked here: this machine's packets straight to a relay port are dropped.
+connection_test() {
+    "$probe" test $ice --lan-port 27260 > "$1.txt" 2>&1
+    ok=0
+    grep -q "^verdict server good relay good " "$1.txt" && grep -qx "The relay works." "$1.txt" && ok=1
+    [ $ok -eq 1 ] || grep -v '^\[netplay\]' "$1.txt"
+    check "$1" $ok
+}
+connection_test nat-connection-test
 
 # A joiner with a password the server didn't make: coturn refuses it, and relay-only it can't connect.
 "$probe" host room --reads 60 $ice > bad-password.host.txt 2>&1 &
@@ -224,6 +234,7 @@ ok=0
 $compose logs net 2>&1 | grep -q "public address $TEST_PUBLIC_IP is this machine's" && ok=1
 check vps-no-nat $ok
 relay vps-two 2 --reads 150
+connection_test vps-connection-test
 guard vps
 # net stopped (as while it's recreated) with coturn still running: the guard stays.
 $compose stop net > /dev/null 2>&1

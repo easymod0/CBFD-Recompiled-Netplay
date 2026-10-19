@@ -172,6 +172,8 @@ namespace {
     // The public room list (browse): a connection to the netplay server of its own, while no match is being
     // connected, which asks for the list again every few seconds.
     conker::netplay::Signaller* browser = nullptr;
+    // The menu's connection test, while it runs (it has a signaller of its own).
+    conker::netplay::ConnectionTest* connection_test = nullptr;
     conker::netplay::Hello browse_hello;
     double next_list = 0;
     double browse_since = 0;
@@ -394,6 +396,7 @@ namespace {
     // ready by itself.
     void prepare_room() {
         session->set_blocked(blocked_players);
+        session->set_release(conker::netplay::release_name());
         if (session->hosting()) {
             session->set_room_settings(host_own_view, delay_option, rollback_option);
             ready_now = auto_ready;
@@ -1171,6 +1174,7 @@ void conker::lockstep::set_identity(uint64_t player, const std::vector<uint64_t>
     auto_ready = ready_by_itself;
     if (session != nullptr) {
         session->set_blocked(blocked_players);
+        session->set_release(netplay::release_name());
     }
 }
 
@@ -1347,6 +1351,7 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     }
     // One connection to the server at a time (the signaller's).
     stop_browsing();
+    stop_connection_test();
     if (faking) {
         fake.outage = false;
         netplay::set_fake_network(fake);
@@ -1487,8 +1492,10 @@ namespace {
     // Hosting a public room: listed as it is now (the signaller sends that only when it changes).
     void list_room() {
         if (public_option && host_room && signaller != nullptr && signaller->room() != 0 && match_players >= 2) {
-            signaller->publish(sent, { 0, (uint8_t)match_players, (uint8_t)std::clamp(joined, 1, match_players), match_started,
-                direct_option, (uint8_t)rollback_option });
+            conker::netplay::signal::ListedRoom room{ 0, (uint8_t)match_players, (uint8_t)std::clamp(joined, 1, match_players), match_started,
+                direct_option, (uint8_t)rollback_option };
+            room.release = conker::netplay::release_name();
+            signaller->publish(sent, room);
         }
     }
 
@@ -1503,7 +1510,7 @@ namespace {
     // room for this machine's players), or null.
     const conker::netplay::signal::ListedRoom* quick_pick(uint64_t own) {
         for (const conker::netplay::signal::ListedRoom& room : signaller->rooms()) {
-            if (room.room != own && !room.playing && room.players - room.joined >= local_option && !quick_tried.contains(room.room) &&
+            if (room.room != own && !room.other_build && !room.playing && room.players - room.joined >= local_option && !quick_tried.contains(room.room) &&
                 std::find(blocked_players.begin(), blocked_players.end(), room.host) == blocked_players.end()) {
                 return &room;
             }
@@ -1719,7 +1726,8 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 delays = { 0, event.delay, event.delay };
                 break;
             case Event::Type::ended:
-                std::printf("[netplay] couldn't join: %s (%s)\n", netplay::describe(event.reason), event.detail.c_str());
+                std::printf("[netplay] couldn't join: %s (%s)%s%s\n", netplay::describe(event.reason), event.detail.c_str(),
+                    event.release.empty() ? "" : ", host's release ", event.release.c_str());
                 // Quick Match: another room, on the same connection to the server.
                 if (quick_option && signaller != nullptr && signaller->state() == netplay::Signaller::State::ready) {
                     delete session;
@@ -1733,6 +1741,13 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 }
                 // Through the server, why it couldn't find the host says more than "timed out".
                 status = "Couldn't join: " + (event.by_signalling ? event.detail : std::string(netplay::describe(event.reason))) + ".";
+                // Another release: which one the host has (a host from before releases were told: not known).
+                if (!event.by_signalling && (event.reason == Reason::version || event.reason == Reason::build)) {
+                    const std::string own = netplay::release_name();
+                    status = !event.release.empty() && event.release != own ?
+                        "Couldn't join: the host plays release " + event.release + " and you have " + own + ". Everyone needs the same release." :
+                        "Couldn't join: the host plays another release of the game than yours (" + own + "). Everyone needs the same release.";
+                }
                 // Full for this machine's players, not for one: fewer may fit.
                 if (event.reason == Reason::full && local_option > 1) {
                     status += " Fewer players on this computer may fit.";
@@ -1945,6 +1960,7 @@ bool conker::lockstep::browse(const netplay::Hello& me, std::string& error) {
         return false;
     }
     stop_browsing();
+    stop_connection_test();
     // A new id each time, as for a match (the server keeps a released one from reuse for a while).
     if (!netplay::new_id(error)) {
         return false;
@@ -2009,16 +2025,51 @@ conker::lockstep::Browse conker::lockstep::poll_browse() {
     if (browse_heard) {
         out.state = Browse::State::listed;
         out.others = browser->others();
+        out.older = browser->older();
         for (const netplay::signal::ListedRoom& room : browser->rooms()) {
             // Not a blocked player's (its host's id: none from an older server or host).
             if (room.host != 0 && std::find(blocked_players.begin(), blocked_players.end(), room.host) != blocked_players.end()) {
                 continue;
             }
             out.rooms.push_back({ netplay::encode_room_code(room.room), netplay::room_name(room.room), room.players, room.joined,
-                room.playing, room.direct, room.rollback });
+                room.playing, room.direct, room.rollback, room.release, room.other_build });
         }
     }
     return out;
+}
+
+bool conker::lockstep::start_connection_test(std::string& error) {
+    std::scoped_lock lock(session_mutex);
+    if (session != nullptr || signaller != nullptr) {
+        error = "a match is being connected";
+        return false;
+    }
+    if (!start_library(error)) {
+        return false;
+    }
+    stop_browsing();
+    stop_connection_test();
+    if (!server_option.empty() && !netplay::new_id(error)) {
+        return false;
+    }
+    connection_test = new netplay::ConnectionTest();
+    connection_test->start(server_option, netplay::lan::default_port);
+    return true;
+}
+
+bool conker::lockstep::poll_connection_test(netplay::ConnectionReport& report) {
+    std::scoped_lock lock(session_mutex);
+    if (connection_test == nullptr || !connection_test->poll()) {
+        return false;
+    }
+    report = connection_test->report();
+    return true;
+}
+
+void conker::lockstep::stop_connection_test() {
+    std::scoped_lock lock(session_mutex);
+    delete connection_test;
+    connection_test = nullptr;
 }
 
 void conker::lockstep::stop_browsing() {
@@ -2155,6 +2206,7 @@ void conker::lockstep::block(uint64_t player) {
         return;
     }
     session->set_blocked(blocked_players);
+    session->set_release(netplay::release_name());
     // A host kicks them now, before the match or in it (a joiner leaves at its next poll, before the match:
     // poll_connect; in one, it plays on).
     if (session->hosting() && !ended) {

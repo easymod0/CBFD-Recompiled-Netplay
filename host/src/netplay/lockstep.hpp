@@ -95,6 +95,7 @@
 
 #include "ultramodern/input.hpp"
 
+#include "net/connection_test.hpp"
 #include "net/packets.hpp"
 
 namespace conker::lockstep {
@@ -147,6 +148,8 @@ namespace conker::lockstep {
         bool playing = false;   // being played: nobody can join it
         bool direct = false;    // its host allows direct connections
         int rollback = 0;
+        std::string release;    // its release's name (hello.hpp: release_name); empty: not known (an older server)
+        bool other_build = false;   // another build of the game than this one's: not to be joined (another release)
     };
     struct Browse {
         enum class State { connecting, listed, failed };
@@ -154,6 +157,7 @@ namespace conker::lockstep {
         std::string error;                  // failed: why
         std::vector<ListedRoom> rooms;      // open ones first
         int others = 0;                     // rooms of this build and ROM besides, with other settings or mods
+        int older = 0;                      // rooms of older releases besides, which can't say their release
     };
     bool browse(const netplay::Hello& me, std::string& error);
     Browse poll_browse();
@@ -165,6 +169,13 @@ namespace conker::lockstep {
     bool lan_browse(const netplay::Hello& me, std::string& error);
     std::vector<ListedRoom> poll_lan();
     void stop_lan();
+    // The menu's Test connection (net/connection_test.hpp), on the netplay server (set_server's; none: only
+    // the LAN port), while no match is being connected: it stops the room list (one connection to the server
+    // at a time). poll_connection_test: whether it's done, and then its report; begin stops it, as does
+    // stop_connection_test.
+    bool start_connection_test(std::string& error);
+    bool poll_connection_test(netplay::ConnectionReport& report);
+    void stop_connection_test();
     // The waiting room, while connecting (#31): each port's player (by name, made from their player id), whether
     // they're ready, their platform and round trip to the host, which are this machine's, and the match's
     // settings. `in`: there's one to show (hosting, or welcomed). set_ready: this machine's players are ready

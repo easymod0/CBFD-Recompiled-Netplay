@@ -11,7 +11,7 @@
 # match through ICE, by a room on the signalling
 # server netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh);
 # a room gone with its host, the public room list (by game, mods and platform), a relay-only host on a
-# server without one, an older version's games (which play together, apart from this one's), and
+# server without one, the connection test (no relay, no server), an older version's games (which play together, apart from this one's), and
 # guessing room codes, which the server stops.
 #   sh host/src/netplay/net/test.sh <build folder>
 set -u
@@ -24,6 +24,7 @@ failed=0
 "$bin/signal_packets_test" || failed=1
 "$bin/turn_credentials_test" || failed=1
 "$bin/lan_packets_test" || failed=1
+"$bin/stun_test" || failed=1
 
 # The join code a host printed in <file> (its key is random), once it has.
 code_of() {
@@ -128,6 +129,8 @@ refused refused-full 27212 --local "the match is full"
 # host removed it.
 host_options="--kick 1" refused refused-kicked 27216 --player "the host removed this player"
 host_options="--block 2" refused refused-blocked 27217 --player "the host removed this player"
+# Another build: told which release the host has.
+host_options="--release v0.1.6-netplay.99" refused refused-build 27219 --build "a different build of the game (.*), host's release v0.1.6-netplay.99$"
 host_options=
 # The host waits for everyone to be Ready: a joiner that says so after 3 s starts the match then, not as it joins.
 "$probe" host 27218 --reads 30 > ready.host.txt 2>&1 &
@@ -161,10 +164,11 @@ hostile hostile-hash 27208 2 hash
 hostile hostile-port 27213 2 port
 
 # A joiner that never says Hello: dropped after the handshake time (3 s). One that sends a message bigger
-# than any packet: closed by the library at once.
+# than any packet: closed by the library at once. One of a newer protocol version: refused, told the host's release.
 raw() {
     name=$1; port=$2; option=$3
-    "$probe" host "$port" --reads 30 > "$name.host.txt" 2>&1 &
+    # shellcheck disable=SC2086
+    "$probe" host "$port" --reads 30 ${host_options:-} > "$name.host.txt" 2>&1 &
     host=$!
     code_of "$name.host.txt" > /dev/null
     if "$probe" join "127.0.0.1:$port" "$option" > "$name.join.txt" 2>&1; then
@@ -178,6 +182,8 @@ raw() {
 }
 raw silent 27203 --silent
 raw oversize 27209 --oversize
+host_options="--release v0.1.6-netplay.97" raw future 27214 --future
+grep -q "^refused: a different version of netplay, host's release v0.1.6-netplay.97$" future.join.txt || { echo "future: FAILED (no release)"; failed=1; }
 
 # LAN discovery: a host visible on this network (on a port of the test's own) is heard, and joined by the
 # code the beacon makes; a game of another build hears nothing.
@@ -269,11 +275,19 @@ expect() {
 expect ice-closed "no room $room on the server" join "$room" --signal 127.0.0.1:27220 --direct 1
 # Relay-only, but this server has no relay.
 expect ice-norelay "offers no TURN relay" host room --signal 127.0.0.1:27220
+# The menu's connection test: this server (no relay), and one that doesn't answer (the relay's check is in
+# tools/netplay/server/test.sh). It tells what it found, and the LAN port it opens.
+"$probe" test --signal 127.0.0.1:27220 --lan-port 27245 > test-norelay.txt 2>&1
+if grep -qx "verdict server good relay unknown direct unknown lan good" test-norelay.txt && grep -q "^The server offers no relay" test-norelay.txt &&
+    grep -q "signalling version [0-9]" test-norelay.txt; then echo "test-norelay: passed"; else echo "test-norelay: FAILED"; cat test-norelay.txt; failed=1; fi
+"$probe" test --signal 127.0.0.1:27229 --lan-port 27245 > test-noserver.txt 2>&1
+if grep -qx "verdict server bad relay unknown direct unknown lan good" test-noserver.txt && grep -q "^The netplay server \(didn't answer\|couldn't be reached\)" test-noserver.txt; then
+    echo "test-noserver: passed"; else echo "test-noserver: FAILED"; cat test-noserver.txt; failed=1; fi
 # The public room list: a listed room of this game (3 players), one with other mods (counted, not listed),
 # one on macOS (apart from Linux and Windows), one not listed, and one past the server's public rooms
 # from one address (--max-listed-per-address 3 here: it stays private, so it isn't counted). The list
 # shows the first as players join it, and as it's played.
-# listed <name> <expected "rooms n, others n"> <grep for a room line, or -> <probe options...>: asked
+# listed <name> <expected "rooms n, others n, older n"> <grep for a room line, or -> <probe options...>: asked
 # again until it's so, for up to 15 s (or $tries half seconds). As Linux unless the options say (the
 # machine's own platform may be macOS, which is apart).
 listed() {
@@ -299,29 +313,32 @@ others="$others $!"
 "$probe" host room --signal 127.0.0.1:27220 --direct 1 > lobby.private.txt 2>&1 &
 others="$others $!"
 room_of lobby.mods.txt > /dev/null; room_of lobby.mac.txt > /dev/null; room_of lobby.private.txt > /dev/null
-listed lobby-list "rooms 1, others 1" "$lobby_room 1/3 direct rollback 0 host 000000000000010b$"
+listed lobby-list "rooms 1, others 1, older 0" "$lobby_room 1/3 direct rollback 0 host 000000000000010b release probe$"
 "$probe" host room --public 1 --platform 1 --mods 3 --signal 127.0.0.1:27220 --direct 1 > lobby.capped.txt 2>&1 &
 others="$others $!"
 room_of lobby.capped.txt > /dev/null
 sleep 1
-listed lobby-capped "rooms 1, others 1" "$lobby_room 1/3"
-listed lobby-windows "rooms 1, others 1" "$lobby_room 1/3" --platform 2
-listed lobby-mac "rooms 1, others 0" - --platform 3
+listed lobby-capped "rooms 1, others 1, older 0" "$lobby_room 1/3"
+listed lobby-windows "rooms 1, others 1, older 0" "$lobby_room 1/3" --platform 2
+listed lobby-mac "rooms 1, others 0, older 0" - --platform 3
 grep -q "^listed $lobby_room" lobby-mac.txt && { echo "lobby-mac: FAILED (Linux's room listed)"; failed=1; }
-listed lobby-build "rooms 0, others 0" - --build 2
+# Another build of the same ROM: the rooms of this one are listed as another build's, with their release
+# (the one with other mods too: settings aside, it's another release).
+listed lobby-build "rooms 2, others 0, older 0" "$lobby_room 1/3 direct rollback 0 host 000000000000010b release probe other-build$" --build 2
+listed lobby-rom "rooms 0, others 0, older 0" - --build 2 --rom 2
 "$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.join1.txt 2>&1 &
 lobby_joiners=$!
-listed lobby-joined "rooms 1, others 1" "$lobby_room 2/3"
+listed lobby-joined "rooms 1, others 1, older 0" "$lobby_room 2/3"
 "$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.join2.txt 2>&1 &
 lobby_joiners="$lobby_joiners $!"
-listed lobby-playing "rooms 1, others 1" "$lobby_room 3/3 playing"
+listed lobby-playing "rooms 1, others 1, older 0" "$lobby_room 3/3 playing"
 for pid in $lobby_host $lobby_joiners; do
     wait "$pid" || { echo "lobby-match: FAILED"; failed=1; }
 done
 # Killed, the others' connections only time out on the server (the library's 10 s): until then, their
 # rooms are listed.
 kill $others 2>/dev/null
-tries=60 listed lobby-gone "rooms 0, others 0" -
+tries=60 listed lobby-gone "rooms 0, others 0, older 0" -
 # An older game's signalling (version 2, before public rooms): two of them play through a room, but
 # neither version finds the other's rooms.
 "$probe" host room --speak 2 --signal 127.0.0.1:27220 --direct 1 --reads 60 > old.host.txt 2>&1 &
@@ -335,6 +352,18 @@ new_host=$!
 new_room=$(room_of new.host.txt)
 expect new-from-old "no room $new_room on the server" join "$new_room" --speak 2 --signal 127.0.0.1:27220 --direct 1
 kill $new_host 2>/dev/null
+# A public room of an older version (5: rooms without a release) is counted for this one, not listed; this
+# one's room (another build) is listed for this one only.
+"$probe" host room --speak 5 --public 1 --platform 1 --signal 127.0.0.1:27220 --direct 1 > old5.host.txt 2>&1 &
+old5_host=$!
+"$probe" host room --public 1 --platform 1 --build 3 --release v0.1.6-netplay.98 --signal 127.0.0.1:27220 --direct 1 > new6.host.txt 2>&1 &
+new6_host=$!
+room_of old5.host.txt > /dev/null
+new6_room=$(room_of new6.host.txt)
+listed older-rooms "rooms 1, others 0, older 1" "$new6_room 1/2 direct rollback 0 host [0-9a-f]* release v0.1.6-netplay.98 other-build$"
+listed older-lister "rooms 1, others 0, older 0" "[A-Z0-9-]* 1/2 direct rollback 0" --speak 5
+grep -q " release " older-lister.txt && { echo "older-lister: FAILED (a newer room's release)"; failed=1; }
+kill $old5_host $new6_host 2>/dev/null
 # This version on a server that only speaks version 2 (posing as an older one): it speaks that too, and
 # plays through a room, without public rooms.
 "$bin/netplay_server" --port 27221 --connection-burst 1000 --newest-version 2 > older.server.txt 2>&1 &

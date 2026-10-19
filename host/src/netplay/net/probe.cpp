@@ -4,19 +4,22 @@
 //
 //   netplay_probe host <port> [--players 2] [options]     (prints its join code, for 127.0.0.1)
 //   netplay_probe join <join code> [options]
-//   netplay_probe join <address:port> --silent | --oversize
+//   netplay_probe join <address:port> --silent | --oversize | --future
 //   netplay_probe code <address:port> <key, hex>
 //   netplay_probe host room --signal <server:port> [--direct 1] [options]   (prints its room code)
 //   netplay_probe join <room code> --signal <server:port> [--direct 1] [options]
 //   netplay_probe list --signal <server:port> [--build/--rom/--profile/--mods <hex>] [--platform <n>]
 //   netplay_probe lan [--lan-port 27016] [--build/--rom/--profile/--mods <hex>] [--platform <n>]
 //   netplay_probe desync --signal <server:port> [--count 1]
+//   netplay_probe test [--signal <server:port>] [--lan-port 27016]
 //     --reads <n>        how many reads each peer sends (300: 10 s)
 //     --local <n>        players on this peer, each with a port (1 by default)
 //     --loss <percent>   the library drops this share of the packets sent (they're resent)
 //     --build/--rom/--profile/--mods <hex>   the handshake's hashes (all 1 by default), to test refusals
 //     --silent           connect but never say Hello: the host must drop it after its handshake time
 //     --oversize         connect and send a message bigger than any packet: the library must close it
+//     --future           connect and say Hello as a newer protocol version would: the host must refuse it, with
+//                        its release, in a Refuse this one can read (decode_refusal)
 //     --own-view 1       (hosting) the match's rule that every player sees only their own view
 //     --hostile early    (joining) send Inputs before the match starts: the host must drop it
 //     --hostile far      (joining) send Inputs far beyond the reads it could have got to: dropped too
@@ -38,19 +41,24 @@
 //     --count <n>        (desync) how many summaries to send
 //     --player <hex>     this machine's player id (local_id() by default)
 //     --block <hex>      (hosting) keep this player id out (refused: kicked)
+//     --release <name>   this game's release name ("probe" by default): a public room's, and what a host tells
+//                        a joiner it refuses
 //     --kick 1           (hosting) kick each joiner as it joins
 //     --ready-after <s>  (joining) say Ready that many seconds after being welcomed (at once by default):
 //                        the host starts once every port is taken and everyone's ready
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
-// that. `code` prints the join code for an address and key. `list` prints the public rooms a game with
+// that; --future, once it's refused for another version ("refused: <reason>, host's release <name>"). `code` prints the join code for an address and key. `list` prints the public rooms a game with
 // those hashes could join ("listed <code> <joined>/<players>", then "playing" and "direct" if so,
-// "rollback <n>", and "host <id>" if the server says), then "rooms <count>, others <count>" (those of the same build and ROM with other
-// settings or mods), and exits 0 (1 if it couldn't get them). `lan` listens for beacons for 3 s and prints
+// "rollback <n>", "host <id>" if the server says, "release <name>" if it does, and "other-build" for a room of
+// another build), then "rooms <count>, others <count>, older <count>" (those of the same build and ROM with other
+// settings or mods; those on older signalling versions), and exits 0 (1 if it couldn't get them). `lan` listens for beacons for 3 s and prints
 // the matches on this network a game with those hashes could join ("lan <address:port> <join code>
 // <joined>/<players>", then "playing" if so, and "rollback <n>"), then "matches <count>". `desync` sends the
 // server that many made-up desync summaries (as a player whose match desynced would) and prints "sent <n>".
+// `test` runs the menu's connection test (connection_test.hpp) and prints its lines, then "verdict server <v>
+// relay <v> direct <v> lan <v>" (each good, bad or unknown), and exits 0.
 
 #include <bit>
 #include <chrono>
@@ -66,6 +74,7 @@
 #include <steam/isteamnetworkingutils.h>
 
 #include "join_code.hpp"
+#include "connection_test.hpp"
 #include "lan.hpp"
 #include "session.hpp"
 #include "signalling.hpp"
@@ -96,7 +105,7 @@ namespace {
     };
 
     int usage() {
-        std::fprintf(stderr, "usage: netplay_probe host <port> [--players 2] | join <code> | join <address:port> --silent|--oversize\n"
+        std::fprintf(stderr, "usage: netplay_probe host <port> [--players 2] | join <code> | join <address:port> --silent|--oversize|--future\n"
                              "       netplay_probe host room | join <room code>, with --signal <server:port> [--direct 1]\n"
                              "       [--turn-password <p>] (a test: not the server's)\n"
                              "       [--reads 300] [--loss <percent>] [--build <hex>] [--rom <hex>] [--profile <hex>] [--mods <hex>]\n"
@@ -110,8 +119,9 @@ namespace {
     // --silent: connects to `where` without a Session, so no Hello is sent, and waits for the host to
     // close the connection. Passes if it does so for a timeout, after 2 to 10 seconds. --oversize: sends a
     // message bigger than any packet once connected, and passes if the connection is closed for it (not
-    // for a timeout) within 2 seconds.
-    int join_silently(const std::string& where, bool oversize) {
+    // for a timeout) within 2 seconds. --future: says Hello as protocol_version + 1, and passes if a Refuse
+    // for another version comes back.
+    int join_silently(const std::string& where, bool oversize, bool future) {
         SteamNetworkingIPAddr address;
         if (!address.ParseString(where.c_str())) {
             std::fprintf(stderr, "--silent and --oversize take an address and port\n");
@@ -133,7 +143,15 @@ namespace {
             if (info.m_eState == k_ESteamNetworkingConnectionState_Connected && !connected) {
                 connected = true;
                 connected_at = seconds;
-                if (oversize) {
+                if (future) {
+                    uint8_t buffer[max_packet_size];
+                    const size_t size = encode(Hello{ 1, 1, 1, 0, 1, 1, 1, 1 }, buffer);
+                    buffer[2] = (uint8_t)(protocol_version + 1);
+                    buffer[3] = (uint8_t)((protocol_version + 1) >> 8);
+                    sockets->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_Reliable, nullptr);
+                    std::printf("connected, said Hello as version %d\n", protocol_version + 1);
+                }
+                else if (oversize) {
                     const std::vector<uint8_t> big(1024, 0x43);
                     sockets->SendMessageToConnection(connection, big.data(), (uint32)big.size(), k_nSteamNetworkingSend_Reliable, nullptr);
                     std::printf("connected, sent %zu bytes\n", big.size());
@@ -141,6 +159,18 @@ namespace {
                 else {
                     std::printf("connected, saying nothing\n");
                 }
+            }
+            SteamNetworkingMessage_t* message = nullptr;
+            if (future && sockets->ReceiveMessagesOnConnection(connection, &message, 1) == 1) {
+                const std::optional<Refuse> refusal = decode_refusal({ (const uint8_t*)message->m_pData, (size_t)message->m_cbSize });
+                message->Release();
+                sockets->CloseConnection(connection, 0, nullptr, false);
+                if (refusal && refusal->reason == Reason::version) {
+                    std::printf("refused: %s, host's release %s\n", describe(refusal->reason), refusal->release.c_str());
+                    return 0;
+                }
+                std::printf("FAILED: not a refusal for another version\n");
+                return 1;
             }
             if (info.m_eState == k_ESteamNetworkingConnectionState_ClosedByPeer ||
                 info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
@@ -172,7 +202,8 @@ int main(int argc, char** argv) {
     }
     const bool lan_listing = argc >= 2 && std::strcmp(argv[1], "lan") == 0;
     const bool reporting = argc >= 2 && std::strcmp(argv[1], "desync") == 0;
-    const bool listing = lan_listing || reporting || (argc >= 2 && std::strcmp(argv[1], "list") == 0);
+    const bool testing = argc >= 2 && std::strcmp(argv[1], "test") == 0;
+    const bool listing = lan_listing || reporting || testing || (argc >= 2 && std::strcmp(argv[1], "list") == 0);
     if (!listing && (argc < 3 || (std::strcmp(argv[1], "host") != 0 && std::strcmp(argv[1], "join") != 0))) {
         return usage();
     }
@@ -190,6 +221,7 @@ int main(int argc, char** argv) {
     std::string turn_password;
     bool again = false;
     bool listed = false;
+    std::string release = "probe";
     bool lan_visible = false;
     bool lan_loopback = true;
     int count = 1;
@@ -225,17 +257,19 @@ int main(int argc, char** argv) {
         else if (option == "--count") count = std::atoi(value);
         else if (option == "--player") me.player = std::strtoull(value, nullptr, 16);
         else if (option == "--block") blocked.push_back(std::strtoull(value, nullptr, 16));
+        else if (option == "--release") release = value;
         else if (option == "--kick") kick = std::atoi(value) != 0;
         else if (option == "--ready-after") ready_after = std::strtod(value, nullptr);
         else return usage();
     }
-    if ((uint8_t)platform < 1 || platform > signal::Platform::last || (listing && !lan_listing && signal_server.empty()) || lan_port == 0 ||
+    if ((uint8_t)platform < 1 || platform > signal::Platform::last || (listing && !lan_listing && !testing && signal_server.empty()) || lan_port == 0 ||
         (lan_listing && !signal_server.empty()) || (lan_visible && !signal_server.empty()) || count < 1 ||
         speaks < signal::oldest_version || speaks > signal::version) {
         return usage();
     }
     const bool oversize = !hosting && argc == 4 && std::strcmp(argv[3], "--oversize") == 0;
-    const bool silent = !hosting && argc == 4 && (std::strcmp(argv[3], "--silent") == 0 || oversize);
+    const bool future = !hosting && argc == 4 && std::strcmp(argv[3], "--future") == 0;
+    const bool silent = !hosting && argc == 4 && (std::strcmp(argv[3], "--silent") == 0 || oversize || future);
     if (reads == 0) {
         return usage();
     }
@@ -250,9 +284,25 @@ int main(int argc, char** argv) {
     }
     me.platform = (uint8_t)platform;
     if (silent) {
-        const int silent_result = join_silently(where, oversize);
+        const int silent_result = join_silently(where, oversize, future);
         shutdown();
         return silent_result;
+    }
+    if (testing) {
+        ConnectionTest test;
+        test.start(signal_server, lan_port);
+        while (!test.poll()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const ConnectionReport& report = test.report();
+        static const char* const verdicts[] = { "unknown", "good", "bad" };
+        for (const std::string* line : { &report.server_text, &report.relay_text, &report.direct_text, &report.lan_text, &report.summary }) {
+            if (!line->empty()) std::printf("%s\n", line->c_str());
+        }
+        std::printf("verdict server %s relay %s direct %s lan %s\n", verdicts[(int)report.server], verdicts[(int)report.relay],
+            verdicts[(int)report.direct], verdicts[(int)report.lan]);
+        shutdown();
+        return 0;
     }
     if (lan_listing) {
         LanListener listener;
@@ -330,9 +380,11 @@ int main(int argc, char** argv) {
                         std::printf("listed %s %d/%d%s%s rollback %d", encode_room_code(room.room).c_str(), room.joined, room.players,
                             room.playing ? " playing" : "", room.direct ? " direct" : "", room.rollback);
                         if (room.host != 0) std::printf(" host %016llx", (unsigned long long)room.host);
+                        if (!room.release.empty()) std::printf(" release %s", room.release.c_str());
+                        if (room.other_build) std::printf(" other-build");
                         std::printf("\n");
                     }
-                    std::printf("rooms %zu, others %d\n", signaller.rooms().size(), signaller.others());
+                    std::printf("rooms %zu, others %d, older %d\n", signaller.rooms().size(), signaller.others(), signaller.older());
                     list_result = 0;
                 }
             }
@@ -429,6 +481,7 @@ int main(int argc, char** argv) {
                 // joiner is ready too.
                 session.set_ready(true);
                 session.set_blocked(blocked);
+                session.set_release(release);
             }
             if (hosting && signal_server.empty()) {
                 std::printf("join code %s\n", session.join_code("127.0.0.1:" + where).c_str());
@@ -443,7 +496,9 @@ int main(int argc, char** argv) {
             // A public room: listed as it is now (again as that changes; unchanged, nothing is sent).
             const auto list_room = [&] {
                 if (listed && hosting && room != 0) {
-                    signaller.publish(me, { 0, (uint8_t)players, (uint8_t)joined, playing, !relay_only, 0 }, platform);
+                    signal::ListedRoom listing{ 0, (uint8_t)players, (uint8_t)joined, playing, !relay_only, 0 };
+                    listing.release = release;
+                    signaller.publish(me, listing, platform);
                 }
             };
             list_room();
@@ -514,7 +569,8 @@ int main(int argc, char** argv) {
                             }
                             break;
                         case Event::Type::ended:
-                            std::printf("ended: %s (%s)\n", describe(event.reason), event.detail.c_str());
+                            std::printf("ended: %s (%s)%s%s\n", describe(event.reason), event.detail.c_str(),
+                                event.release.empty() ? "" : ", host's release ", event.release.c_str());
                             ended = true;
                             break;
                         case Event::Type::packet:

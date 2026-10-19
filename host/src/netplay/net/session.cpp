@@ -679,13 +679,25 @@ namespace conker::netplay {
         std::optional<Packet> packet = decode(data);
         if (packet) {
             handle(*peer, *packet, events);
+            return;
         }
-        else {
-            // Another protocol version is told so; anything else is a broken packet.
-            const bool other_version = data.size() >= 4 && data[0] == 'C' && data[1] == 'N' &&
-                (uint16_t)(data[2] | (data[3] << 8)) != protocol_version;
-            drop(*peer, other_version ? Reason::version : Reason::protocol, &events);
+        // Another protocol version is told so; anything else is a broken packet.
+        const bool other_version = data.size() >= 4 && data[0] == 'C' && data[1] == 'N' &&
+            (uint16_t)(data[2] | (data[3] << 8)) != protocol_version;
+        if (other_version && !is_host && peer->port < 0) {
+            // A host of another version refusing this joiner (its Refuse is kept the same): why, and its release.
+            if (std::optional<Refuse> refusal = decode_refusal(data)) {
+                refusal->reason = Reason::version;
+                handle(*peer, *refusal, events);
+                return;
+            }
         }
+        if (other_version && is_host && peer->port < 0) {
+            // A joiner of another version: refused as any other, so it reads which release this is.
+            refuse(*peer, Reason::version);
+            return;
+        }
+        drop(*peer, other_version ? Reason::version : Reason::protocol, &events);
     }
 
     void Session::drain(uint32_t connection, std::vector<Event>& events) {
@@ -744,10 +756,7 @@ namespace conker::netplay {
                     if (std::popcount(ports) != theirs->players) refusal = Reason::full;
                 }
                 if (refusal) {
-                    send_to(peer.connection, Refuse{ *refusal });
-                    SteamNetworkingSockets()->CloseConnection(peer.connection, k_ESteamNetConnectionEnd_App_Min + (int)*refusal,
-                        describe(*refusal), true);
-                    peers.erase(peers.begin() + (&peer - peers.data()));
+                    refuse(peer, *refusal);
                     return;
                 }
                 peer.port = std::countr_zero(ports);
@@ -838,6 +847,9 @@ namespace conker::netplay {
                 // Refused, or dropped before being welcomed (the host's handshake time ran out): with why.
                 Event event{ Event::Type::ended };
                 event.reason = std::holds_alternative<Refuse>(packet) ? std::get<Refuse>(packet).reason : std::get<Bye>(packet).reason;
+                if (const Refuse* refusal = std::get_if<Refuse>(&packet)) {
+                    event.release = refusal->release;
+                }
                 SteamNetworkingSockets()->CloseConnection(peer.connection, 0, nullptr, false);
                 peers.clear();
                 events.push_back(std::move(event));
@@ -949,6 +961,19 @@ namespace conker::netplay {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
+    }
+
+    void Session::set_release(const std::string& name) {
+        const bool valid = name.size() <= max_release_name &&
+            std::all_of(name.begin(), name.end(), [](char c) { return c > ' ' && c <= '~'; });
+        release = valid ? name : std::string();
+    }
+
+    void Session::refuse(Peer& peer, Reason reason) {
+        send_to(peer.connection, Refuse{ reason, release });
+        SteamNetworkingSockets()->CloseConnection(peer.connection, k_ESteamNetConnectionEnd_App_Min + (int)reason,
+            describe(reason), true);
+        peers.erase(peers.begin() + (&peer - peers.data()));
     }
 
     void Session::drop(Peer& peer, Reason reason, std::vector<Event>* events) {

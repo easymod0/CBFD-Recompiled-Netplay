@@ -339,7 +339,7 @@ namespace conker::netplay {
         if (current_state != State::ready || created_room == 0 || !has_public_rooms()) {
             return;
         }
-        signal::Publish packet{ fit_of(hello), game_of(hello), platform, room };
+        signal::Publish packet{ fit_of(hello), game_of(hello), rom_of(hello), platform, room };
         packet.room.room = created_room;
         packet.room.host = hello.player;
         if (published != packet) {
@@ -353,7 +353,7 @@ namespace conker::netplay {
             return;
         }
         room_listing = Lookup::waiting;
-        send_now(signal::ListRooms{ fit_of(hello), game_of(hello), platform });
+        send_now(signal::ListRooms{ fit_of(hello), game_of(hello), rom_of(hello), platform });
     }
 
     namespace {
@@ -381,6 +381,10 @@ namespace conker::netplay {
 
     uint64_t game_of(const Hello& hello) {
         return mix({ hello.build, hello.rom });
+    }
+
+    uint64_t rom_of(const Hello& hello) {
+        return mix({ hello.rom });
     }
 
     Ice Signaller::ice(bool relay_only) const {

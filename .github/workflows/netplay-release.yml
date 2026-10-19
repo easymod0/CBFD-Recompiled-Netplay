@@ -86,6 +86,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 180
     env:
+      # The release's name, built into the game (host/src/netplay/build_id.cmake): the room list and a
+      # refusal show it.
+      CONKER_RELEASE: ${{ needs.prepare.outputs.tag }}
       # vcpkg keeps the protobuf and abseil it builds (about 20 minutes) in this folder, which is
       # cached between runs. A cache's key can't be overwritten, so each run saves under its own key
       # and the next restores the newest: a new runner compiler then refreshes the cache once instead
@@ -183,6 +186,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    env:
+      CONKER_RELEASE: ${{ needs.prepare.outputs.tag }}
     steps:
       - name: Checkout
         run: |
@@ -284,6 +289,8 @@ jobs:
     # Netplay on macOS hasn't been played yet: the release notes say so.
     runs-on: macos-15
     timeout-minutes: 180
+    env:
+      CONKER_RELEASE: ${{ needs.prepare.outputs.tag }}
     steps:
       - name: Checkout
         run: |

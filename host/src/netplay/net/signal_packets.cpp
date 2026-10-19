@@ -13,17 +13,19 @@
 //   9 RoomFound    u64 room (1 to max_room), u64 host, u64 key (not 0)             29 bytes
 //  10 NoRoom       u64 room (1 to max_room)                                        13 bytes
 //  11 Turn         3 times: u8 size (1 to max_text), size characters (! to ~)  8 + sizes bytes
-//  12 Publish      u64 fit, u64 game (neither 0), u8 platform (1 to Platform::last), a room   34 (42) bytes
-//  13 ListRooms    u64 fit, u64 game (neither 0), u8 platform (1 to Platform::last)          22 bytes
-//  14 Rooms        u16 others, u8 count (0 to max_listed), count rooms   8 + 12 (20) * count bytes
+//  12 Publish      u64 fit, u64 game (neither 0), [6: u64 rom (not 0)], u8 platform (1 to Platform::last), a room
+//  13 ListRooms    u64 fit, u64 game (neither 0), [6: u64 rom (not 0)], u8 platform (1 to Platform::last)
+//                  22 bytes (30 from version 6)
+//  14 Rooms        u16 others, [6: u16 older], u8 count (0 to max_listed), count rooms
 //  15 DesyncReport u32 match, u64 build (neither 0), u8 platform, u8 players (2 to max_players), u8 port,
 //                  u8 other (each below players, not the same), u32 read, u8 rollback (0 to max_rollback),
 //                  u8 delay (0 to max_delay), 16 bytes of regions                                    43 bytes
 // A room (ListedRoom): u64 room (1 to max_room; Publish's 0 or any), u8 players (2 to max_players),
 // u8 joined (1 to players), u8 flags (bit 0 playing, bit 1 direct; the others 0), u8 rollback (0 to
-// max_rollback); from version 5, then u64 host (any: 0, not known). So 12 bytes, or 20 from version 5:
-// Publish is 34 bytes, or 42 from version 5; Rooms 8, and 12 or 20 a room.
-// Kinds 12 to 14 came with version 3, and 15 with 4; version 2 has the others, as they are here. A packet of any other
+// max_rollback); from version 5, then u64 host (any: 0, not known); from version 6, then u8 size (1 to
+// max_release) and the release's name (! to ~), and flags' bit 2 is other_build (Publish's 0). So 12 bytes,
+// 20 from version 5, 21 + the name's from version 6.
+// Kinds 12 to 14 came with version 3, and 15 with 4 (6 changed 12 to 14 as above); version 2 has the others, as they are here. A packet of any other
 // size, version or kind (or a kind its version hasn't), or with any field out of range, is refused.
 
 #include "signal_packets.hpp"
@@ -37,8 +39,6 @@ namespace conker::netplay::signal {
         enum Kind : uint8_t { register_ = 1, signal, unreachable, refused, registered, create_room, room_created, find_room,
             room_found, no_room, turn, publish, list_rooms, rooms, desync_report };
         constexpr size_t header_size = 5;
-        // A listed room's size in version `as`.
-        constexpr size_t room_size(uint16_t as) { return as >= 5 ? 20 : 12; }
         // The version a kind came with.
         uint16_t since(uint8_t kind) { return kind >= desync_report ? 4 : kind >= publish ? 3 : 2; }
         bool spoken(uint16_t as) { return as >= oldest_version && as <= version; }
@@ -66,21 +66,31 @@ namespace conker::netplay::signal {
             return d.match != 0 && d.build != 0 && valid_platform(d.platform) && d.players >= 2 && d.players <= max_players &&
                 d.port < d.players && d.other < d.players && d.port != d.other && d.rollback <= max_rollback && d.delay <= max_delay;
         }
-        // A listed room's fields but its number (Publish's is the server's to fill in).
-        bool valid_listing(const ListedRoom& room) {
+        bool valid_release(const std::string& text) {
+            return !text.empty() && text.size() <= max_release &&
+                std::all_of(text.begin(), text.end(), [](char c) { return c > ' ' && c <= '~'; });
+        }
+        // A listed room's fields but its number (Publish's is the server's to fill in), as version `as` has
+        // them (a release from 6 on; versions before it leave it out, and other_build).
+        bool valid_listing(const ListedRoom& room, uint16_t as) {
             return room.players >= 2 && room.players <= max_players && room.joined >= 1 && room.joined <= room.players &&
-                room.rollback <= max_rollback;
+                room.rollback <= max_rollback && (as < 6 || valid_release(room.release));
         }
         void write_room(Writer& w, const ListedRoom& room, uint16_t as) {
             w.u64(room.room);
             w.u8(room.players);
             w.u8(room.joined);
-            w.u8((uint8_t)((room.playing ? 1 : 0) | (room.direct ? 2 : 0)));
+            w.u8((uint8_t)((room.playing ? 1 : 0) | (room.direct ? 2 : 0) | (as >= 6 && room.other_build ? 4 : 0)));
             w.u8(room.rollback);
             if (as >= 5) w.u64(room.host);
+            if (as >= 6) {
+                w.u8((uint8_t)room.release.size());
+                w.p = std::copy(room.release.begin(), room.release.end(), w.p);
+            }
         }
-        // A room, if its fields but the number are valid (the caller checks that).
-        std::optional<ListedRoom> read_room(Reader& r, uint16_t as) {
+        // A room ending by `end`, if its fields but the number are valid (the caller checks that).
+        std::optional<ListedRoom> read_room(Reader& r, const uint8_t* end, uint16_t as) {
+            if (end - r.p < (as >= 6 ? 21 : as >= 5 ? 20 : 12)) return std::nullopt;
             ListedRoom room;
             room.room = r.u64();
             room.players = r.u8();
@@ -89,8 +99,15 @@ namespace conker::netplay::signal {
             room.rollback = r.u8();
             room.playing = (flags & 1) != 0;
             room.direct = (flags & 2) != 0;
+            room.other_build = (flags & 4) != 0;
             if (as >= 5) room.host = r.u64();
-            if ((flags & ~3) != 0 || !valid_listing(room)) return std::nullopt;
+            if (as >= 6) {
+                const uint8_t length = r.u8();
+                if (length > end - r.p) return std::nullopt;
+                room.release.assign((const char*)r.p, length);
+                r.p += length;
+            }
+            if ((flags & ~(as >= 6 ? 7 : 3)) != 0 || !valid_listing(room, as)) return std::nullopt;
             return room;
         }
         bool valid_text(const std::string& text) {
@@ -146,10 +163,12 @@ namespace conker::netplay::signal {
             }
         }
         else if (const Publish* p = std::get_if<Publish>(&packet)) {
-            if (p->fit == 0 || p->game == 0 || !valid_platform(p->platform) || !valid_listing(p->room)) return 0;
+            if (p->fit == 0 || p->game == 0 || (as >= 6 && p->rom == 0) || !valid_platform(p->platform) ||
+                !valid_listing(p->room, as) || p->room.other_build) return 0;
             w.u8(publish);
             w.u64(p->fit);
             w.u64(p->game);
+            if (as >= 6) w.u64(p->rom);
             w.u8((uint8_t)p->platform);
             write_room(w, p->room, as);
         }
@@ -168,19 +187,21 @@ namespace conker::netplay::signal {
             for (uint8_t b : p->regions) w.u8(b);
         }
         else if (const ListRooms* p = std::get_if<ListRooms>(&packet)) {
-            if (p->fit == 0 || p->game == 0 || !valid_platform(p->platform)) return 0;
+            if (p->fit == 0 || p->game == 0 || (as >= 6 && p->rom == 0) || !valid_platform(p->platform)) return 0;
             w.u8(list_rooms);
             w.u64(p->fit);
             w.u64(p->game);
+            if (as >= 6) w.u64(p->rom);
             w.u8((uint8_t)p->platform);
         }
         else if (const Rooms* p = std::get_if<Rooms>(&packet)) {
             if (p->rooms.size() > max_listed) return 0;
             for (const ListedRoom& room : p->rooms) {
-                if (!valid_room(room.room) || !valid_listing(room)) return 0;
+                if (!valid_room(room.room) || !valid_listing(room, as)) return 0;
             }
             w.u8(rooms);
             w.u16(p->others);
+            if (as >= 6) w.u16(p->older);
             w.u8((uint8_t)p->rooms.size());
             for (const ListedRoom& room : p->rooms) {
                 write_room(w, room, as);
@@ -257,23 +278,27 @@ namespace conker::netplay::signal {
                 return p;
             }
             case publish: {
-                if (size != 17 + room_size(as)) return std::nullopt;
+                const uint8_t* end = data.data() + data.size();
+                if (size < (as >= 6 ? 25u : 17u)) return std::nullopt;
                 Publish p;
                 p.fit = r.u64();
                 p.game = r.u64();
+                if (as >= 6) p.rom = r.u64();
                 p.platform = (Platform)r.u8();
-                const std::optional<ListedRoom> room = read_room(r, as);
-                if (p.fit == 0 || p.game == 0 || !valid_platform(p.platform) || !room) return std::nullopt;
+                const std::optional<ListedRoom> room = read_room(r, end, as);
+                if (p.fit == 0 || p.game == 0 || (as >= 6 && p.rom == 0) || !valid_platform(p.platform) || !room ||
+                    room->other_build || r.p != end) return std::nullopt;
                 p.room = *room;
                 return p;
             }
             case list_rooms: {
-                if (size != 17) return std::nullopt;
+                if (size != (as >= 6 ? 25u : 17u)) return std::nullopt;
                 ListRooms p;
                 p.fit = r.u64();
                 p.game = r.u64();
+                if (as >= 6) p.rom = r.u64();
                 p.platform = (Platform)r.u8();
-                if (p.fit == 0 || p.game == 0 || !valid_platform(p.platform)) return std::nullopt;
+                if (p.fit == 0 || p.game == 0 || (as >= 6 && p.rom == 0) || !valid_platform(p.platform)) return std::nullopt;
                 return p;
             }
             case desync_report: {
@@ -293,16 +318,19 @@ namespace conker::netplay::signal {
                 return p;
             }
             case rooms: {
-                if (size < 3) return std::nullopt;
+                const uint8_t* end = data.data() + data.size();
+                if (size < (as >= 6 ? 5u : 3u)) return std::nullopt;
                 Rooms p;
                 p.others = r.u16();
+                if (as >= 6) p.older = r.u16();
                 const uint8_t count = r.u8();
-                if (count > max_listed || size != 3 + count * room_size(as)) return std::nullopt;
+                if (count > max_listed) return std::nullopt;
                 for (int i = 0; i < count; i++) {
-                    const std::optional<ListedRoom> room = read_room(r, as);
+                    const std::optional<ListedRoom> room = read_room(r, end, as);
                     if (!room || !valid_room(room->room)) return std::nullopt;
                     p.rooms.push_back(*room);
                 }
+                if (r.p != end) return std::nullopt;
                 return p;
             }
             default:
