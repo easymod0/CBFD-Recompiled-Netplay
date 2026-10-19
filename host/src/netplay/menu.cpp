@@ -123,10 +123,25 @@ namespace {
         return recomp::get_config_path() / "netplay.json";
     }
 
-    ServerSettings load_settings() {
+    int64_t now_seconds() {
+        return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // A seat's platform, or empty if it's not known.
+    std::string platform_name(int platform) {
+        static const char* const names[] = { "", "Linux", "Windows", "macOS" };
+        return platform >= 1 && platform <= 3 ? names[platform] : "";
+    }
+
+    // The settings in netplay.json, the defaults for what isn't there. `readable` says whether the file was
+    // (or there's none): one that's there but isn't JSON is better kept than written over with the defaults.
+    ServerSettings load_settings(bool* readable = nullptr) {
         ServerSettings settings;
         std::ifstream file(settings_path());
         const nlohmann::json json = file ? nlohmann::json::parse(file, nullptr, false) : nlohmann::json();
+        if (readable != nullptr) {
+            *readable = !file || json.is_object();
+        }
         if (json.is_object()) {
             if (json.contains("server") && json["server"].is_string()) settings.server = json["server"].get<std::string>();
             if (json.contains("allow_direct") && json["allow_direct"].is_boolean()) settings.allow_direct = json["allow_direct"].get<bool>();
@@ -139,8 +154,10 @@ namespace {
             }
             // Each value only if it's one the menu offers.
             const auto number = [](const nlohmann::json& object, const char* key, int low, int high, int& value) {
-                if (object.contains(key) && object[key].is_number_integer() && object[key].get<int>() >= low && object[key].get<int>() <= high) {
-                    value = object[key].get<int>();
+                // Read wide: a value too big for an int mustn't wrap into the range.
+                if (object.contains(key) && object[key].is_number_integer() && object[key].get<int64_t>() >= low &&
+                    object[key].get<int64_t>() <= high) {
+                    value = (int)object[key].get<int64_t>();
                 }
             };
             const auto flag = [](const nlohmann::json& object, const char* key, bool& value) {
@@ -163,7 +180,8 @@ namespace {
             }
             if (json.contains("last_match") && json["last_match"].is_object()) {
                 const nlohmann::json& last = json["last_match"];
-                if (last.contains("code") && last["code"].is_string() && last.contains("started") && last["started"].is_number_integer()) {
+                if (last.contains("code") && last["code"].is_string() && last.contains("started") && last["started"].is_number_integer() &&
+                    last["started"].get<int64_t>() > 0) {
                     settings.last.code = last["code"].get<std::string>().substr(0, 64);
                     settings.last.started = last["started"].get<int64_t>();
                     number(last, "local_players", 1, conker::netplay::max_players - 1, settings.last.local_players);
@@ -195,12 +213,13 @@ namespace {
 
     // Adds `player` to the block list (kept), and tells lockstep (a host kicks them).
     void block_player(uint64_t player) {
-        ServerSettings settings = load_settings();
+        bool readable = false;
+        ServerSettings settings = load_settings(&readable);
         // Never this player's own id (two windows sharing a config folder share one).
         if (player == settings.player) {
             return;
         }
-        if (player != 0 && std::find(settings.blocked.begin(), settings.blocked.end(), player) == settings.blocked.end()) {
+        if (readable && player != 0 && std::find(settings.blocked.begin(), settings.blocked.end(), player) == settings.blocked.end()) {
             settings.blocked.push_back(player);
             save_settings(settings);
         }
@@ -209,11 +228,19 @@ namespace {
 
     // The match joined last (`code` empty: forgets it), kept at once: the game may never come back to the menu.
     void remember_match(const std::string& code, int local_players) {
-        ServerSettings settings = load_settings();
-        settings.last = LastMatch{ code, local_players,
-            code.empty() ? 0 : (int64_t)std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count() };
+        bool readable = false;
+        ServerSettings settings = load_settings(&readable);
+        if (!readable) {
+            return;
+        }
+        settings.last = LastMatch{ code, local_players, code.empty() ? 0 : now_seconds() };
         save_settings(settings);
+    }
+
+    // Whether Rejoin last match is offered for `last`.
+    bool may_rejoin(const LastMatch& last) {
+        const int64_t now = now_seconds();
+        return !last.code.empty() && now >= last.started && now - last.started < last_match_seconds;
     }
 
     // The settings, with a player id made the first time.
@@ -270,7 +297,7 @@ namespace {
         recompui::Element* rejoin_row = nullptr;   // Rejoin last match, while there's one to come back to
         recompui::Label* rejoin_label = nullptr;
         recompui::Label* clipboard_hint = nullptr; // the code field was filled from the clipboard
-        std::string clipboard_code;                // what it was filled with
+        std::string clipboard_code;                // what it was filled with (each code on the clipboard is offered once)
         std::string copied_code;                   // a code this menu put on the clipboard (Copy): not offered back
         recompui::Element* advanced_box = nullptr; // the Host tab's More options
         recompui::Button* advanced_button = nullptr;
@@ -302,6 +329,7 @@ namespace {
         int players = 2;
         int local_players = 1;              // the players on this computer, hosting or joining
         bool hosting = false;               // a match is hosted (connecting, as the host)
+        bool quick = false;                 // Quick Match is connecting (it may end up hosting a room)
         bool host_directly = false;         // hosting: by a join code (a port), not a room on the server
         bool public_room = false;           // hosting through a room: in the server's public list
         ServerSettings settings = load_or_make_settings();
@@ -354,6 +382,11 @@ namespace {
         // while hosting.
         void show_code() {
             const bool blank = address_text.find_first_not_of(' ') == std::string::npos;
+            // Quick Match hosts through the server, once it finds no room to join.
+            const bool quick_hosting = quick && state == State::connecting && conker::lockstep::waiting_room().hosting;
+            const bool host_directly = this->host_directly && !quick_hosting;
+            const bool public_room = this->public_room || quick_hosting;
+            const bool hosting = this->hosting || quick_hosting;
             const std::string code = !hosting ? std::string() :
                 host_directly ? conker::lockstep::join_code(address_text) : conker::lockstep::room_code();
             if (code != shown_code) {
@@ -393,6 +426,8 @@ namespace {
             state = next;
             if (state == State::idle) {
                 hosting = false;
+                quick = false;
+                shown_in = false;
             }
             show_code();
             status_label->set_text(status);
@@ -402,7 +437,8 @@ namespace {
             // Nothing in the setup can change a match under way: it's hidden until it's idle again.
             setup_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
             lobby_box->set_display(state == State::idle ? recompui::Display::None : recompui::Display::Flex);
-            cancel_button->set_display(state == State::connecting ? recompui::Display::Flex : recompui::Display::None);
+            // In the room, its Leave takes Cancel's place.
+            cancel_button->set_display(state == State::connecting && !shown_in ? recompui::Display::Flex : recompui::Display::None);
             // The room list only while nothing is being connected (it's asked for again once it's idle).
             rooms_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
             lan_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
@@ -431,6 +467,7 @@ namespace {
         void set_join_text(const std::string& code) {
             join_text = code;
             join_input->set_text(code);
+            clipboard_hint->set_display(recompui::Display::None);
             queue_update();     // which applies the field's new value
         }
 
@@ -445,7 +482,7 @@ namespace {
             }
             const std::string code = one_line(pasted);
             SDL_free(pasted);
-            if (code.empty() || code == copied_code ||
+            if (code.empty() || code == copied_code || code == clipboard_code ||
                 (!conker::netplay::decode_room_code(code) && !conker::netplay::decode_join_code(code))) {
                 return;
             }
@@ -457,13 +494,12 @@ namespace {
         // Rejoin last match, while the match joined last may still be played.
         void show_rejoin() {
             const LastMatch last = load_settings().last;
-            const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-            const int64_t minutes = (now - last.started) / 60;
-            const bool offered = !last.code.empty() && now >= last.started && now - last.started < last_match_seconds;
+            const bool offered = may_rejoin(last);
             rejoin_row->set_display(offered ? recompui::Display::Flex : recompui::Display::None);
             if (!offered) {
                 return;
             }
+            const int64_t minutes = (now_seconds() - last.started) / 60;
             const std::optional<uint64_t> room = conker::netplay::decode_room_code(last.code);
             std::string about = room ? conker::netplay::room_name(*room) + " (" + last.code + ")" : last.code;
             about += minutes < 1 ? ", started just now" : minutes == 1 ? ", started a minute ago" :
@@ -473,7 +509,13 @@ namespace {
 
         void on_rejoin() {
             const LastMatch last = load_settings().last;
-            if (state != State::idle || last.code.empty()) {
+            if (state != State::idle) {
+                return;
+            }
+            // The menu may have stayed open past the time it's offered for.
+            if (!may_rejoin(last)) {
+                show_rejoin();
+                set_state(State::idle, "That match started too long ago to come back to.");
                 return;
             }
             // As many players on this computer as then: the host gives the places back only so.
@@ -510,12 +552,13 @@ namespace {
                 return;
             }
             set_state(State::connecting, "Connecting...");
+            // The button pressed is hidden with the setup: a controller can still give up.
+            cancel_button->focus();
         }
 
         static std::string seat_text(const conker::lockstep::Seat& seat) {
-            static const char* const platforms[] = { "", "Linux", "Windows", "macOS" };
             std::string about = seat.ready ? "ready" : "not ready";
-            about += seat.platform >= 1 && seat.platform <= 3 ? std::string(", ") + platforms[seat.platform] : "";
+            about += !platform_name(seat.platform).empty() ? ", " + platform_name(seat.platform) : "";
             about += seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
             return about;
         }
@@ -905,6 +948,7 @@ namespace {
             settings.host.local_players = local_players;
             save();
             conker::lockstep::set_quick(local_players + 1, true, -1, local_players, 0);
+            quick = true;
             begin();
         }
 
@@ -966,7 +1010,7 @@ namespace {
                 switch (conker::lockstep::poll_connect(status)) {
                     case conker::lockstep::Progress::waiting:
                         status_label->set_text(status);
-                        if (hosting && shown_code.empty()) {
+                        if ((hosting || quick) && shown_code.empty()) {
                             show_code();    // the room code, once the server has made it
                         }
                         break;
@@ -1392,7 +1436,6 @@ namespace {
                 "matches from now on." : "Block keeps a player out of your matches from now on.", Typography::Body, color::TextDim);
             recompui::Button* leave = context.create_element<recompui::Button>(left, "Leave match", recompui::ButtonStyle::Danger);
             leave->add_pressed_callback([]() { conker::lockstep::leave_match(); });
-            static const char* const platforms[] = { "", "Linux", "Windows", "macOS" };
             for (int port = 0; port < room.players; port++) {
                 const conker::lockstep::Seat& seat = room.seats[port];
                 recompui::Element* line = context.create_element<recompui::Element>(right);
@@ -1406,7 +1449,7 @@ namespace {
                     continue;
                 }
                 add_text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body, seat.left ? color::TextDim : color::Text);
-                std::string about = seat.left ? "left" : seat.platform >= 1 && seat.platform <= 3 ? platforms[seat.platform] : "";
+                std::string about = seat.left ? "left" : platform_name(seat.platform);
                 about += !seat.left && seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
                 add_text(line, about, Typography::Body, color::TextDim);
                 if (seat.mine) {
