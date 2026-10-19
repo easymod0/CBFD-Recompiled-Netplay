@@ -49,7 +49,9 @@
 //                                match starts, and changed as they change. The host tells everyone (Start,
 //                                then Delay: every peer switches at the same read)
 //   --netplay-desync-at <read>   (a test) changes a byte of game memory at that read (in region 64,
-//                                0x80400003), which the next hash comparison must catch
+//                                0x80400003), which the next hash comparison must catch (again for more)
+//   --netplay-no-recovery        (hosting) a desync ends the match, rather than the host sending its game to
+//                                the joiners whose game went another way (desync recovery, below)
 //   --netplay-kick-at <read>:<port>  (a test, hosting) kicks that player (2 to 4) at that read, as the Esc
 //                                menu's Netplay tab does: their port plays on idle
 //   --netplay-fake-network <spec>  (a test) fakes a bad network on this peer's side, through the library:
@@ -65,6 +67,11 @@
 //                                on again from there, unpaced, unseen and unheard; time sync slows the machine
 //                                ahead of the others a little, till they're level. The match's, the same for
 //                                everyone: the joiners get it with Start (a joiner can't choose its own)
+//
+// Desync recovery (#21): when the host finds a joiner's game isn't its own, it sends that machine its game's state
+// (compressed, about 1 or 2 MB), which it loads at a read chosen ahead, and the match goes on; meanwhile the others
+// wait for that machine's inputs. The host's game is the one that counts. A machine whose game goes another way
+// again soon after, or that can't load the state, ends the match (or leaves it), as a desync did before.
 //
 // A joiner's machine that leaves (or stops answering) leaves the others playing: the host tells them from which
 // read its ports get no input (Gone), and every machine gives them an idle pad from there. The host leaving
@@ -270,6 +277,16 @@ namespace conker::lockstep {
     int rollback_window();
     uint64_t take_rollback();
     uint64_t verified_reads();
+    // Desync recovery (#21): the host's game, sent to a joiner whose game went another way, which loads it. Host:
+    // the read whose state the harness is to take, at a safe point before it (UINT64_MAX: none), and give_state
+    // with it (the runtime's state and the host's own). Joiner: take_state, with the read the game is about to make,
+    // gives the host's state for before it once it has come (and is checked), for the harness to load at the next
+    // safe point; then state_loaded (it's at that read now), or state_failed (it couldn't be: this machine leaves).
+    uint64_t state_wanted();
+    void give_state(uint64_t read, const std::vector<uint8_t>& runtime, const std::vector<uint8_t>& host);
+    bool take_state(uint64_t read, std::vector<uint8_t>& runtime, std::vector<uint8_t>& host);
+    void state_loaded(uint64_t read);
+    void state_failed(const char* why);
     // A replay's last read (the harness's): each input before it is waited for near it, so it ends right.
     void set_last_read(uint64_t read);
     // How the match goes, for the player to see (netplay/status.cpp draws it), from any thread: lockstep
@@ -295,6 +312,9 @@ namespace conker::lockstep {
         std::array<int, netplay::max_players> round_trip_ms{ -1, -1, -1, -1 };
         uint8_t left = 0;
         uint8_t left_silently = 0;
+        // Desync recovery: this machine is getting the host's game (how much of it has come, 0 to 1).
+        bool getting_state = false;
+        double state_progress = 0;
     };
     Status status();
     // The steady clock lockstep's times are on, in seconds.

@@ -34,6 +34,10 @@
 #include "librecomp/save_states.hpp"
 #include "ultramodern/timeline.hpp"
 
+#include <zstd.h>
+#define XXH_INLINE_ALL
+#include "xxHash/xxhash.h"
+
 #include "../conker.hpp"
 #include "hello.hpp"
 #include "net/join_code.hpp"
@@ -54,6 +58,8 @@ using conker::netplay::Motion;
 using conker::netplay::Pad;
 using conker::lockstep::Input;
 using conker::netplay::Reason;
+using conker::netplay::Resync;
+using conker::netplay::StatePart;
 
 namespace {
     constexpr uint64_t never = UINT64_MAX;
@@ -142,7 +148,10 @@ namespace {
     constexpr uint64_t late_reads_to_raise = 3;
     constexpr double lower_spare_ms = 12.0;
     constexpr uint64_t settle_reads = 90;
-    uint64_t desync_at = never;
+    std::vector<uint64_t> desync_at;    // --netplay-desync-at's reads
+    // Desync recovery (#21): hosting, whether a desync is set right by sending the host's game to the joiners whose
+    // game went another way (--netplay-no-recovery: the match ends, as before).
+    bool recovery_option = true;
     // (a test) the host kicks this port (from 0) at that read (--netplay-kick-at), as the Esc menu's Kick does.
     uint64_t kick_at = never;
     int kick_port = -1;
@@ -275,6 +284,47 @@ namespace {
         uint64_t reads_again = 0;
     } rollbacks;
 
+    // Desync recovery (#21): when the host finds a joiner's game isn't its own, it chooses a read none has made yet (as
+    // for a Delay) and tells everyone (Resync): that joiner's machine stops after the read before it until the host's
+    // game as it is before that read has come (the harness takes it at a safe point there, state_wanted and
+    // give_state; it's compressed and sent in StateParts), then loads it (the harness: take_state, state_loaded) and
+    // plays on from there. Everyone's inputs go on as they were: the reads before it had their inputs already, and
+    // those after are sent as ever. Only the host's game counts: a joiner that finds a desync waits for the host's
+    // Resync, and the match ends as before if none comes (the host doesn't recover), if a machine's game goes another
+    // way again soon after it was set right (something keeps them apart), or if a state can't be loaded.
+    constexpr uint64_t resync_again_reads = 300;   // 10 s: a desync this soon after the last of that port's ends the match
+    constexpr uint64_t resync_wait_reads = 150;    // a joiner that found a desync waits this long for the Resync
+    constexpr double state_wait_seconds = 60.0;    // a joiner waits this long at the read before for the state to come
+    // The decompressed state's most: the runtime's (the game's 8 MB and the rest) and the host's own.
+    constexpr size_t most_state_bytes = conker::netplay::max_state_size;
+    constexpr size_t most_host_state_bytes = 256 * 1024;
+    struct Recovery {
+        // The Resync under way: the read it's before (never: none) and the ports that load it.
+        uint64_t read = never;
+        uint8_t ports = 0;
+        // Host: the ports found to differ for the next one; the state taken (compressed) and its hash; by port, the
+        // read of its last Resync (hashes of reads before it are of the game that was replaced).
+        uint8_t wanted = 0;
+        std::vector<uint8_t> state;
+        uint64_t hash = 0;
+        std::array<uint64_t, conker::netplay::max_players> last_read{ never, never, never, never };
+        double sent_at = -1e9;          // a Resync (or its state) was last sent or heard: the others wait longer
+        int announcements = 0;
+        uint64_t count = 0;
+        // Joiner: a desync found here (the read compared, never: none) and the read this machine was at then; the
+        // state's parts so far; the state once it's all here and checked (the runtime's and the host's own); the read
+        // of the last state loaded (hashes before it are of the replaced game).
+        uint64_t desync_read = never;
+        uint64_t desync_found_at = 0;
+        std::vector<uint8_t> parts;
+        uint32_t size = 0;
+        uint64_t part_hash = 0;
+        bool ready = false;
+        std::vector<uint8_t> runtime;
+        std::vector<uint8_t> host;
+        uint64_t loaded_read = 0;
+    } recovery;
+
     std::array<std::vector<Input>, conker::netplay::max_players> received;
     std::array<bool, conker::netplay::max_players> gone{};
     // A player that left the match while it went on (#17): from this read their port gets an idle pad (never:
@@ -367,6 +417,9 @@ namespace {
             std::printf("[netplay] time sync: %llu reads paced later, %.0f ms in all; ahead of the others by %.2f reads at the end, "
                 "%.2f at most\n", (unsigned long long)time_sync.reads_slowed, time_sync.us_later / 1000.0, time_sync.lead,
                 time_sync.most_lead);
+        }
+        if (recovery.count > 0) {
+            std::printf("[netplay] desync recovery: %llu, each set right by the host's game\n", (unsigned long long)recovery.count);
         }
         std::printf("[netplay] waits: %llu of %llu reads waited for the others, %.0f ms in all, the longest %.0f ms (read %llu); "
             "%llu reads came over %.0f ms after the one before, the latest %.0f ms (read %llu); input delay %d, changed %llu times; "
@@ -548,8 +601,8 @@ namespace {
         }
     }
 
-    // The game's memory at `read` isn't `port`'s: says where, writes the report, and ends the match.
-    void desync(int port, uint32_t read, const OwnHash& own, const Hash& theirs) {
+    // The game's memory at `read` isn't `port`'s: says where and writes the report (its path, or empty).
+    std::string report_desync(int port, uint32_t read, const OwnHash& own, const Hash& theirs) {
         const std::vector<int> regions = differing_regions(own, theirs);
         std::string where;
         for (size_t i = 0; i < regions.size() && i < 8; i++) {
@@ -561,11 +614,57 @@ namespace {
             regions.empty() ? "no region the region hashes tell apart" : ((regions.size() == 1 ? "region " : "regions ") + where).c_str());
         const std::string report = write_report(port, read, own, theirs, regions);
         report_to_server(port, read, regions);
+        return report;
+    }
+
+    // ...and ends the match.
+    void end_for_desync(const std::string& report) {
         std::string why = "the games went different ways (a desync)";
         if (!report.empty()) {
             why += ". A report is in " + report + ": please send it, with the other players' reports, when you report the problem";
         }
         end_match(Reason::desync, why.c_str());
+    }
+
+    void desync(int port, uint32_t read, const OwnHash& own, const Hash& theirs) {
+        end_for_desync(report_desync(port, read, own, theirs));
+    }
+
+    // A desync with `port` at `read`, found as the hashes are compared: set right if it can be (true), or else
+    // the match ends. The host recovers by sending its game (the next Resync); a joiner waits for the host's.
+    bool recover(int port, uint32_t read, const OwnHash& own, const Hash& theirs) {
+        if (session->hosting()) {
+            const uint64_t last = recovery.last_read[port];
+            // A hash of the game a Resync replaced (or replaces, once it's sent): of no account.
+            if ((last != never && read < last) || (recovery.read != never && (recovery.ports & (1u << port)) != 0 && read < recovery.read)) {
+                return true;
+            }
+            if (!recovery_option || idle_from[port] != never) {
+                return false;
+            }
+            // (One report a desync: it's set right with the next Resync.)
+            if ((recovery.wanted & (1u << port)) != 0) {
+                return true;
+            }
+            report_desync(port, read, own, theirs);
+            if (last != never && read < last + resync_again_reads) {
+                std::printf("[netplay] port %d's game went another way again %llu reads after it was set right: the match ends\n",
+                    port + 1, (unsigned long long)(read - last));
+                end_match(Reason::desync, "the games kept going different ways (a desync), even after the host's game was sent");
+                return true;
+            }
+            recovery.wanted |= (uint8_t)(1u << port);
+            return true;
+        }
+        // (The game a state is on its way to replace, or was, or one already reported.)
+        if (read < recovery.loaded_read || recovery.desync_read != never || (recovery.read != never && read < recovery.read)) {
+            return true;
+        }
+        report_desync(port, read, own, theirs);
+        recovery.desync_read = read;
+        recovery.desync_found_at = current_read;
+        std::printf("[netplay] waiting for the host to send its game (desync recovery)\n");
+        return true;
     }
 
     // Compares every hash that both sides have for the same read. Peers are never more than the input
@@ -577,8 +676,11 @@ namespace {
                 ++it;
                 continue;
             }
-            if (own->second.hash != it->second.hash) {
+            if (own->second.hash != it->second.hash && !recover(it->first.first, own->first, own->second, it->second)) {
                 desync(it->first.first, own->first, own->second, it->second);
+                return;
+            }
+            if (ended) {
                 return;
             }
             it = their_hashes.erase(it);
@@ -635,6 +737,9 @@ namespace {
         delays = { from, delays.after, to };
         waits.delay_changes++;
     }
+
+    void take_resync(const Resync& r);
+    void take_state_part(const StatePart& part);
 
     Input idle_input(int port) {
         Input idle;
@@ -730,6 +835,12 @@ namespace {
                         return;
                     }
                     change_delay(d->delay, d->from_read);
+                }
+                else if (const Resync* r = std::get_if<Resync>(&event.packet)) {
+                    take_resync(*r);
+                }
+                else if (const StatePart* part = std::get_if<StatePart>(&event.packet)) {
+                    take_state_part(*part);
                 }
                 else if (const Hash* hash = std::get_if<Hash>(&event.packet)) {
                     // Hashes come every hash_every reads, within the horizon; one for a read this peer no
@@ -969,6 +1080,159 @@ namespace {
         return true;
     }
 
+    // --- Desync recovery (#21) ---
+
+    // The host, at a read made the first time: a Resync for the ports found to differ, from a read no joiner can
+    // have made (as a Delay's: a joiner is at most the delay ahead, and with rollback its window further).
+    // A Resync whose state can't be taken is announced again this many times at most, then the match ends.
+    constexpr int most_announcements = 10;
+    void announce_resync(uint64_t read, uint8_t ports, bool again = false) {
+        recovery.announcements = again ? recovery.announcements + 1 : 1;
+        if (recovery.announcements > most_announcements) {
+            end_match(Reason::desync, "the games went different ways (a desync), and the host's game couldn't be taken to set it right");
+            return;
+        }
+        // The others wait for that machine meanwhile (longer than for a player who stopped answering).
+        recovery.sent_at = now();
+        recovery.read = read + (uint64_t)std::max(delays.before, delays.after) + 2 + (uint64_t)rollback_option;
+        recovery.ports = ports;
+        recovery.state.clear();
+        for (int port = 0; port < match_players; port++) {
+            if ((ports & (1u << port)) != 0) recovery.last_read[port] = recovery.read;
+        }
+        std::printf("[netplay] read %llu: %s will load this game as it is before read %llu (desync recovery)\n",
+            (unsigned long long)read, ports_text(ports).c_str(), (unsigned long long)recovery.read);
+        session->send(Resync{ (uint32_t)recovery.read, ports });
+    }
+
+    // The host's game before `read` (the runtime's state, then the host's own) as it's sent: the two, each after its
+    // size (u32), compressed.
+    bool pack_state(const std::vector<uint8_t>& runtime, const std::vector<uint8_t>& host, std::vector<uint8_t>& out, uint64_t& hash) {
+        std::vector<uint8_t> whole;
+        whole.reserve(runtime.size() + host.size() + 8);
+        for (const std::vector<uint8_t>* part : { &runtime, &host }) {
+            const uint32_t size = (uint32_t)part->size();
+            for (int i = 0; i < 4; i++) whole.push_back((uint8_t)(size >> (8 * i)));
+            whole.insert(whole.end(), part->begin(), part->end());
+        }
+        hash = XXH3_64bits(whole.data(), whole.size());
+        out.resize(ZSTD_compressBound(whole.size()));
+        const size_t size = ZSTD_compress(out.data(), out.size(), whole.data(), whole.size(), 1);
+        if (ZSTD_isError(size) || size > conker::netplay::max_state_size) {
+            out.clear();
+            return false;
+        }
+        out.resize(size);
+        return true;
+    }
+
+    // The joiner's: the state that came, decompressed and checked, into recovery.runtime and .host. False, with why,
+    // if it isn't one this machine can load.
+    bool unpack_state(std::string& error) {
+        const unsigned long long size = ZSTD_getFrameContentSize(recovery.parts.data(), recovery.parts.size());
+        if (size == ZSTD_CONTENTSIZE_UNKNOWN || size == ZSTD_CONTENTSIZE_ERROR || size > most_state_bytes + most_host_state_bytes + 8) {
+            error = "its size isn't a state's";
+            return false;
+        }
+        std::vector<uint8_t> whole((size_t)size);
+        const size_t got = ZSTD_decompress(whole.data(), whole.size(), recovery.parts.data(), recovery.parts.size());
+        if (ZSTD_isError(got) || got != whole.size()) {
+            error = "it doesn't decompress";
+            return false;
+        }
+        if (XXH3_64bits(whole.data(), whole.size()) != recovery.part_hash) {
+            error = "its hash isn't the one the host sent";
+            return false;
+        }
+        size_t at = 0;
+        auto take = [&](std::vector<uint8_t>& out, size_t most) {
+            if (whole.size() - at < 4) return false;
+            const uint32_t length = (uint32_t)whole[at] | ((uint32_t)whole[at + 1] << 8) | ((uint32_t)whole[at + 2] << 16) |
+                ((uint32_t)whole[at + 3] << 24);
+            at += 4;
+            if (length > most || length > whole.size() - at) return false;
+            out.assign(whole.begin() + at, whole.begin() + at + length);
+            at += length;
+            return true;
+        };
+        if (!take(recovery.runtime, most_state_bytes) || !take(recovery.host, most_host_state_bytes) || at != whole.size()) {
+            error = "it isn't laid out as a state";
+            return false;
+        }
+        return recomp::save_states::check_untrusted(recovery.runtime, error);
+    }
+
+    // The host, at read `read` (made the first time, as it waits for the others): the state for the Resync under way,
+    // once it's taken and right (with rollback, every input before its read known and given as it was).
+    void send_resync_state(uint64_t read) {
+        if (!session->hosting() || recovery.read == never || read < recovery.read || recovery.state.empty()) {
+            return;
+        }
+        if (rollback_option > 0) {
+            verify(read);
+            if (verified < recovery.read) return;
+        }
+        session->send_state(recovery.ports, (uint32_t)recovery.read, recovery.state, recovery.hash);
+        std::printf("[netplay] read %llu: this game before read %llu sent to %s (%zu bytes)\n", (unsigned long long)read,
+            (unsigned long long)recovery.read, ports_text(recovery.ports).c_str(), recovery.state.size());
+        recovery.read = never;
+        recovery.state.clear();
+        recovery.sent_at = now();
+        recovery.count++;
+    }
+
+    // A joiner: the host's Resync. Its read is past any this machine has made (the host chose it so).
+    void take_resync(const Resync& r) {
+        if (r.read <= current_read || (rollback_option > 0 && r.read < frontier)) {
+            end_match(Reason::protocol, "the host asked for a game state at a read that doesn't fit");
+            return;
+        }
+        recovery.sent_at = now();
+        if ((r.ports & own_ports) == 0) {
+            std::printf("[netplay] %s will load the host's game before read %u (desync recovery)\n", ports_text(r.ports).c_str(), r.read);
+            return;
+        }
+        // (A later one replaces the last: the host couldn't take its game there.)
+        recovery.read = r.read;
+        recovery.ports = r.ports;
+        recovery.parts.clear();
+        recovery.size = 0;
+        recovery.ready = false;
+        recovery.desync_read = never;
+        std::printf("[netplay] read %llu: the host will send its game as it is before read %u (desync recovery)\n",
+            (unsigned long long)current_read, r.read);
+        tell("This game went a different way from the host's: getting the host's...");
+    }
+
+    // A joiner: a part of the host's state, after its Resync and in order.
+    void take_state_part(const StatePart& part) {
+        if (recovery.read == never || part.read != recovery.read || recovery.ready ||
+            part.offset != recovery.parts.size() || (part.offset != 0 && (part.size != recovery.size || part.hash != recovery.part_hash))) {
+            end_match(Reason::protocol, "the host's game state came out of order");
+            return;
+        }
+        if (part.offset == 0) {
+            recovery.size = part.size;
+            recovery.part_hash = part.hash;
+            recovery.parts.reserve(part.size);
+        }
+        recovery.parts.insert(recovery.parts.end(), part.bytes.begin(), part.bytes.end());
+        publish();
+        if (recovery.parts.size() < recovery.size) {
+            return;
+        }
+        std::string error;
+        if (!unpack_state(error)) {
+            std::printf("[netplay] the host's game state can't be loaded: %s\n", error.c_str());
+            end_match(Reason::protocol, ("the host's game state was broken (" + error + ")").c_str());
+            return;
+        }
+        recovery.parts.clear();
+        recovery.parts.shrink_to_fit();
+        recovery.ready = true;
+        std::printf("[netplay] the host's game before read %llu has come (%u bytes)\n", (unsigned long long)recovery.read, recovery.size);
+    }
+
     // The ports whose pad for `read` isn't here yet (and who haven't left), bit n for port n.
     uint8_t missing(uint64_t read) {
         uint8_t ports = 0;
@@ -1125,9 +1389,13 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
         rollback_option = (int)n;
         return true;
     }
+    if (std::strcmp(option, "--netplay-no-recovery") == 0) {
+        recovery_option = false;
+        return true;
+    }
     if (std::strcmp(option, "--netplay-desync-at") == 0) {
         number(0, LONG_MAX, n);
-        desync_at = (uint64_t)n;
+        desync_at.push_back((uint64_t)n);
         return true;
     }
     if (std::strcmp(option, "--netplay-kick-at") == 0) {
@@ -1240,6 +1508,10 @@ bool conker::lockstep::prepare() {
         std::fprintf(stderr, "[netplay] --local-players %d needs a match of more players than that (--players), should it host\n", local_option);
         return false;
     }
+    if (!join_where.empty() && !recovery_option) {
+        std::fprintf(stderr, "[netplay] --netplay-no-recovery is the host's choice: only the host's game is sent\n");
+        return false;
+    }
     if (!join_where.empty() && rollback_option > 0) {
         std::fprintf(stderr, "[netplay] --rollback is the host's choice: a joiner predicts as the host's match does\n");
         return false;
@@ -1311,6 +1583,8 @@ namespace {
         shown.catching_up = catching_up;
         shown.catching_up_since = catching_up_since;
         if (ask) shown.round_trip_ms = trips;
+        shown.getting_state = playing && !shown.hosting && recovery.read != never;
+        shown.state_progress = recovery.size == 0 ? 0 : (double)recovery.parts.size() / recovery.size;
     }
 }
 
@@ -1453,6 +1727,7 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     last_made = never;
     unverified_hashes.clear();
     rollbacks = {};
+    recovery = {};
     if (quick_option) {
         if (!quick_restarting) {
             std::printf("[netplay] Quick Match on %s: looking for a room, %d players here\n", server_option.c_str(), local_option);
@@ -2356,7 +2631,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         std::printf("[netplay] read %llu: kicking %s, as --netplay-kick-at asked\n", (unsigned long long)read, ports_text(1u << kick_port).c_str());
         session->kick(kick_port);
     }
-    if (read == desync_at) {
+    if (std::find(desync_at.begin(), desync_at.end(), read) != desync_at.end()) {
         rdram[recomp::save_states::game_memory_size / 2] ^= 0x5A;
         std::printf("[netplay] read %llu: game memory changed, as --netplay-desync-at asked\n", (unsigned long long)read);
     }
@@ -2380,10 +2655,21 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
     // one in the boot's first reads, and near a replay's end (it ends with every read right).
     const uint64_t needed = rollback_option == 0 || read < rollback_from_read || read + rollback_option >= last_read
         ? read : read - rollback_option;
+    // Desync recovery: a Resync again if the host's state couldn't be taken before its read (the game is past it).
+    if (session->hosting() && recovery.read != never && read >= recovery.read && recovery.state.empty()) {
+        std::printf("[netplay] read %llu: this game couldn't be taken before read %llu: again later\n", (unsigned long long)read,
+            (unsigned long long)recovery.read);
+        announce_resync(read, recovery.ports, true);
+        if (ended) {
+            return false;
+        }
+    }
     const double since = now();
     double last_note = since;
     uint8_t waiting_for = 0;
     while (true) {
+        // (Before waiting: the machine loading it waits for it before its inputs for this read can come.)
+        send_resync_state(read);
         if (outage_until != 0 && now() >= outage_until) {
             outage_until = 0;
             fake.outage = false;
@@ -2412,7 +2698,8 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
             }
         }
         const double t = now();
-        if (t - since > wait_seconds) {
+        // (While a state is on its way to a player, longer: they wait for it.)
+        if (t - since > wait_seconds + (t - recovery.sent_at < state_wait_seconds ? state_wait_seconds : 0)) {
             end_match(Reason::timeout, "a player's inputs stopped coming");
             return false;
         }
@@ -2473,6 +2760,20 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
     if (delay_option == auto_delay && session->hosting() && read % hash_every == 0) {
         adapt_delay(read);
     }
+    if (session->hosting()) {
+        // Desync recovery: the next Resync, once the last state is sent.
+        if (recovery.read == never && recovery.wanted != 0) {
+            const uint8_t ports = recovery.wanted;
+            recovery.wanted = 0;
+            announce_resync(read, ports);
+            tell(players_text(ports) + (std::popcount(ports) == 1 ? "'s game" : "' games") +
+                " went a different way: sending them the host's...");
+        }
+    }
+    else if (recovery.desync_read != never && read > recovery.desync_found_at + resync_wait_reads) {
+        end_match(Reason::desync, "the games went different ways (a desync), and the host didn't send its game");
+        return false;
+    }
     publish();
 
     if (rollback_option > 0) {
@@ -2486,6 +2787,31 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         given.resize(read + 1);
         frontier = read + 1;
     }
+    // A joiner loading the host's game: after the read before it, till it's here (the harness then loads it, take_state).
+    if (recovery.read == read + 1 && !recovery.ready && !session->hosting()) {
+        const double from = now();
+        std::printf("[netplay] read %llu: waiting for the host's game\n", (unsigned long long)read);
+        while (recovery.read == read + 1 && !recovery.ready) {
+            for (const Event& event : session->poll()) {
+                handle(event);
+            }
+            compare_hashes();
+            if (ended) {
+                return false;
+            }
+            if (now() - from > state_wait_seconds) {
+                end_match(Reason::timeout, "the host's game didn't come");
+                return false;
+            }
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            lock.lock();
+            if (stopping) {
+                return false;
+            }
+        }
+        std::printf("[netplay] waited %.0f ms for the host's game\n", (now() - from) * 1000);
+    }
     return give_inputs(read, pads, motions);
 }
 
@@ -2497,7 +2823,68 @@ uint64_t conker::lockstep::take_rollback() {
     std::scoped_lock lock(session_mutex);
     const uint64_t to = rollback_to;
     rollback_to = never;
+    // A state taken for a Resync after that read is of the game being replaced: it's taken again as it's played again.
+    if (to != never && to < recovery.read) {
+        recovery.state.clear();
+    }
     return to;
+}
+
+uint64_t conker::lockstep::state_wanted() {
+    std::scoped_lock lock(session_mutex);
+    return session != nullptr && session->hosting() && !ended && recovery.state.empty() ? recovery.read : never;
+}
+
+void conker::lockstep::give_state(uint64_t read, const std::vector<uint8_t>& runtime, const std::vector<uint8_t>& host) {
+    std::scoped_lock lock(session_mutex);
+    if (read != recovery.read || !recovery.state.empty()) {
+        return;
+    }
+    if (!pack_state(runtime, host, recovery.state, recovery.hash)) {
+        std::printf("[netplay] this game before read %llu couldn't be packed\n", (unsigned long long)read);
+    }
+}
+
+bool conker::lockstep::take_state(uint64_t read, std::vector<uint8_t>& runtime, std::vector<uint8_t>& host) {
+    std::scoped_lock lock(session_mutex);
+    if (ended || !recovery.ready || recovery.read != read) {
+        return false;
+    }
+    runtime = std::move(recovery.runtime);
+    host = std::move(recovery.host);
+    recovery.runtime.clear();
+    recovery.host.clear();
+    recovery.ready = false;
+    return true;
+}
+
+void conker::lockstep::state_loaded(uint64_t read) {
+    std::scoped_lock lock(session_mutex);
+    // The reads before it are the host's, all right: nothing to compare, check or go back to before it.
+    std::erase_if(own_hashes, [read](const auto& h) { return h.first < read; });
+    std::erase_if(unverified_hashes, [read](const auto& h) { return h.first < read; });
+    std::erase_if(their_hashes, [read](const auto& h) { return h.first.second < read; });
+    if (rollback_option > 0) {
+        frontier = std::max(frontier, read);
+        given.resize(std::max<size_t>(given.size(), read));
+        verified = std::max(verified, read);
+        for (uint64_t& c : checked) c = std::max(c, read);
+        rollback_to = never;
+        last_made = read - 1;
+    }
+    recovery.loaded_read = read;
+    recovery.read = never;
+    recovery.desync_read = never;
+    recovery.count++;
+    std::printf("[netplay] the host's game was loaded before read %llu: the match goes on\n", (unsigned long long)read);
+    tell("The host's game was loaded: the match goes on.");
+}
+
+void conker::lockstep::state_failed(const char* why) {
+    std::scoped_lock lock(session_mutex);
+    // This machine's game is wrong, the others' aren't: it leaves (its ports go idle), rather than ending it for all.
+    std::printf("[netplay] the host's game couldn't be loaded: %s\n", why);
+    end_match(Reason::quit, "the host's game couldn't be loaded here after a desync");
 }
 
 uint64_t conker::lockstep::verified_reads() {

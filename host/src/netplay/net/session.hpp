@@ -18,7 +18,8 @@
 // (Start: with the input delay). Then each peer sends its own ports' pads and
 // movement (Inputs) and memory hashes (Hash) to the host, which passes Inputs on to the others: the host is
 // the hub, so joiners only ever connect to it. A peer that sends anything else (another peer's port's
-// inputs, a second Hello) is dropped.
+// inputs, a second Hello) is dropped. After a desync the host may send a joiner its game's state (Resync,
+// StatePart): the one message bigger than the rest, which a joiner takes from the host only.
 //
 // Single-threaded: call poll() often (each controller read, or in a loop) from one thread; it runs the
 // library's callbacks and returns what happened.
@@ -176,6 +177,11 @@ namespace conker::netplay {
         void send(const Gone& gone);
         // Host: the input delay changes (Delay), to the joiners still in.
         void send(const Delay& delay);
+        // Host: desync recovery (#21): the joiners on Resync's ports are to load the host's state, to every joiner
+        // still in; then the state itself (compressed, `hash` its XXH3-64 decompressed), in StateParts to the joiners
+        // on `ports`, at a higher rate than the rest until it's all gone.
+        void send(const Resync& resync);
+        void send_state(uint8_t ports, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash);
         // Says goodbye to every peer and closes the connections, once what was sent has arrived (up to 2 s,
         // for a lossy network). Poll a moment before deleting the session or stopping the library.
         void leave(Reason reason);
@@ -199,6 +205,7 @@ namespace conker::netplay {
             uint64_t player = 0;    // host: its Hello's player id and platform, and whether it's ready
             uint8_t platform = 0;
             bool ready = false;
+            bool sending_state = false; // host: a state is on its way to it (at the higher rate)
         };
 
         void on_status_changed(const void* info);
@@ -213,6 +220,10 @@ namespace conker::netplay {
         // Waits until every peer has acknowledged what was sent to it (up to 2 s).
         void flush();
         void send_to(uint32_t connection, const Packet& packet);
+        // Whether something sent on `connection` hasn't arrived yet.
+        bool pending(uint32_t connection) const;
+        // A state's send rate and buffer on `connection` (`state`), or the library's own.
+        void set_send_rate(uint32_t connection, bool state);
         Peer* find(uint32_t connection);
         friend void status_changed_callback(void* info);
 

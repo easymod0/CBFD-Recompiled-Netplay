@@ -163,6 +163,16 @@ namespace {
     uint64_t late_mispredicted = 0;
     constexpr uint64_t late_boot_reads = 30;
 
+    // Desync recovery (#21, lockstep.hpp): a joiner's state from the host, to load at the next safe point that can (the
+    // game is given no read until then: `resync_holds` counts the ones it held), and the read it's before.
+    std::vector<uint8_t> resync_state;
+    std::vector<uint8_t> resync_host;
+    uint64_t resync_read = UINT64_MAX;
+    uint64_t resync_holds = 0;
+    std::string resync_error;
+    // The reads a load waits for its threads to be where the state's were before it gives up (as a save state's 5 s).
+    constexpr uint64_t resync_most_holds = 150;
+
     // --rollback's: lockstep predicts the others' inputs, and says when to go back (take_rollback).
     bool rollback_match() { return conker::lockstep::active() && conker::lockstep::rollback_window() > 0; }
     bool rollback_on() { return rollback_every != 0 || late_max != 0 || rollback_match(); }
@@ -736,11 +746,70 @@ namespace {
         std::fflush(stdout);
     }
 
+    // Desync recovery, at a safe point: the host's state taken before the read lockstep wants, or a joiner's from the
+    // host loaded. True if it loaded one (nothing else is done at that safe point).
+    bool resync_safe_point(uint8_t* game_rdram) {
+        if (!conker::lockstep::active() || match_over) {
+            return false;
+        }
+        std::string error;
+        if (resync_read != UINT64_MAX) {
+            if (!ultramodern::save_states::is_quiet()) {
+                return false;
+            }
+            switch (recomp::save_states::restore(game_rdram, resync_state, error)) {
+                case recomp::save_states::LoadResult::Loaded:
+                    conker::host_state::load(resync_host);
+                    std::printf("[harness] the host's game loaded before read %llu (after %llu reads held)\n",
+                        (unsigned long long)resync_read, (unsigned long long)resync_holds);
+                    reads = resync_read;
+                    // Nothing from the game it replaced: no state to go back to, nothing being played again, but this
+                    // one (with rollback, a prediction from here may need it).
+                    for (Snapshot& snapshot : snapshots) snapshot.read = UINT64_MAX;
+                    if (!snapshots.empty()) {
+                        snapshots[resync_read % snapshots.size()] = { resync_read, resync_state, resync_host };
+                    }
+                    for (Kept& copy : kept) copy.read = UINT64_MAX;
+                    rollback_to = UINT64_MAX;
+                    rerunning = false;
+                    rollback_reads_ahead = std::max(rollback_reads_ahead, reads);
+                    conker::lockstep::state_loaded(resync_read);
+                    resync_read = UINT64_MAX;
+                    resync_state.clear();
+                    resync_state.shrink_to_fit();
+                    resync_host.clear();
+                    return true;
+                case recomp::save_states::LoadResult::NotNow:
+                    resync_error = error;
+                    return false;
+                case recomp::save_states::LoadResult::Invalid:
+                    std::printf("[harness] the host's game can't be loaded: %s\n", error.c_str());
+                    resync_read = UINT64_MAX;
+                    conker::lockstep::state_failed(error.c_str());
+                    return false;
+            }
+            return false;
+        }
+        // (Not with a rollback to load: the game here is about to be replaced, and is taken as it's played again.)
+        const uint64_t wanted = conker::lockstep::state_wanted();
+        if (wanted == reads && rollback_to == UINT64_MAX && ultramodern::save_states::is_quiet()) {
+            std::vector<uint8_t> taken;
+            if (recomp::save_states::capture(game_rdram, taken, error)) {
+                conker::lockstep::give_state(wanted, taken, conker::host_state::save());
+            }
+        }
+        return false;
+    }
+
     // At a safe point (a delivery point, on the idle thread), with a --state-test save or load asked for.
     void on_safe_point(uint8_t* game_rdram) {
+        if (resync_safe_point(game_rdram)) {
+            return;
+        }
         if (rollback_on()) {
-            // (Once the match is over the game may play on, in a menu match: nothing to go back to.)
-            if (!match_over) {
+            // (Once the match is over the game may play on, in a menu match: nothing to go back to. Nor with the host's
+            // game to load.)
+            if (!match_over && resync_read == UINT64_MAX) {
                 rollback_safe_point(game_rdram);
             }
             return;
@@ -957,6 +1026,22 @@ namespace {
         // Each player's mouse and gyro movement for this read (motion.cpp): none, with the default Controls,
         // unless one of the below gives it.
         conker::netplay::Motion motions[max_pads] = { still(), still(), still(), still() };
+        // Waiting to load the host's game (desync recovery): this read isn't the game's; it's made again once loaded.
+        if (resync_read != UINT64_MAX && !match_over) {
+            reads--;
+            if (++resync_holds > resync_most_holds) {
+                std::printf("[harness] the host's game couldn't be loaded in %llu reads: %s\n", (unsigned long long)resync_most_holds,
+                    resync_error.c_str());
+                resync_read = UINT64_MAX;
+                conker::lockstep::state_failed(("the game's threads didn't get where the state's were (" + resync_error + ")").c_str());
+            }
+            for (int i = 0; i < max_pads; i++) {
+                pads[i] = { 0, 0, 0, pads[i].err_no };
+            }
+            conker::motion::set_read(motions);
+            conker::motion::clear_local();
+            return;
+        }
         if (read > last_read || match_over) {
             // Past a replay's last read with a rollback still wanted at it, which couldn't be done (given up).
             if (!last_read_done && !match_over && rollback_match() && rollback_to == UINT64_MAX) {
@@ -1048,6 +1133,15 @@ namespace {
                 request_quit();
             }
             return;
+        }
+        if (conker::lockstep::take_state(read + 1, resync_state, resync_host)) {
+            resync_read = read + 1;
+            resync_holds = 0;
+            resync_error = "not tried yet";
+        }
+        if (conker::lockstep::active()) {
+            ultramodern::save_states::set_safe_points_wanted(rollback_on() || resync_read != UINT64_MAX ||
+                conker::lockstep::state_wanted() != UINT64_MAX);
         }
         if (rollback_match()) {
             const uint64_t wrong = conker::lockstep::take_rollback();
@@ -1540,6 +1634,10 @@ void conker::harness::start(uint8_t* game_rdram) {
         snapshots.assign(rollback_back + 2, Snapshot{});
         ultramodern::save_states::set_safe_point_callback(on_safe_point);
         ultramodern::save_states::set_safe_points_wanted(true);
+    }
+    else if (conker::lockstep::active()) {
+        // Desync recovery's (wanted only while there's a state to take or load).
+        ultramodern::save_states::set_safe_point_callback(on_safe_point);
     }
 }
 

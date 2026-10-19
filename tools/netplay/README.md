@@ -224,8 +224,24 @@ players as the match starts, enough reads to cover the slowest way an input goes
 two slowest round trips, as the host passes joiners' inputs on), less the few ms a read can wait without
 the game falling behind. On a local network that's 0, so the others' input reaches the game as soon as
 this player's own, which matters for the mouse. Every
-30 reads the peers compare hashes of the game's memory, and a difference ends the match as a desync.
+30 reads the peers compare hashes of the game's memory, and a difference is a desync (below).
 Each peer starts from boot with an empty save, on the timeline and with the settings profile.
+
+**Desync recovery** (#21). When the host finds that a joiner's game went another way, it sets it right
+rather than ending the match: it picks a read no joiner has made yet (as it does for a delay change) and
+tells everyone (Resync). At the safe point before that read it takes its game's state (as a save state
+holds it, with the host's own part), compresses it (zstd, about 0.5 to 1.5 MB) and sends it to that
+joiner, faster than the rest while it lasts (1 MB/s). That joiner stops after the read before it until
+the state has come, checks it (its hash, its layout, and that no thread's registers could reach past the
+game's memory), loads it and plays on; the others play on too, waiting for its inputs meanwhile (a second
+or so). Inputs go on as before: nothing else in the match changes. With rollback the host sends the state
+once every input before its read is known and right. The host's game is the one that counts: a joiner
+that finds a desync waits for the host's Resync. The match still ends as a desync if the same machine's
+game goes another way again within 10 s of being set right, if no Resync comes (a host with
+`--netplay-no-recovery`), and a joiner that can't load the state leaves the match (its ports go idle).
+A report is written for each desync either way. Only the host's state is ever loaded: a joiner takes
+larger messages from the host alone, and a malicious host could at worst crash it (the game memory's
+allocation has guard pages on both sides, so the game's code can't reach past it, whatever's in memory).
 
 **Desync reports.** The hash a peer sends comes with a hash of each 64 KB region of memory (128 of them,
 16 bits each), so a desync names the regions that differ. Each peer whose game differs from another's
@@ -318,8 +334,10 @@ only does if the pads came over the network), with input delay 0 and `--jitter` 
 host's relay); the same match with two players on one copy (the host's, then a joiner's); a joiner leaving partway, quitting or killed, and two
 players on one joiner leaving together (the others must match a solo replay of the recording with those
 ports idle from the read the host says); and that a
-desync (`--netplay-desync-at <read>`, which changes a byte in region 64) is caught, with reports that name
-the region and compare to that byte. About 100 s.
+desync (`--netplay-desync-at <read>`, which changes a byte in region 64) is set right by the host's game
+(a joiner's, in the 3-player match: the others match the solo replay, it does from the read it loaded at),
+and with `--netplay-no-recovery` is caught, with reports that name the region and compare to that byte.
+About 100 s.
 
 **Bad networks.** `--netplay-fake-network <spec>` has the library make this peer's network worse: `lag=<ms>`,
 `jitter=<ms>`, `loss=<%>`, `reorder=<%>` and `dup=<%>` on what it sends, `outage=<read>:<s>` (nothing sent or
@@ -410,7 +428,7 @@ so.
 | Script | |
 |---|---|
 | `check.sh` | the determinism check: replays a made-up recording headless twice, with `--jitter` and with `--state-test`, and fails unless all four give the same hashes (about 30 s; the CI runs it, `.github/workflows/netplay.yml`) |
-| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, through a room on a local netplay server (public: the server lists it), Quick Match (joining a public host; two at once meeting in one room), block lists (a host keeping a player out, a joiner leaving, Quick Match passing over a blocked host's room), a kick during a match, and a desync is caught and reported, by the players and, through a room, in the server's log (a few minutes); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
+| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, through a room on a local netplay server (public: the server lists it), Quick Match (joining a public host; two at once meeting in one room), block lists (a host keeping a player out, a joiner leaving, Quick Match passing over a blocked host's room), a kick during a match, a joiner's desync set right by the host's game, and a desync is caught and reported, by the players and, through a room, in the server's log (a few minutes); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
 | `network.sh` | the bad-network check: matches with lag, jitter, loss, an outage and a change of lag give the same game as a replay alone, and how long each waited (about 70 s) |
 | `rollback.sh` | the rollback check: matches where the copies predict the others' inputs (the host's `--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone; then a match on real time must keep to time, with time sync keeping both copies predicting (about 90 s) |
 | `rollback-modes.sh` | rollback across the game's own changes: every multiplayer mode (4 players, a pause, a Race's match end) replayed going back every 3 reads, 12 deep, and with other machines' inputs up to 8 reads late, must give the plain replay's game; `--recording` adds a real one (about 90 s) |
