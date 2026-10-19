@@ -702,8 +702,12 @@ namespace {
         }
         if (!recompinput::game_input_disabled()) {
             // Port 1 has the keyboard, and its controller once one has pressed a button.
+            // In the bank's leaps with Aiming: Swap Sticks, player 1's right stick moves the crosshair: not the
+            // free camera's (which doesn't turn in a leap anyway: mouse_camera.cpp), and swapped.
+            const bool leap_swap = port == 0 && conker::look_aim::swap_sticks_in_leap();
             read_port(port < count ? controllers[port] : nullptr, port == 0,
-                port == 0 && conker::mouse_camera::stick_turns_camera(), conker::look_aim::swap_sticks_now(port), conker::look_aim::z_turns_aim(port), buttons, x, y);
+                port == 0 && !leap_swap && conker::mouse_camera::stick_turns_camera(),
+                leap_swap || conker::look_aim::swap_sticks_now(port), conker::look_aim::z_turns_aim(port), buttons, x, y);
         }
         return true;
     }
