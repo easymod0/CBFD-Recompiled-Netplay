@@ -191,7 +191,7 @@ same_from() {
 
 # idle_from <recording> <out> <ports> <read> [<until>]: <out>, the recording with each of <ports> (port numbers from 1,
 # e.g. 23) idle from <read> on (up to <until>, where they came back), as a match gives a player that left: nothing
-# pressed or moved, their last Controls.
+# pressed or moved, their last Controls (from read 0, an open port's: the default ones).
 idle_from() {
     python3 - "$@" <<'PY'
 import sys
@@ -200,10 +200,10 @@ data = bytearray(open(src, "rb").read())
 header, read_size, pad_size, motion_size = 40, 73, 5, 13   # version 4 (harness.cpp)
 reads = (len(data) - header) // read_size
 until = int(sys.argv[5]) if len(sys.argv) > 5 else reads
-assert 0 < first <= until <= reads
+assert 0 <= first <= until <= reads
 for port in (int(p) - 1 for p in ports):
     last = header + (first - 1) * read_size + 1 + 4 * pad_size + port * motion_size
-    controls = data[last + 9:last + 13]
+    controls = data[last + 9:last + 13] if first > 0 else (0x0200).to_bytes(4, "little")   # conker.hpp's default_controls
     for start in range(header + first * read_size, header + until * read_size, read_size):
         pad = start + 1 + port * pad_size
         motion = start + 1 + 4 * pad_size + port * motion_size
@@ -218,8 +218,9 @@ left_at() {
     sed -n "s/^\[netplay\] port $2 plays no more: no input from read \([0-9]*\).*/\1/p" "$OUT/$1.out" | sed -n "${3:-1}p"
 }
 
-# back_at <name> <port> [<n>]: the read from which the host <name> said port <port> plays again (the <n>th time).
+# back_at <name> <port> [<n>]: the read from which the host <name> said port <port> plays again, or joined late, plays
+# (the <n>th time).
 back_at() {
-    sed -n "s/^\[netplay\] read [0-9]*: ports\{0,1\} \([0-9, and]*\) to play again from read \([0-9]*\).*/\1:\2/p" "$OUT/$1.out" |
+    sed -n "s/^\[netplay\] read [0-9]*: ports\{0,1\} \([0-9, and]*\) to play \(again\|in the match\) from read \([0-9]*\).*/\1:\3/p" "$OUT/$1.out" |
         grep "\(^\|[ ,]\)$2[ ,:]" | sed -n "${3:-1}p" | sed 's/.*://'
 }

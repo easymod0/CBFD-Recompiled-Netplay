@@ -655,14 +655,32 @@ namespace {
             leave->add_pressed_callback([this, hosting = room.hosting]() {
                 on_cancel(hosting ? "You closed the room." : "You left the room.");
             });
+            // The host can start before every place is taken: the free ones stay open, for players joining later.
+            int taken = 0;
+            for (int port = 0; port < room.players; port++) {
+                taken += room.seats[port].player != 0 ? 1 : 0;
+            }
+            if (room.hosting && taken < room.players) {
+                const int free = room.players - taken;
+                recompui::Button* start_now = context.create_element<recompui::Button>(buttons,
+                    "Start now (" + std::to_string(free) + (free == 1 ? " open place)" : " open places)"), recompui::ButtonStyle::Secondary);
+                start_now->set_white_space(recompui::WhiteSpace::Nowrap);
+                start_now->add_pressed_callback([this]() {
+                    conker::lockstep::start_now();
+                    shown_waiting.clear();
+                    refocus = true;
+                    queue_update();
+                });
+            }
             // The Host or Join pressed is hidden now, or the button pressed was made again: a controller goes on
             // from Ready.
             if (arrived || refocus) {
                 ready->focus();
             }
             refocus = false;
-            text(waiting_box, room.hosting ? "The match starts once every place is taken and every player is ready. Kick removes a "
-                "player; Block keeps them out of your matches from now on." :
+            text(waiting_box, room.hosting ? "The match starts once every place is taken and every player is ready, or with Start "
+                "now once those in are ready: the free places stay open, and players can join the match while it's played. Kick "
+                "removes a player; Block keeps them out of your matches from now on." :
                 "The match starts once every place is taken and every player is ready (the host too). Block keeps a player "
                 "out of your matches from now on (you leave a room they're in).", Typography::Body, color::TextDim);
         }
@@ -798,8 +816,9 @@ namespace {
         void add_room_row(recompui::Element* box, const conker::lockstep::ListedRoom& room, const std::string& code) {
             recompui::ContextId context = recompui::get_current_context();
             recompui::Element* line = row(box);
-            const bool open = !room.playing && room.joined < room.players && !room.other_build;
-            // Playing: only a player who left it can get back in (the host refuses anyone else).
+            // Playing, with free places: anyone can join it as it's played. Full: only a player who left it can get back
+            // in (the host refuses anyone else).
+            const bool open = room.joined < room.players && !room.other_build;
             const bool under_way = room.playing && !room.other_build;
             text(line, room.name, recompui::theme::Typography::LabelMD);
             std::string about = std::to_string(room.joined) + " of " + std::to_string(room.players) + " players";
@@ -1445,7 +1464,7 @@ namespace {
                 line->set_gap(16.0f);
                 add_text(line, "Player " + std::to_string(port + 1), Typography::LabelMD);
                 if (seat.player == 0) {
-                    add_text(line, seat.left ? "left" : "not known", Typography::Body, color::TextDim);
+                    add_text(line, seat.open ? "open" : seat.left ? "left" : "not known", Typography::Body, color::TextDim);
                     continue;
                 }
                 add_text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body, seat.left ? color::TextDim : color::Text);
