@@ -53,6 +53,13 @@
 #   rejoin-both both joiners quitting (at reads 800 and 900) and coming back as the host stops: two machines brought
 #              back together, from the same read
 #   rejoin-couch the couch match with ports 2 and 3 on a joiner that quits at read 900 and comes back
+#   late       joining a match under way (#21): the mouse match started with two of its three players
+#              (--netplay-start-with 2), port 3 open (idle from read 0); a new player joins it as the host stops a
+#              while: it must load the host's game and play from the read the host says. The host and the first
+#              joiner must match a solo replay of the recording with port 3 idle up to that read, the new player the
+#              same from it; another new player before it quits as soon as it's in, which must leave port 3 free
+#   late-seat  a new player taking a seat someone left (--netplay-seat-hold 0): the second joiner quits at read 900,
+#              another player joins on port 3, and the one who left is then refused it
 #   recover-again the 2-player match, the joiner changing its memory at reads 300 and 400: the second desync, so soon
 #              after the first was set right, must end the match
 #   desync     the host (with --netplay-no-recovery) changes a byte of its memory at read 300: both must stop for a desync, and each
@@ -384,7 +391,9 @@ start block-join2 --netplay-join "$(code_of block-host2)" --netplay-block 4057
 finish "is on the block list: leaving" block-join2 || failed=1
 # Quick Match passes over a public room whose host is on its block list (the server says who hosts it), and
 # hosts its own instead.
-"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27323 > "$OUT/block-server.out" 2>&1 &
+# (Every copy and probe comes from 127.0.0.1: a burst of new connections big enough for the probe's tries below,
+# each a connection of its own, and Quick Match after them.)
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27323 --connection-burst 100 > "$OUT/block-server.out" 2>&1 &
 server=$!
 servers="${servers:-} $server"
 start block-public --netplay-host room --netplay-public --netplay-server 127.0.0.1:27323 --netplay-direct --players 2 --netplay-player 4058
@@ -469,8 +478,9 @@ else
 fi
 
 echo "rejoin-twice"
+# (Ports held for whoever left them all the while, however slow the run: the stranger must find none free.)
 pads=mouse-1.pads start twice-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1000:8000 \
-    --netplay-stall-at 2200:8000
+    --netplay-stall-at 2200:8000 --netplay-seat-hold 3600
 code=$(code_of twice-host)
 pads=mouse-2.pads start twice-join1 --netplay-join "$code" --stop-after 600
 wait_for twice-join1 "in, on port 2"
@@ -566,6 +576,82 @@ if finish "was the last: quitting" couch-back-host couch-back-again; then
         if finish "was the last: quitting" couch-back-solo; then
             same couch-back-host couch-back-solo "$MOUSE_READS" || failed=1
             same_from couch-back-again couch-back-solo "$back" || failed=1
+        else
+            failed=1
+        fi
+    fi
+else
+    failed=1
+fi
+
+echo "late"
+pads=mouse-1.pads start late-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-start-with 2 \
+    --netplay-stall-at 1000:8000
+code=$(code_of late-host)
+pads=mouse-2.pads start late-join1 --netplay-join "$code"
+wait_for late-host "the game stops"
+# A first new player quits as soon as it's in (before or after its Back, never in the match): port 3 must be free again.
+pads=mouse-3.pads start late-gone --netplay-join "$code" --netplay-player 9a9e --stop-after 1
+wait_for late-gone "was the last: quitting"
+pads=mouse-3.pads start late-join2 --netplay-join "$code" --netplay-player 1a7e
+if finish "was the last: quitting" late-host late-join1 late-gone late-join2; then
+    # (The last Back for port 3: the first new player's may have come before it left.)
+    back=$(back_at late-host 3 '$')
+    loaded=$(sed -n "s/^\[netplay\] in the match: the host's game was loaded before read \([0-9]*\).*/\1/p" "$OUT/late-join2.out")
+    if ! grep -q "the match starts: 3 players, .*, port 3 open" "$OUT/late-host.out" ||
+        ! grep -q "the match starts: 3 players, .*, port 3 open" "$OUT/late-join1.out"; then
+        echo "  the match didn't start with port 3 open"
+        failed=1
+    elif ! grep -q "in, on port 3" "$OUT/late-gone.out"; then
+        echo "  the first new player wasn't let in"
+        failed=1
+    elif [ -z "$back" ] || [ "$loaded" != "$back" ]; then
+        echo "  port 3 didn't join (from read '$back', loaded before '$loaded')"
+        failed=1
+    else
+        echo "  port 3 open, joined from read $back"
+        idle_from "$OUT/mouse.pads" "$OUT/late-solo.pads" 3 0 "$back" || exit 2
+        pads=late-solo.pads start late-solo
+        if finish "was the last: quitting" late-solo; then
+            same late-host late-solo "$MOUSE_READS" || failed=1
+            same late-join1 late-solo "$MOUSE_READS" || failed=1
+            same_from late-join2 late-solo "$back" || failed=1
+        else
+            failed=1
+        fi
+    fi
+else
+    failed=1
+fi
+
+echo "late-seat"
+pads=mouse-1.pads start seat-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-seat-hold 0 \
+    --netplay-stall-at 1000:8000
+code=$(code_of seat-host)
+pads=mouse-2.pads start seat-join1 --netplay-join "$code"
+wait_for seat-join1 "in, on port 2"
+pads=mouse-3.pads start seat-join2 --netplay-join "$code" --netplay-player 5e01 --stop-after 900
+wait_for seat-join2 "was the last: quitting"
+pads=mouse-3.pads start seat-new --netplay-join "$code" --netplay-player 5e02
+wait_for seat-new "in, on port 3"
+pads=mouse-3.pads start seat-old --netplay-join "$code" --netplay-player 5e01
+if finish "was the last: quitting\|couldn't join" seat-host seat-join1 seat-new seat-old; then
+    from=$(left_at seat-host 3)
+    back=$(back_at seat-host 3)
+    if ! grep -q "couldn't join: the match has already started" "$OUT/seat-old.out"; then
+        echo "  the player who left got port 3 back after another took it"
+        failed=1
+    elif ! grep -q "port 3 joined the match under way" "$OUT/seat-host.out" || [ -z "$from" ] || [ -z "$back" ]; then
+        echo "  another player didn't take port 3 (left from read '$from', joined from '$back')"
+        failed=1
+    else
+        echo "  port 3 idle from read $from, another player's from read $back; the one who left refused"
+        idle_from "$OUT/mouse.pads" "$OUT/seat-solo.pads" 3 "$from" "$back" || exit 2
+        pads=seat-solo.pads start seat-solo
+        if finish "was the last: quitting" seat-solo; then
+            same seat-host seat-solo "$MOUSE_READS" || failed=1
+            same seat-join1 seat-solo "$MOUSE_READS" || failed=1
+            same_from seat-new seat-solo "$back" || failed=1
         else
             failed=1
         fi

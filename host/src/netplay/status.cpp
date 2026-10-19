@@ -186,6 +186,7 @@ namespace {
         for (int port = 0; port < status.players && port < conker::netplay::max_players; port++) {
             std::string what;
             if ((status.own_ports & (1u << port)) != 0) what = "here";
+            else if ((status.open & (1u << port)) != 0) what = "open";
             else if ((status.left_silently & (1u << port)) != 0) what = "stopped answering";
             else if ((status.left & (1u << port)) != 0) what = "left";
             else if (status.round_trip_ms[port] >= 0) what = std::to_string(status.round_trip_ms[port]) + " ms";

@@ -22,7 +22,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 19;
+    constexpr uint16_t protocol_version = 20;
     // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
     constexpr size_t max_release_name = 40;
     // The game's controller ports.
@@ -124,8 +124,10 @@ namespace conker::netplay {
     }
     // Host to joiner: accepted, on these ports (bit n: port n; one for each of its players, never the
     // host's port 0), in a match of this many players. `rejoin` (1): the match is under way, and this is a
-    // player who left it coming back to their ports (#21): their game starts at once, and loads the host's
-    // (Rejoin); with the match's rules from Start (0 and none for a new joiner, who gets Start).
+    // player who left it coming back to their ports (#21); (2) the match is under way, and this is a new player
+    // taking free ones (an open seat, or one whose player left and didn't come back in time): either way their
+    // game starts at once, and loads the host's (Rejoin); with the match's rules from Start (0 and none for a new
+    // joiner before the start, who gets Start).
     struct Welcome {
         uint8_t ports = 0;
         uint8_t players = 0;
@@ -172,13 +174,16 @@ namespace conker::netplay {
     // player sees only their own view of the split screen (the host's rule for the match: 1) or each chooses
     // (0), the input delay everyone uses (0 to max_delay), and the ports whose views are shown two to a window
     // (bit n: port n; the ports of each machine with two players), which the culls go by in "my view only", and
-    // how many reads every peer predicts the others' inputs ahead (rollback: 0, off, to max_rollback).
+    // how many reads every peer predicts the others' inputs ahead (rollback: 0, off, to max_rollback). The host
+    // may start before every port is taken: `open` (bit n: port n; never the host's port 0, nor a pair's) are
+    // free, idle from read 0 (as for a player who left at once), for players joining later (Welcome's 2).
     struct Start {
         uint8_t players = 0;
         uint8_t own_view = 0;
         uint8_t delay = 0;
         uint8_t pairs = 0;
         uint8_t rollback = 0;
+        uint8_t open = 0;
         bool operator==(const Start&) const = default;
     };
     // Leaving, and why.
@@ -262,17 +267,20 @@ namespace conker::netplay {
     // Rejoining (#21): a player who left comes back to their ports. Host to the joiners (not the one coming back):
     // `ports` play again from read `read` (their idle pads until then), which none has made yet as it hears (chosen
     // past the furthest any input can reach, so none of theirs has come). Every peer then waits for their inputs from
-    // that read, which come once their machine has loaded the host's game as it is before it.
+    // that read, which come once their machine has loaded the host's game as it is before it. `late`: those of them
+    // that are new players (joining the match under way: Welcome's 2), not coming back.
     struct Back {
         uint8_t ports = 0;
         uint32_t read = 0;
+        uint8_t late = 0;
         bool operator==(const Back&) const = default;
     };
     // Host to the player coming back, before the state (StateParts) it loads: the match as it is at read `read`
     // (theirs from it on), the host being at read `at` (the inputs since `read` it has follow, then every one as it
     // comes). The input delay's last change (from read `delay_from`, `delay_before` until it, `delay_after` from
     // it), and each port's input at the read before `read` (what's predicted from, and an idle port's last
-    // settings), and the read it plays no more from (no_read: it plays on; else `read` or later).
+    // settings), and the read it plays no more from (no_read: it plays on; else `read` or later); and of the idle
+    // ports, those nobody has (`open`: bit n port n, never the host's 0), rather than a player who left.
     constexpr uint32_t no_read = UINT32_MAX;
     struct Rejoin {
         uint32_t read = 0;
@@ -283,6 +291,7 @@ namespace conker::netplay {
         std::array<uint32_t, max_players> idle_from{ no_read, no_read, no_read, no_read };
         std::array<Pad, max_players> pads{};
         std::array<Motion, max_players> motions{};
+        uint8_t open = 0;
         bool operator==(const Rejoin&) const = default;
     };
 

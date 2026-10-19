@@ -35,6 +35,10 @@
 //                                again for more
 //                                The waiting room: a match starts once every port is taken and everyone's
 //                                ready; from the command line every machine is ready by itself
+//   --netplay-start-with <n>     (hosting) start once <n> players are in (and ready), the host's among them: the
+//                                free ports are open, for players joining the match under way (below)
+//   --netplay-seat-hold <s>      (hosting) how long a player who left keeps their ports for coming back before a
+//                                new player can take them, in seconds (120 by default)
 //   --netplay-quick              Quick Match on --netplay-server: joins the first open public room this game
 //                                can join (trying up to 5), or hosts one, in public, as --netplay-host room
 //                                would with --players and the like. A host still alone that sees an older open
@@ -79,7 +83,9 @@
 // (--netplay-player, or the menu's) and as many players: their game starts at once, the host tells the others from
 // which read their ports play again (Back: past any input that can have come), and sends them its game as it is
 // before that read, with the match as it is then (Rejoin), which they load once their game has started; meanwhile
-// the others wait for their inputs from that read, as for desync recovery.
+// the others wait for their inputs from that read, as for desync recovery. A new player can join the match under
+// way the same way, on free ports: those open since the start (--netplay-start-with, the menu's Start now), and
+// those of a player who left over --netplay-seat-hold seconds ago and didn't come back (who then can't).
 //
 // A peer that falls behind the others (a hitch: loading, the system) catches up on its own: it runs the
 // timeline faster than real time until the others' inputs are no further ahead of it than the delay.
@@ -156,7 +162,8 @@ namespace conker::lockstep {
         std::string name;       // made from its number (netplay::room_name)
         int players = 2;
         int joined = 1;
-        bool playing = false;   // being played: nobody can join it
+        bool playing = false;   // being played: a player who left can come back, and with free ports (joined below
+                                // players) anyone can join it
         bool direct = false;    // its host allows direct connections
         int rollback = 0;
         std::string release;    // its release's name (hello.hpp: release_name); empty: not known (an older server)
@@ -200,6 +207,7 @@ namespace conker::lockstep {
         int round_trip_ms = -1;     // -1: not known (or this machine's)
         bool mine = false;
         bool left = false;          // in a match: they've left (or were removed)
+        bool open = false;          // in a match: nobody has had it (open since the start), free for a new player
     };
     struct WaitingRoom {
         bool in = false;
@@ -213,6 +221,9 @@ namespace conker::lockstep {
     };
     WaitingRoom waiting_room();
     void set_ready(bool ready);
+    // The host's: starts with whoever's in, once they're ready (as set_ready(true)), every free port open for players
+    // joining the match under way (--netplay-start-with's way). set_ready(false) takes it back.
+    void start_now();
     // `player`: the one shown on `port` (0: whoever's there), so a place that changed hands isn't kicked.
     bool kick(int port, uint64_t player = 0);
     void block(uint64_t player);
@@ -319,6 +330,7 @@ namespace conker::lockstep {
         std::array<int, netplay::max_players> round_trip_ms{ -1, -1, -1, -1 };
         uint8_t left = 0;
         uint8_t left_silently = 0;
+        uint8_t open = 0;               // the ports nobody has (open since the start: free for a new player)
         // Desync recovery, or coming back: this machine is getting the host's game (how much of it has come, 0 to 1).
         bool getting_state = false;
         double state_progress = 0;

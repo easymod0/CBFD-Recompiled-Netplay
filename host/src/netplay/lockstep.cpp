@@ -110,6 +110,12 @@ namespace {
     constexpr int quick_most_tries = 5;
     constexpr double quick_list_seconds = 5.0;
     int wanted_players = 2;
+    // Hosting: start once this many players are in (--netplay-start-with; 0: every port taken), or at once when the
+    // menu says (start_now), the free ports open for players joining later; and how long a player who left keeps
+    // their ports before a new one can take them (--netplay-seat-hold).
+    int start_with = 0;
+    bool start_open = false;
+    double seat_hold_option = 120.0;
     int local_option = 1;           // the players on this machine
     bool host_own_view = true;      // hosting: the rule this peer will start the match with
     bool match_own_view = false;    // the rule of the match under way
@@ -191,6 +197,7 @@ namespace {
     bool browse_heard = false;      // a list has come
     uint8_t own_ports = 0;          // bit n: port n
     int match_players = 0;
+    int joined = 0;                 // host: the players in so far, the host too (in the match: those still in)
     conker::netplay::Hello sent;    // what this peer said in the handshake (begin's)
     bool initial_sent = false;
     bool ended = false;         // the match is over for this peer: nothing more is sent
@@ -316,6 +323,7 @@ namespace {
         uint64_t count = 0;
         // The state under way is for players coming back (Back), not a desync's (Resync); host: and how many came back.
         bool rejoin = false;
+        uint8_t late = 0;               // ...of its ports, the new players'
         uint64_t rejoins = 0;
         // Joiner: a desync found here (the read compared, never: none) and the read this machine was at then; the
         // state's parts so far; the state once it's all here and checked (the runtime's and the host's own); the read
@@ -335,11 +343,13 @@ namespace {
     // joiner coming back: its game's reads are its own (it's starting) till it has loaded the host's, from
     // `rejoining_since`; it waits for that at its game's rejoin_boot_reads'th read (its game has started by then).
     uint8_t rejoin_wanted = 0;
+    uint8_t late_wanted = 0;        // ...of them, the new players (joining under way)
     double rejoin_wanted_at = 0;
     // (Another connection on its way in may be another player coming back: up to this long, the host waits for it,
     // so they're brought back together, the others waiting for one state rather than two.)
     constexpr double rejoin_gather_seconds = 3.0;
     bool rejoining = false;
+    bool joining_late = false;      // ...as a new player
     double rejoining_since = 0;
     constexpr uint64_t rejoin_boot_reads = 30;
     // The most reads a match coming back to can be at: a day's (the inputs before are kept, as in any match).
@@ -354,6 +364,9 @@ namespace {
     // By port, the read a player who came back plays again from (never: none). Their inputs before it are idle pads
     // put there as they came back: till their own come, they say nothing of how far ahead they are.
     std::array<uint64_t, conker::netplay::max_players> back_at;
+    // The ports nobody has had since the start, or since their player left as someone joined (bit n: port n): idle,
+    // and free for a new player (rather than a player who left, who may come back).
+    uint8_t open_ports = 0;
     bool only_idle_since_back(int port) {
         return back_at[port] != never && received[port].size() <= back_at[port];
     }
@@ -482,6 +495,7 @@ namespace {
         session->set_release(conker::netplay::release_name());
         if (session->hosting()) {
             session->set_room_settings(host_own_view, delay_option, rollback_option);
+            session->set_seat_hold(seat_hold_option);
             ready_now = auto_ready;
             session->set_ready(ready_now);
         }
@@ -769,6 +783,8 @@ namespace {
     }
 
     void take_resync(const Resync& r);
+    void list_room();
+    void beacon_match();
     void take_state_part(const StatePart& part);
     bool take_back(const Back& b);
     bool take_rejoin(const Rejoin& r);
@@ -787,12 +803,15 @@ namespace {
         }
         switch (event.type) {
             case Event::Type::joined:
-                // The host's, in a match: a player who left, coming back (the next Back).
+                // The host's, in a match: a player who left, coming back, or a new one on free ports (the next Back).
                 if (event.rejoin) {
-                    std::printf("[netplay] %s came back (%s)\n", ports_text(event.ports).c_str(),
+                    std::printf("[netplay] %s %s (%s)\n", ports_text(event.ports).c_str(), event.late ? "joined the match under way" : "came back",
                         conker::netplay::player_name(session->roster().seats[event.port].player).c_str());
                     if (rejoin_wanted == 0) rejoin_wanted_at = now();
                     rejoin_wanted |= event.ports;
+                    if (event.late) late_wanted |= event.ports;
+                    joined += std::popcount(event.ports);
+                    list_room();
                 }
                 break;
             case Event::Type::welcomed:
@@ -808,8 +827,12 @@ namespace {
                 // (Coming back, and gone again before its Back: its ports stay idle; after it, before its state went:
                 // nobody to send it to, nor to say they're back again.)
                 rejoin_wanted &= (uint8_t)~event.ports;
+                late_wanted &= (uint8_t)~event.ports;
+                joined -= std::popcount(event.ports);
+                list_room();
                 if (recovery.rejoin && recovery.read != never) {
                     recovery.ports &= (uint8_t)~event.ports;
+                    recovery.late &= (uint8_t)~event.ports;
                     if (recovery.ports == 0) {
                         recovery.read = never;
                         recovery.state.clear();
@@ -1185,9 +1208,23 @@ namespace {
             gone[port] = false;
             time_sync.heard[port] = false;
         }
+        open_ports &= (uint8_t)~ports;
         std::lock_guard lock(status_mutex);
         shown.left &= (uint8_t)~ports;
         shown.left_silently &= (uint8_t)~ports;
+        shown.open = open_ports;
+    }
+
+    // The match starts with `ports` open: nobody's, idle from read 0.
+    void open_from_start(uint8_t ports) {
+        open_ports = ports;
+        for (int port = 0; port < match_players; port++) {
+            if ((ports & (1u << port)) == 0) continue;
+            idle_from[port] = 0;
+            gone[port] = true;
+        }
+        std::lock_guard lock(status_mutex);
+        shown.open = open_ports;
     }
 
     // Whether `port` can be told to play again from `from`: it's gone (its last input passed on), or it was told so
@@ -1202,7 +1239,7 @@ namespace {
     // can have come for yet (past the furthest any can reach, horizon), so none of theirs is missed and everyone's
     // from it can go to them; the others are told (Back). The state the host takes before it goes to them, with the
     // match then (send_resync_state). Again (`again`) if the state couldn't be taken before the last one.
-    void announce_back(uint64_t read, uint8_t ports, bool again = false) {
+    void announce_back(uint64_t read, uint8_t ports, bool again = false, uint8_t late = 0) {
         recovery.announcements = again ? recovery.announcements + 1 : 1;
         const uint64_t from = horizon() + 1;
         if (recovery.announcements > most_announcements) {
@@ -1220,14 +1257,15 @@ namespace {
         recovery.read = from;
         recovery.ports = ports;
         recovery.rejoin = true;
+        recovery.late = late;
         recovery.state.clear();
         for (int port = 0; port < match_players; port++) {
             if ((ports & (1u << port)) != 0) recovery.last_read[port] = from;
         }
         play_again(ports, from);
-        std::printf("[netplay] read %llu: %s to play again from read %llu, loading this game as it is before it\n",
-            (unsigned long long)read, ports_text(ports).c_str(), (unsigned long long)from);
-        session->back(ports, (uint32_t)from);
+        std::printf("[netplay] read %llu: %s to play %s from read %llu, loading this game as it is before it\n",
+            (unsigned long long)read, ports_text(ports).c_str(), late == ports ? "in the match" : "again", (unsigned long long)from);
+        session->back(ports, (uint32_t)from, late);
     }
 
     // A joiner: the host's word that `b.ports` play again from `b.read`.
@@ -1243,8 +1281,15 @@ namespace {
         }
         recovery.sent_at = now();
         play_again(b.ports, b.read);
-        std::printf("[netplay] %s came back: they play again from read %u\n", ports_text(b.ports).c_str(), b.read);
-        tell(players_text(b.ports) + " came back: they're getting the host's game...");
+        const uint8_t back_ports = (uint8_t)(b.ports & ~b.late);
+        if (b.late != 0) {
+            std::printf("[netplay] %s joined: they play from read %u\n", ports_text(b.late).c_str(), b.read);
+            tell(players_text(b.late) + " joined: they're getting the host's game...");
+        }
+        if (back_ports != 0) {
+            std::printf("[netplay] %s came back: they play again from read %u\n", ports_text(back_ports).c_str(), b.read);
+            tell(players_text(back_ports) + " came back: they're getting the host's game...");
+        }
         return true;
     }
 
@@ -1268,6 +1313,7 @@ namespace {
             gone[port] = idle;
             back_at[port] = never;
         }
+        open_ports = r.open;
         delays = { r.delay_from, r.delay_before, r.delay_after };
         current_read = r.at;
         delay = delay_at(r.read);
@@ -1282,8 +1328,9 @@ namespace {
         {
             std::lock_guard lock(status_mutex);
             for (int port = 0; port < match_players; port++) {
-                if (r.idle_from[port] != conker::netplay::no_read) shown.left |= (uint8_t)(1u << port);
+                if (r.idle_from[port] != conker::netplay::no_read && (r.open & (1u << port)) == 0) shown.left |= (uint8_t)(1u << port);
             }
+            shown.open = open_ports;
         }
         std::printf("[netplay] coming back from read %u (the host is at read %u): getting the host's game\n", r.read, r.at);
         return true;
@@ -1365,6 +1412,7 @@ namespace {
             rejoin.motions[port] = last.motion;
             if (idle_from[port] != never) {
                 rejoin.idle_from[port] = (uint32_t)std::max(idle_from[port], from);
+                if ((open_ports & (1u << port)) != 0) rejoin.open |= (uint8_t)(1u << port);
             }
             inputs_from[port] = (uint32_t)received[port].size();
             // (Theirs, from the read: none yet.)
@@ -1539,6 +1587,16 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
     if (std::strcmp(option, "--players") == 0) {
         number(2, netplay::max_players, n);
         wanted_players = (int)n;
+        return true;
+    }
+    if (std::strcmp(option, "--netplay-start-with") == 0) {
+        number(1, netplay::max_players - 1, n);
+        start_with = (int)n;
+        return true;
+    }
+    if (std::strcmp(option, "--netplay-seat-hold") == 0) {
+        number(0, 24 * 60 * 60, n);
+        seat_hold_option = (double)n;
         return true;
     }
     if (std::strcmp(option, "--local-players") == 0) {
@@ -1745,6 +1803,10 @@ bool conker::lockstep::prepare() {
         std::fprintf(stderr, "[netplay] --local-players %d needs a match of more players than that (--players)\n", local_option);
         return false;
     }
+    if (start_with > 0 && (!hosting || start_with < local_option || start_with >= wanted_players)) {
+        std::fprintf(stderr, "[netplay] --netplay-start-with is the host's: from its own players (--local-players) to fewer than --players\n");
+        return false;
+    }
     // The others join by the code, which holds the match's key: without the address there's none to give.
     if (host_port > 0 && host_address.empty() && !lan_option) {
         std::fprintf(stderr, "[netplay] --netplay-host needs --netplay-address <this computer's address>, for the join code (or --netplay-lan)\n");
@@ -1780,7 +1842,6 @@ std::string conker::lockstep::join_code(std::string address) {
 }
 
 namespace {
-    int joined = 0;             // host: the players in so far, the host too
     double connecting_since = 0;
     bool match_started = false;
 
@@ -1937,7 +1998,11 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     idle_from.fill(never);
     back_at.fill(never);
     rejoin_wanted = 0;
+    late_wanted = 0;
+    open_ports = 0;
+    start_open = false;
     rejoining = false;
+    joining_late = false;
     gone_silently = false;
     last_behind = INT64_MIN;
     time_sync = {};
@@ -1995,13 +2060,31 @@ namespace {
     constexpr double server_seconds = 15.0;
 
     // Hosting a public room: listed as it is now (the signaller sends that only when it changes).
+    // How many the room's listing says are in: in the match, every port but those a new player could take (one held
+    // for a player who left counts as theirs).
+    int listed_joined() {
+        const int in = match_started && session != nullptr ? match_players - std::popcount(session->free_ports()) : joined;
+        return std::clamp(in, 1, match_players);
+    }
+
     void list_room() {
         if (public_option && host_room && signaller != nullptr && signaller->room() != 0 && match_players >= 2) {
-            conker::netplay::signal::ListedRoom room{ 0, (uint8_t)match_players, (uint8_t)std::clamp(joined, 1, match_players), match_started,
+            conker::netplay::signal::ListedRoom room{ 0, (uint8_t)match_players, (uint8_t)listed_joined(), match_started,
                 direct_option, (uint8_t)rollback_option };
             room.release = conker::netplay::release_name();
             signaller->publish(sent, room);
         }
+    }
+
+    // Hosting on this network, in the match: the beacon each second, playing, with how many are in (fewer than its
+    // players: the free ports a new player can join).
+    void beacon_match() {
+        if (lan_beacon == nullptr || !session->hosting() || now() < next_beacon) {
+            return;
+        }
+        lan_beacon->send({ conker::netplay::fit_of(sent), conker::netplay::this_platform(), (uint16_t)host_port, session->key(),
+            (uint8_t)match_players, (uint8_t)listed_joined(), true, (uint8_t)rollback_option });
+        next_beacon = now() + 1.0;
     }
 
     // Quick Match: asks for the room list (rendezvous listing).
@@ -2216,9 +2299,11 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 own_ports = event.ports;
                 match_players = event.players;
                 if (event.rejoin) {
-                    // Coming back to the match under way, as the host's (its rules: the rest comes with Rejoin). The
-                    // game starts at once, and loads the host's as it comes (rejoining_read).
-                    std::printf("[netplay] back, on %s of %d: the match is under way\n", ports_text(own_ports).c_str(), match_players);
+                    // Coming back to the match under way (or joining it, `late`), as the host's (its rules: the rest
+                    // comes with Rejoin). The game starts at once, and loads the host's as it comes (rejoining_read).
+                    std::printf("[netplay] %s, on %s of %d: the match is under way\n", event.late ? "in" : "back",
+                        ports_text(own_ports).c_str(), match_players);
+                    joining_late = event.late;
                     match_started = true;
                     match_own_view = event.own_view;
                     match_pairs = event.pairs;
@@ -2241,6 +2326,7 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 rollback_option = event.rollback;
                 delay = event.delay;
                 delays = { 0, event.delay, event.delay };
+                open_from_start(event.open);
                 break;
             case Event::Type::ended:
                 std::printf("[netplay] couldn't join: %s (%s)%s%s\n", netplay::describe(event.reason), event.detail.c_str(),
@@ -2277,15 +2363,18 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 break;
         }
     }
-    // The host starts the match once every port is taken and everyone's ready (the host too: its Start).
-    if (hosting && !match_started && joined == match_players && session->everyone_ready()) {
+    // The host starts the match once every port is taken and everyone's ready (the host too: its Start); or with
+    // whoever's in (--netplay-start-with, the menu's start_now), the free ports open for players joining later.
+    const bool open_now = start_open || (start_with > 0 && joined >= start_with);
+    if (hosting && !match_started && (joined == match_players || open_now) && session->everyone_ready(!open_now)) {
         const int chosen = delay_option == auto_delay ? delay_for(session->round_trips_ms(), (size_t)session->joiners()) : delay_option;
-        if (session->start(host_own_view, chosen, rollback_option)) {
+        if (session->start(host_own_view, chosen, rollback_option, open_now)) {
             match_started = true;
             match_own_view = host_own_view;
             match_pairs = session->pairs();
             delay = chosen;
             delays = { 0, chosen, chosen };
+            open_from_start(session->open_at_start());
         }
     }
     // A joiner in a room with someone on its block list leaves (Quick Match: for another room).
@@ -2318,22 +2407,21 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         }
     }
     list_room();
+    // (Started: the beacon goes on from the match's reads, beacon_match, for players joining it or coming back.)
     if (match_started && lan_beacon != nullptr) {
-        // Nobody else can join now: said once, then no more beacons.
-        lan_beacon->send({ netplay::fit_of(sent), netplay::this_platform(), (uint16_t)host_port, session->key(), (uint8_t)match_players,
-            (uint8_t)std::clamp(joined, 1, match_players), true, (uint8_t)rollback_option });
-        delete lan_beacon;
-        lan_beacon = nullptr;
+        next_beacon = 0;
+        beacon_match();
     }
     if (match_started) {
         if (rejoining) {
             publish();
-            status = "Back in the match.";
+            status = joining_late ? "In the match." : "Back in the match.";
             return Progress::started;
         }
-        std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s%s\n", match_players,
+        std::printf("[netplay] the match starts: %d players, this is %s, input delay %d reads%s%s%s\n", match_players,
             ports_text(own_ports).c_str(), delay, match_own_view ? ", everyone sees only their own view" : "",
-            rollback_option > 0 ? (", rollback " + std::to_string(rollback_option) + " reads").c_str() : "");
+            rollback_option > 0 ? (", rollback " + std::to_string(rollback_option) + " reads").c_str() : "",
+            open_ports != 0 ? (", " + ports_text(open_ports) + " open").c_str() : "");
         publish();
         status = "The match starts.";
         return Progress::started;
@@ -2667,6 +2755,16 @@ void conker::lockstep::set_ready(bool ready) {
     if (session != nullptr && !match_started) {
         ready_now = ready;
         session->set_ready(ready);
+        if (!ready) start_open = false;
+    }
+}
+
+void conker::lockstep::start_now() {
+    std::scoped_lock lock(session_mutex);
+    if (session != nullptr && session->hosting() && !match_started) {
+        start_open = true;
+        ready_now = true;
+        session->set_ready(true);
     }
 }
 
@@ -2699,7 +2797,8 @@ conker::lockstep::WaitingRoom conker::lockstep::match_room() {
         Seat& seat = room.seats[port];
         seat.player = s.player;
         seat.mine = (own_ports & (1u << port)) != 0;
-        seat.left = gone[port];
+        seat.left = gone[port] && (open_ports & (1u << port)) == 0;
+        seat.open = (open_ports & (1u << port)) != 0;
         if (s.player == 0) continue;
         seat.name = netplay::player_name(s.player);
         seat.ready = true;
@@ -2966,7 +3065,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         std::printf("[netplay] read %llu: this game couldn't be taken before read %llu: again later\n", (unsigned long long)read,
             (unsigned long long)recovery.read);
         if (recovery.rejoin) {
-            announce_back(read, recovery.ports, true);
+            announce_back(read, recovery.ports, true, recovery.late);
         }
         else {
             announce_resync(read, recovery.ports, true);
@@ -3080,14 +3179,21 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
             tell(players_text(ports) + (std::popcount(ports) == 1 ? "'s game" : "' games") +
                 " went a different way: sending them the host's...");
         }
-        // Coming back: the next Back, likewise.
-        else if (recovery.read == never && rejoin_wanted != 0 &&
+        // Coming back (or joining under way): the next Back, likewise; not in the boot's first reads (a player can join
+        // an open port as the game starts), whose states can't be loaded once it's past them.
+        else if (recovery.read == never && rejoin_wanted != 0 && read >= rejoin_boot_reads &&
             (session->arriving() == 0 || now() - rejoin_wanted_at > rejoin_gather_seconds)) {
             const uint8_t ports = rejoin_wanted;
+            const uint8_t late = late_wanted;
             rejoin_wanted = 0;
-            announce_back(read, ports);
-            tell(players_text(ports) + " came back: sending them the host's game...");
+            late_wanted = 0;
+            announce_back(read, ports, false, late);
+            if ((ports & late) != 0) tell(players_text(ports & late) + " joined: sending them the host's game...");
+            if ((ports & ~late) != 0) tell(players_text((uint8_t)(ports & ~late)) + " came back: sending them the host's game...");
         }
+        // (As held ports become free too: the listing changes only when what it says does.)
+        list_room();
+        beacon_match();
     }
     else if (recovery.desync_read != never && read > recovery.desync_found_at + resync_wait_reads) {
         end_match(Reason::desync, "the games went different ways (a desync), and the host didn't send its game");
@@ -3199,8 +3305,9 @@ void conker::lockstep::state_loaded(uint64_t read) {
         // Back in the match: its reads from here are the match's.
         rejoining = false;
         current_read = read;
-        std::printf("[netplay] back in the match: the host's game was loaded before read %llu\n", (unsigned long long)read);
-        tell("Back in the match.");
+        std::printf("[netplay] %s the match: the host's game was loaded before read %llu\n", joining_late ? "in" : "back in",
+            (unsigned long long)read);
+        tell(joining_late ? "In the match." : "Back in the match.");
         return;
     }
     recovery.count++;

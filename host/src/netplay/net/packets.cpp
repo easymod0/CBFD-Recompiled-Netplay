@@ -5,7 +5,7 @@
 //   1 Hello    u64 build, u64 rom, u64 profile, u64 mods, u64 key,                    55 bytes
 //              u8 players (1 to 3), u64 player (not 0), u8 platform (1 to 3)
 //   2 Welcome  u8 ports (bits: some, none at or past players, not port 0),            11 bytes
-//              u8 players (2 to 4), u8 rejoin (0 or 1), then as Start's (all 0 unless
+//              u8 players (2 to 4), u8 rejoin (0 to 2), then as Start's (all 0 unless
 //              rejoin): u8 own view (0 or 1), u8 pairs, u8 rollback (0 to 12)
 //   3 Refuse   u8 reason, u8 size (0 to 40), the host's release (! to ~), zeros to 40  47 bytes
 //              (the same in every version from 17 on: decode_refusal)
@@ -16,8 +16,9 @@
 //              2^32 - 1; then 4 s8 gaps (time sync: any value)
 //   5 Hash     u32 read, u64 hash, 128 u16 region hashes                             273 bytes
 //   6 Bye      u8 reason                                                               6 bytes
-//   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs 10 bytes
-//              (ports below players, an even number of them), u8 rollback (0 to 12)
+//   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs 11 bytes
+//              (ports below players, an even number of them), u8 rollback (0 to 12),
+//              u8 open (ports below players, not port 0, none of the pairs)
 //   8 Gone     u8 port (1 to 3: never the host's 0), u32 from read,                    11 bytes
 //              u8 silent (0 or 1: stopped answering)
 //   9 Delay    u8 delay (0 to 8), u32 from read                                        10 bytes
@@ -29,10 +30,11 @@
 //  12 Resync   u32 read, u8 ports (bits: some, not port 0)                            10 bytes
 //  13 StatePart u32 read, u32 size (1 to max_state_size), u32 offset, u64 hash,   26 to 25 + max_state_part bytes
 //              then 1 to max_state_part bytes, offset + their count not past size
-//  14 Back     u8 ports (bits: some, not port 0), u32 read                            10 bytes
-//  15 Rejoin   u32 read, u32 at (not below read), u32 delay from, u8 delay before,  107 bytes
+//  14 Back     u8 ports (bits: some, not port 0), u32 read, u8 late (some of ports)  11 bytes
+//  15 Rejoin   u32 read, u32 at (not below read), u32 delay from, u8 delay before,  108 bytes
 //              u8 delay after (both 0 to 8), then for each port u32 idle from
-//              (2^32 - 1, or not below read), a pad (as Inputs'), a motion (as Inputs')
+//              (2^32 - 1, or not below read), a pad (as Inputs'), a motion (as Inputs');
+//              u8 open (idle ports, not port 0)
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
 #include "packets.hpp"
@@ -56,14 +58,14 @@ namespace conker::netplay {
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players;
                 case hash: return header_size + 12 + 2 * memory_regions;
                 case bye: return header_size + 1;
-                case start: return header_size + 5;
+                case start: return header_size + 6;
                 case gone: return header_size + 6;
                 case delay: return header_size + 5;
                 case roster: return header_size + 12 * max_players + 4;
                 case ready: return header_size + 1;
                 case resync: return header_size + 5;
-                case back: return header_size + 5;
-                case rejoin: return header_size + 14 + max_players * (4 + pad_size + motion_size);
+                case back: return header_size + 6;
+                case rejoin: return header_size + 15 + max_players * (4 + pad_size + motion_size);
             }
             return 0;
         }
@@ -103,7 +105,7 @@ namespace conker::netplay {
         }
         bool valid_fields(const Welcome& p) {
             return p.players >= 2 && p.players <= max_players && p.ports != 0 && (p.ports & 1) == 0 &&
-                (p.ports >> p.players) == 0 && p.rejoin <= 1 &&
+                (p.ports >> p.players) == 0 && p.rejoin <= 2 &&
                 (p.rejoin == 0 ? p.own_view == 0 && p.pairs == 0 && p.rollback == 0
                                : p.own_view <= 1 && valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback);
         }
@@ -143,7 +145,8 @@ namespace conker::netplay {
         }
         bool valid_fields(const Start& p) {
             return p.players >= 2 && p.players <= max_players && p.own_view <= 1 && p.delay <= max_delay &&
-                valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback;
+                valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback && (p.open & 1) == 0 && (p.open >> p.players) == 0 &&
+                (p.open & p.pairs) == 0;
         }
 
         bool valid_fields(const Resync& p) {
@@ -155,14 +158,15 @@ namespace conker::netplay {
         }
 
         bool valid_fields(const Back& p) {
-            return p.ports != 0 && (p.ports & 1) == 0 && (p.ports >> max_players) == 0;
+            return p.ports != 0 && (p.ports & 1) == 0 && (p.ports >> max_players) == 0 && (p.late & ~p.ports) == 0;
         }
         bool valid_fields(const Rejoin& p) {
-            if (p.at < p.read || p.delay_before > max_delay || p.delay_after > max_delay) {
+            if (p.at < p.read || p.delay_before > max_delay || p.delay_after > max_delay || (p.open & 1) != 0 || (p.open >> max_players) != 0) {
                 return false;
             }
             for (int port = 0; port < max_players; port++) {
-                if ((p.idle_from[port] != no_read && p.idle_from[port] < p.read) || !valid(p.pads[port]) ||
+                if ((p.idle_from[port] != no_read && p.idle_from[port] < p.read) || ((p.open & (1u << port)) != 0 && p.idle_from[port] == no_read) ||
+                    !valid(p.pads[port]) ||
                     !valid_controls(p.motions[port].controls)) {
                     return false;
                 }
@@ -343,6 +347,7 @@ namespace conker::netplay {
                 w.u8(p.delay);
                 w.u8(p.pairs);
                 w.u8(p.rollback);
+                w.u8(p.open);
             }
             else if constexpr (std::is_same_v<T, Resync>) {
                 w.u32(p.read);
@@ -351,6 +356,7 @@ namespace conker::netplay {
             else if constexpr (std::is_same_v<T, Back>) {
                 w.u8(p.ports);
                 w.u32(p.read);
+                w.u8(p.late);
             }
             else if constexpr (std::is_same_v<T, Rejoin>) {
                 w.u32(p.read);
@@ -363,6 +369,7 @@ namespace conker::netplay {
                     w.pad(p.pads[port]);
                     w.motion(p.motions[port]);
                 }
+                w.u8(p.open);
             }
             else if constexpr (std::is_same_v<T, StatePart>) {
                 w.u32(p.read);
@@ -487,6 +494,7 @@ namespace conker::netplay {
                     p.delay = r.u8();
                     p.pairs = r.u8();
                     p.rollback = r.u8();
+                    p.open = r.u8();
                     packet = p;
                 }
                 break;
@@ -516,6 +524,7 @@ namespace conker::netplay {
                 Back p;
                 p.ports = r.u8();
                 p.read = r.u32();
+                p.late = r.u8();
                 packet = p;
                 break;
             }
@@ -531,6 +540,7 @@ namespace conker::netplay {
                     p.pads[port] = r.pad();
                     p.motions[port] = r.motion();
                 }
+                p.open = r.u8();
                 packet = p;
                 break;
             }

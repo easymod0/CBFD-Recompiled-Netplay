@@ -58,6 +58,7 @@ int main() {
     CHECK(round_trips(Welcome{ 0x08, 4 }, 11));
     CHECK(round_trips(Welcome{ 0x0E, 4 }, 11));     // three players on one machine
     CHECK(round_trips(Welcome{ 0x0C, 4, 1, 1, 0x0C, max_rollback }, 11));    // coming back to a match under way
+    CHECK(round_trips(Welcome{ 0x08, 4, 2, 0, 0x06, 0 }, 11));      // joining one under way
     CHECK(round_trips(Refuse{ Reason::rom }, 47));
     CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
     CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
@@ -69,10 +70,11 @@ int main() {
     const std::vector<uint8_t> hash = bytes_of(regions);
     CHECK(hash[17] == 7 && hash[18] == 0 && hash[19] == 8 && hash[20] == 1 && hash[271] == 0x86 && hash[272] == 0x7F);
     CHECK(round_trips(Bye{ Reason::desync }, 6));
-    CHECK(round_trips(Start{ 3, 0 }, 10));
-    CHECK(round_trips(Start{ 4, 1, max_delay }, 10));
-    CHECK(round_trips(Start{ 4, 1, 2, 0x0C }, 10));
-    CHECK(round_trips(Start{ 2, 0, 1, 0, max_rollback }, 10));
+    CHECK(round_trips(Start{ 3, 0 }, 11));
+    CHECK(round_trips(Start{ 4, 1, max_delay }, 11));
+    CHECK(round_trips(Start{ 4, 1, 2, 0x0C }, 11));
+    CHECK(round_trips(Start{ 2, 0, 1, 0, max_rollback }, 11));
+    CHECK(round_trips(Start{ 4, 1, 2, 0x06, 0, 0x08 }, 11));       // an open seat
     CHECK(round_trips(Gone{ 3, 4000000000u }, 11));
     CHECK(round_trips(Gone{ 1, 5, 1 }, 11));
     const std::vector<uint8_t> gone = bytes_of(Gone{ 2, 0x01020304, 1 });
@@ -96,8 +98,8 @@ int main() {
           inputs[55] == 0x34 && inputs[56] == 0x12 && inputs[57] == 0xFE && inputs[58] == 0xFF && inputs[59] == 0x80 &&
           inputs[60] == 0x05 && inputs[61] == 0x03 && inputs[62] == 0x01 && inputs[63] == 0x00);
     CHECK(inputs.size() == 159 && inputs[155] == 0x80 && inputs[156] == 3 && inputs[157] == 0 && inputs[158] == 0x7F);  // gaps
-    const std::vector<uint8_t> start = bytes_of(Start{ 3, 1, 3, 0x03, 8 });
-    CHECK(start.size() == 10 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0x03 && start[9] == 8);
+    const std::vector<uint8_t> start = bytes_of(Start{ 3, 1, 3, 0x03, 8, 0x04 });
+    CHECK(start.size() == 11 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0x03 && start[9] == 8 && start[10] == 0x04);
 
     // Out-of-range fields are neither sent nor accepted.
     CHECK(bytes_of(Welcome{ 0x04, 2 }).empty());    // a port not below players
@@ -105,7 +107,7 @@ int main() {
     CHECK(bytes_of(Welcome{ 0, 3 }).empty());       // no port
     CHECK(bytes_of(Welcome{ 0x02, 1 }).empty());    // players below 2
     CHECK(bytes_of(Welcome{ 0x02, 5 }).empty());    // players above 4
-    CHECK(bytes_of(Welcome{ 0x02, 2, 2 }).empty());         // rejoin is 0 or 1
+    CHECK(bytes_of(Welcome{ 0x02, 2, 3 }).empty());         // rejoin is 0 to 2
     CHECK(bytes_of(Welcome{ 0x02, 2, 0, 1 }).empty());      // a match's rules only when rejoining
     CHECK(bytes_of(Welcome{ 0x02, 2, 0, 0, 0, 4 }).empty());
     CHECK(bytes_of(Welcome{ 0x02, 2, 1, 2 }).empty());      // own view 0 or 1
@@ -124,6 +126,9 @@ int main() {
     CHECK(bytes_of(Start{ 3, 1, 0, 0x08 }).empty()); // a pair past the players
     CHECK(bytes_of(Start{ 4, 1, 0, 0x07 }).empty()); // an odd number of ports in pairs
     CHECK(bytes_of(Start{ 2, 0, 0, 0, max_rollback + 1 }).empty());
+    CHECK(bytes_of(Start{ 3, 0, 0, 0, 0, 0x01 }).empty());     // the host's port open
+    CHECK(bytes_of(Start{ 3, 0, 0, 0, 0, 0x08 }).empty());     // an open port past the players
+    CHECK(bytes_of(Start{ 4, 0, 0, 0x0C, 0, 0x08 }).empty());  // an open port in a pair
     CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
     CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
 
@@ -308,9 +313,11 @@ int main() {
     data = bytes_of(part); data.resize(25 + 61); CHECK(!decodes(data));              // past the state's end
 
     // Rejoining: Back, and Rejoin.
-    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 10));
-    data = bytes_of(Back{ 0x06, 0x01020304 });
-    CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1);
+    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 11));
+    CHECK(round_trips(Back{ 0x06, 5, 0x04 }, 11));
+    data = bytes_of(Back{ 0x06, 0x01020304, 0x02 });
+    CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1 && data[10] == 0x02);
+    CHECK(bytes_of(Back{ 0x06, 5, 0x08 }).empty());                 // a new player not among them
     CHECK(bytes_of(Back{ 0, 5 }).empty());                          // nobody
     CHECK(bytes_of(Back{ 0x03, 5 }).empty());                       // the host
     CHECK(bytes_of(Back{ 0x10, 5 }).empty());                       // past the ports
@@ -325,7 +332,8 @@ int main() {
     rejoin.pads[3] = { 0, 0, 0, err_no_controller };
     rejoin.motions[1] = { -300, 200, 1, -1, -3, 0x2C05 };
     rejoin.motions[2].controls = swap_sticks_bit;
-    CHECK(round_trips(rejoin, 107));
+    rejoin.open = 0x08;
+    CHECK(round_trips(rejoin, 108));
     data = bytes_of(rejoin);
     CHECK(data[4] == 15 && data[5] == 0xE8 && data[6] == 3 && data[9] == 0xEC && data[13] == 0x58 && data[17] == 2 &&
         data[18] == max_delay && data[19] == 0xFF && data[41] == 0xE8 && data[45] == 1 && data[46] == 0x80);
@@ -336,6 +344,9 @@ int main() {
     bad_rejoin = rejoin; bad_rejoin.pads[0].buttons = reserved_buttons; CHECK(bytes_of(bad_rejoin).empty());
     bad_rejoin = rejoin; bad_rejoin.pads[0].err_no = 1; CHECK(bytes_of(bad_rejoin).empty());
     bad_rejoin = rejoin; bad_rejoin.motions[0].controls = swap_sticks_bit << 1; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.open = 0x04; CHECK(bytes_of(bad_rejoin).empty());           // an open port that plays
+    bad_rejoin = rejoin; bad_rejoin.open = 0x01; CHECK(bytes_of(bad_rejoin).empty());           // the host's
+    bad_rejoin = rejoin; bad_rejoin.open = 0x10; CHECK(bytes_of(bad_rejoin).empty());           // past the ports
     data = bytes_of(rejoin); data.pop_back(); CHECK(!decodes(data));
 
     std::vector<uint8_t> small(max_packet_size);
