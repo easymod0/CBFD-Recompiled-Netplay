@@ -87,6 +87,12 @@ start() {
     procs="$procs $name:$!"
 }
 
+# wait_for <name> <pattern>: waits until the copy <name> has printed <pattern> (a minute at most).
+wait_for() {
+    i=0
+    while ! grep -q "$2" "$OUT/$1.out" 2>/dev/null && [ $i -lt 600 ]; do sleep 0.1; i=$((i + 1)); done
+}
+
 # code_of <name>: the join code the hosting copy <name> printed (its key is random each time), once it has.
 code_of() {
     i=0
@@ -170,8 +176,22 @@ same() {
     return 1
 }
 
-# idle_from <recording> <out> <ports> <read>: <out>, the recording with each of <ports> (port numbers from 1, e.g.
-# 23) idle from <read> on, as a match gives a player that left: nothing pressed or moved, their last Controls.
+# same_from <name> <ref> <from> [<to>]: whether <name>'s hash log has <ref>'s hashes for reads <from> to <to> (or its
+# end), and something there: a copy that came back (its reads before are its own game's as it started).
+same_from() {
+    awk -v a="$3" -v b="${4:-999999999}" '$1 >= a && $1 <= b' "$OUT/$2.log" > "$OUT/$1-ref-part.log"
+    awk -v a="$3" -v b="${4:-999999999}" '$1 >= a && $1 <= b' "$OUT/$1.log" > "$OUT/$1-part.log"
+    if [ -s "$OUT/$1-part.log" ] && cmp -s "$OUT/$1-ref-part.log" "$OUT/$1-part.log"; then
+        echo "  $1 same as $2 from read $3: $(wc -l < "$OUT/$1-part.log") reads"
+        return 0
+    fi
+    echo "  $1 NOT the same as $2 from read $3: $(python3 tools/netplay/compare_hashes.py "$OUT/$1-ref-part.log" "$OUT/$1-part.log" 2>&1 | tail -n 1)"
+    return 1
+}
+
+# idle_from <recording> <out> <ports> <read> [<until>]: <out>, the recording with each of <ports> (port numbers from 1,
+# e.g. 23) idle from <read> on (up to <until>, where they came back), as a match gives a player that left: nothing
+# pressed or moved, their last Controls.
 idle_from() {
     python3 - "$@" <<'PY'
 import sys
@@ -179,11 +199,12 @@ src, out, ports, first = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 data = bytearray(open(src, "rb").read())
 header, read_size, pad_size, motion_size = 40, 73, 5, 13   # version 4 (harness.cpp)
 reads = (len(data) - header) // read_size
-assert 0 < first <= reads
+until = int(sys.argv[5]) if len(sys.argv) > 5 else reads
+assert 0 < first <= until <= reads
 for port in (int(p) - 1 for p in ports):
     last = header + (first - 1) * read_size + 1 + 4 * pad_size + port * motion_size
     controls = data[last + 9:last + 13]
-    for start in range(header + first * read_size, len(data), read_size):
+    for start in range(header + first * read_size, header + until * read_size, read_size):
         pad = start + 1 + port * pad_size
         motion = start + 1 + 4 * pad_size + port * motion_size
         data[pad:pad + pad_size] = bytes(pad_size)
@@ -192,7 +213,13 @@ open(out, "wb").write(data)
 PY
 }
 
-# left_at <name> <port>: the read from which <name> said port <port> plays no more.
+# left_at <name> <port> [<n>]: the read from which <name> said port <port> plays no more (the <n>th time: 1 by default).
 left_at() {
-    sed -n "s/^\[netplay\] port $2 plays no more: no input from read \([0-9]*\).*/\1/p" "$OUT/$1.out" | head -n 1
+    sed -n "s/^\[netplay\] port $2 plays no more: no input from read \([0-9]*\).*/\1/p" "$OUT/$1.out" | sed -n "${3:-1}p"
+}
+
+# back_at <name> <port> [<n>]: the read from which the host <name> said port <port> plays again (the <n>th time).
+back_at() {
+    sed -n "s/^\[netplay\] read [0-9]*: ports\{0,1\} \([0-9, and]*\) to play again from read \([0-9]*\).*/\1:\2/p" "$OUT/$1.out" |
+        grep "\(^\|[ ,]\)$2[ ,:]" | sed -n "${3:-1}p" | sed 's/.*://'
 }

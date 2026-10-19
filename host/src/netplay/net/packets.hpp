@@ -5,7 +5,7 @@
 // Peers send inputs: each its own ports' pads (one port per player on that machine) (the host passes them on to the others), the hashes
 // of the game's memory for the desync check, and the handshake. Never files or mods. The one exception: after a
 // desync, the host sends its game's state to the joiners whose game went another way (Resync, StatePart), which
-// they check (lockstep.cpp) and load in place of theirs.
+// they check (lockstep.cpp) and load in place of theirs; and to a player who left and comes back (Rejoin).
 //
 // The layout, little-endian: "CN", u16 version, u8 kind, then the kind's fields (see packets.cpp).
 
@@ -22,7 +22,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 18;
+    constexpr uint16_t protocol_version = 19;
     // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
     constexpr size_t max_release_name = 40;
     // The game's controller ports.
@@ -123,10 +123,16 @@ namespace conker::netplay {
         return a.build == b.build && a.rom == b.rom && a.profile == b.profile && a.mods == b.mods;
     }
     // Host to joiner: accepted, on these ports (bit n: port n; one for each of its players, never the
-    // host's port 0), in a match of this many players.
+    // host's port 0), in a match of this many players. `rejoin` (1): the match is under way, and this is a
+    // player who left it coming back to their ports (#21): their game starts at once, and loads the host's
+    // (Rejoin); with the match's rules from Start (0 and none for a new joiner, who gets Start).
     struct Welcome {
         uint8_t ports = 0;
         uint8_t players = 0;
+        uint8_t rejoin = 0;
+        uint8_t own_view = 0;
+        uint8_t pairs = 0;
+        uint8_t rollback = 0;
         bool operator==(const Welcome&) const = default;
     };
     // Host to joiner: not accepted, then the connection is closed; and the host's release (empty, or 1 to
@@ -253,7 +259,35 @@ namespace conker::netplay {
         bool operator==(const StatePart&) const = default;
     };
 
-    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay, Roster, Ready, Resync, StatePart>;
+    // Rejoining (#21): a player who left comes back to their ports. Host to the joiners (not the one coming back):
+    // `ports` play again from read `read` (their idle pads until then), which none has made yet as it hears (chosen
+    // past the furthest any input can reach, so none of theirs has come). Every peer then waits for their inputs from
+    // that read, which come once their machine has loaded the host's game as it is before it.
+    struct Back {
+        uint8_t ports = 0;
+        uint32_t read = 0;
+        bool operator==(const Back&) const = default;
+    };
+    // Host to the player coming back, before the state (StateParts) it loads: the match as it is at read `read`
+    // (theirs from it on), the host being at read `at` (the inputs since `read` it has follow, then every one as it
+    // comes). The input delay's last change (from read `delay_from`, `delay_before` until it, `delay_after` from
+    // it), and each port's input at the read before `read` (what's predicted from, and an idle port's last
+    // settings), and the read it plays no more from (no_read: it plays on; else `read` or later).
+    constexpr uint32_t no_read = UINT32_MAX;
+    struct Rejoin {
+        uint32_t read = 0;
+        uint32_t at = 0;
+        uint32_t delay_from = 0;
+        uint8_t delay_before = 0;
+        uint8_t delay_after = 0;
+        std::array<uint32_t, max_players> idle_from{ no_read, no_read, no_read, no_read };
+        std::array<Pad, max_players> pads{};
+        std::array<Motion, max_players> motions{};
+        bool operator==(const Rejoin&) const = default;
+    };
+
+    using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay, Roster, Ready, Resync, StatePart,
+        Back, Rejoin>;
 
     // Writes `packet` into `out` and returns its size, or 0 if the packet isn't valid (the same checks
     // as decode's) or doesn't fit, so nothing invalid is ever sent.

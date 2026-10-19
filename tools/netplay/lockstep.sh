@@ -44,6 +44,15 @@
 #   recover    desync recovery (#21): the mouse match, the second joiner changing a byte of its memory at reads 900
 #              and 2000: each time the host must send it its game, which it loads, and all play on: the host and the
 #              first joiner must match the solo replay, the second from the read it last loaded at
+#   rejoin     coming back (#21): the mouse match, the second joiner quitting at read 900 and coming back (the same
+#              player id) as the host stops a while (--netplay-stall-at): it must load the host's game and play on from
+#              the read the host says. The host and the first joiner must match a solo replay of the recording with port 3
+#              idle from the read it left to that one, and the second joiner, back, the same from that read
+#   rejoin-twice the same, the first joiner quitting at read 600 for good and the second at 900, coming back, quitting
+#              at 2000 and coming back again; meanwhile another player (another id) must be refused port 3
+#   rejoin-both both joiners quitting (at reads 800 and 900) and coming back as the host stops: two machines brought
+#              back together, from the same read
+#   rejoin-couch the couch match with ports 2 and 3 on a joiner that quits at read 900 and comes back
 #   recover-again the 2-player match, the joiner changing its memory at reads 300 and 400: the second desync, so soon
 #              after the first was set right, must end the match
 #   desync     the host (with --netplay-no-recovery) changes a byte of its memory at read 300: both must stop for a desync, and each
@@ -56,7 +65,7 @@
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a
 # temporary folder, deleted if all passed. The data folders it makes for the copies (about 1 GB in all) are
 # always deleted. As in check.sh, a run is judged by what it prints and then stopped. It uses UDP ports
-# 27310 to 27323 and 27326 on 127.0.0.1 (netplay servers on 27320 to 27323).
+# 27310 to 27324 and 27326 on 127.0.0.1 (netplay servers on 27320 to 27323).
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -422,6 +431,144 @@ if finish "was the last: quitting" recover-host recover-join1 recover-join2; the
     else
         echo "  recover-join2 didn't load the host's game, or isn't the same as mouse-solo after it (loaded: ${loaded:-none})"
         failed=1
+    fi
+else
+    failed=1
+fi
+
+echo "rejoin"
+pads=mouse-1.pads start rejoin-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1000:8000
+code=$(code_of rejoin-host)
+pads=mouse-2.pads start rejoin-join1 --netplay-join "$code"
+wait_for rejoin-join1 "in, on port 2"
+pads=mouse-3.pads start rejoin-join2 --netplay-join "$code" --netplay-player 3e70 --stop-after 900
+wait_for rejoin-join2 "was the last: quitting"
+pads=mouse-3.pads start rejoin-back --netplay-join "$code" --netplay-player 3e70
+if finish "was the last: quitting" rejoin-host rejoin-join1 rejoin-back; then
+    from=$(left_at rejoin-host 3)
+    back=$(back_at rejoin-host 3)
+    loaded=$(sed -n "s/^\[netplay\] back in the match: the host's game was loaded before read \([0-9]*\).*/\1/p" "$OUT/rejoin-back.out")
+    if [ -z "$from" ] || [ -z "$back" ] || [ "$loaded" != "$back" ]; then
+        echo "  port 3 didn't come back (left from read '$from', back from '$back', loaded before '$loaded')"
+        failed=1
+    else
+        echo "  port 3 idle from read $from, back from read $back"
+        idle_from "$OUT/mouse.pads" "$OUT/rejoin-solo.pads" 3 "$from" "$back" || exit 2
+        pads=rejoin-solo.pads start rejoin-solo
+        if finish "was the last: quitting" rejoin-solo; then
+            same rejoin-host rejoin-solo "$MOUSE_READS" || failed=1
+            same rejoin-join1 rejoin-solo "$MOUSE_READS" || failed=1
+            # Back, its game is the host's from that read (before it, its own game's as it started).
+            same_from rejoin-back rejoin-solo "$back" || failed=1
+        else
+            failed=1
+        fi
+    fi
+else
+    failed=1
+fi
+
+echo "rejoin-twice"
+pads=mouse-1.pads start twice-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1000:8000 \
+    --netplay-stall-at 2200:8000
+code=$(code_of twice-host)
+pads=mouse-2.pads start twice-join1 --netplay-join "$code" --stop-after 600
+wait_for twice-join1 "in, on port 2"
+pads=mouse-3.pads start twice-join2 --netplay-join "$code" --netplay-player 3e71 --stop-after 900
+wait_for twice-join2 "was the last: quitting"
+pads=mouse-3.pads start twice-back1 --netplay-join "$code" --netplay-player 3e71 --stop-after 2000
+wait_for twice-back1 "was the last: quitting"
+# Port 3 free again, but only for its player: anyone else is refused.
+pads=mouse-3.pads start twice-stranger --netplay-join "$code" --netplay-player 5a5a
+pads=mouse-3.pads start twice-back2 --netplay-join "$code" --netplay-player 3e71
+if finish "was the last: quitting\|couldn't join" twice-host twice-back2 twice-stranger; then
+    gone2=$(left_at twice-host 2)
+    from1=$(left_at twice-host 3 1)
+    back1=$(back_at twice-host 3 1)
+    from2=$(left_at twice-host 3 2)
+    back2=$(back_at twice-host 3 2)
+    if ! grep -q "couldn't join: the match has already started" "$OUT/twice-stranger.out"; then
+        echo "  another player was let into port 3"
+        failed=1
+    elif [ -z "$gone2" ] || [ -z "$from1" ] || [ -z "$back1" ] || [ -z "$from2" ] || [ -z "$back2" ]; then
+        echo "  port 3 didn't leave and come back twice (port 2 left from '$gone2'; port 3 '$from1' to '$back1', '$from2' to '$back2')"
+        failed=1
+    else
+        echo "  port 2 idle from read $gone2; port 3 from $from1 to $back1, and from $from2 to $back2; another player refused"
+        idle_from "$OUT/mouse.pads" "$OUT/twice-solo.pads" 2 "$gone2" || exit 2
+        idle_from "$OUT/twice-solo.pads" "$OUT/twice-solo.pads" 3 "$from1" "$back1" || exit 2
+        idle_from "$OUT/twice-solo.pads" "$OUT/twice-solo.pads" 3 "$from2" "$back2" || exit 2
+        pads=twice-solo.pads start twice-solo
+        if finish "was the last: quitting" twice-solo; then
+            same twice-host twice-solo "$MOUSE_READS" || failed=1
+            same_from twice-back1 twice-solo "$back1" 2000 || failed=1
+            same_from twice-back2 twice-solo "$back2" || failed=1
+        else
+            failed=1
+        fi
+    fi
+else
+    failed=1
+fi
+
+echo "rejoin-both"
+pads=mouse-1.pads start both-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1000:8000
+code=$(code_of both-host)
+pads=mouse-2.pads start both-join1 --netplay-join "$code" --netplay-player b071 --stop-after 800
+wait_for both-join1 "in, on port 2"
+pads=mouse-3.pads start both-join2 --netplay-join "$code" --netplay-player b072 --stop-after 900
+wait_for both-join2 "was the last: quitting"
+# Both while the host has stopped: it takes them in at once, and brings them back together.
+wait_for both-host "the game stops"
+pads=mouse-2.pads start both-back1 --netplay-join "$code" --netplay-player b071
+pads=mouse-3.pads start both-back2 --netplay-join "$code" --netplay-player b072
+if finish "was the last: quitting" both-host both-back1 both-back2; then
+    from2=$(left_at both-host 2)
+    from3=$(left_at both-host 3)
+    back2=$(back_at both-host 2)
+    back3=$(back_at both-host 3)
+    if [ -z "$from2" ] || [ -z "$from3" ] || [ -z "$back2" ] || [ "$back3" != "$back2" ]; then
+        echo "  ports 2 and 3 didn't come back together (port 2 '$from2' to '$back2', port 3 '$from3' to '$back3')"
+        failed=1
+    else
+        echo "  port 2 idle from read $from2 to $back2, port 3 from $from3 to $back3"
+        idle_from "$OUT/mouse.pads" "$OUT/both-solo.pads" 2 "$from2" "$back2" || exit 2
+        idle_from "$OUT/both-solo.pads" "$OUT/both-solo.pads" 3 "$from3" "$back3" || exit 2
+        pads=both-solo.pads start both-solo
+        if finish "was the last: quitting" both-solo; then
+            same both-host both-solo "$MOUSE_READS" || failed=1
+            same_from both-back1 both-solo "$back2" || failed=1
+            same_from both-back2 both-solo "$back3" || failed=1
+        else
+            failed=1
+        fi
+    fi
+else
+    failed=1
+fi
+
+echo "rejoin-couch"
+pads=couch-1.pads start couch-back-host --netplay-host 27324 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1000:8000
+code=$(code_of couch-back-host)
+pads=couch-23.pads start couch-back-join --netplay-join "$code" --local-players 2 --netplay-player c0c4 --stop-after 900
+wait_for couch-back-join "was the last: quitting"
+pads=couch-23.pads start couch-back-again --netplay-join "$code" --local-players 2 --netplay-player c0c4
+if finish "was the last: quitting" couch-back-host couch-back-again; then
+    from=$(left_at couch-back-host 2)
+    back=$(back_at couch-back-host 2)
+    if [ -z "$from" ] || [ "$(left_at couch-back-host 3)" != "$from" ] || [ -z "$back" ] || [ "$(back_at couch-back-host 3)" != "$back" ]; then
+        echo "  ports 2 and 3 didn't leave and come back together"
+        failed=1
+    else
+        echo "  ports 2 and 3 idle from read $from, back from read $back"
+        idle_from "$OUT/couch-solo23.pads" "$OUT/couch-back-solo.pads" 23 "$from" "$back" || exit 2
+        pads=couch-back-solo.pads start couch-back-solo
+        if finish "was the last: quitting" couch-back-solo; then
+            same couch-back-host couch-back-solo "$MOUSE_READS" || failed=1
+            same_from couch-back-again couch-back-solo "$back" || failed=1
+        else
+            failed=1
+        fi
     fi
 else
     failed=1

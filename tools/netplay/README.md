@@ -243,6 +243,17 @@ A report is written for each desync either way. Only the host's state is ever lo
 larger messages from the host alone, and a malicious host could at worst crash it (the game memory's
 allocation has guard pages on both sides, so the game's code can't reach past it, whatever's in memory).
 
+**Coming back** (#21). A player who left a match under way (quit, crashed, or lost the connection; not
+kicked) can get back in: they start the game again and join the same room or code, with the same player id
+(the menu keeps one; `--netplay-player` on the command line) and as many players on their computer. Anyone
+else is refused, as before. The host welcomes them as coming back, and their game starts at once. The host
+picks a read past the furthest any input can have reached, tells the others their ports play again from
+there (Back: idle pads until then), takes its game's state before it, and sends it to them with the match
+as it is there (Rejoin: the input delay, each port's last input, which ports are idle) and the inputs since.
+Their game waits for it about a second after it starts, loads it, and plays on from that read; the others
+wait for their inputs meanwhile, as for desync recovery. Players coming back at about the same time are
+brought back together.
+
 **Desync reports.** The hash a peer sends comes with a hash of each 64 KB region of memory (128 of them,
 16 bits each), so a desync names the regions that differ. Each peer whose game differs from another's
 writes a report to `netplay-desyncs/` in the game's data folder, and tells the player where:
@@ -333,7 +344,9 @@ only does if the pads came over the network), with input delay 0 and `--jitter` 
 3-player Deathmatch where everyone moves their mouse and aims, at the automatic delay (through the
 host's relay); the same match with two players on one copy (the host's, then a joiner's); a joiner leaving partway, quitting or killed, and two
 players on one joiner leaving together (the others must match a solo replay of the recording with those
-ports idle from the read the host says); and that a
+ports idle from the read the host says); players coming back (once, twice, two machines at once, and two
+players on one joiner: everyone must match a solo replay with those ports idle while they were away, and
+the one back must from the read it came back at; another player is refused); and that a
 desync (`--netplay-desync-at <read>`, which changes a byte in region 64) is set right by the host's game
 (a joiner's, in the 3-player match: the others match the solo replay, it does from the read it loaded at),
 and with `--netplay-no-recovery` is caught, with reports that name the region and compare to that byte.
@@ -342,7 +355,7 @@ About 100 s.
 **Bad networks.** `--netplay-fake-network <spec>` has the library make this peer's network worse: `lag=<ms>`,
 `jitter=<ms>`, `loss=<%>`, `reorder=<%>` and `dup=<%>` on what it sends, `outage=<read>:<s>` (nothing sent or
 received for that long from that read) and `lag-at=<read>:<ms>` (the lag changes), separated by commas;
-`--netplay-stall-at <read>:<ms>` stops the game at a read for that long, as a hitch would. As a match ends,
+`--netplay-stall-at <read>:<ms>` stops the game at a read for that long, as a hitch would (again for more). As a match ends,
 each peer prints how many of its reads waited for the others' input (the time in all and the longest), and
 how many came over 50 ms after the one before: what a player feels, as a read that waits where the game
 would have slept until its time anyway costs nothing. `network.sh` plays matches at once on real time (as a
