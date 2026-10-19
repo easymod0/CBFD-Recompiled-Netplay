@@ -8,7 +8,8 @@
 # than any packet, which the library must close. Then a match through ICE, by a room on the signalling
 # server netplay_server on loopback (directly: the relay needs a TURN server, tools/netplay/server/test.sh);
 # a room gone with its host, the public room list (by game, mods and platform), a relay-only host on a
-# server without one, and guessing room codes, which the server stops.
+# server without one, an older version's games (which play together, apart from this one's), and
+# guessing room codes, which the server stops.
 #   sh host/src/netplay/net/test.sh <build folder>
 set -u
 bin=$1
@@ -162,8 +163,8 @@ raw silent 27203 --silent
 raw oversize 27209 --oversize
 
 # Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
-# (Every probe connects from the same address: more than the server lets one make in a burst.)
-"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-listed-per-address 3 > ice.server.txt 2>&1 &
+# (Every probe connects from the same address: more than the server lets one make in a burst, or have at once.)
+"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-per-address 32 --max-listed-per-address 3 > ice.server.txt 2>&1 &
 server=$!
 room_of() {
     i=0
@@ -219,12 +220,13 @@ expect ice-norelay "offers no TURN relay" host room --signal 127.0.0.1:27220
 # from one address (--max-listed-per-address 3 here: it stays private, so it isn't counted). The list
 # shows the first as players join it, and as it's played.
 # listed <name> <expected "rooms n, others n"> <grep for a room line, or -> <probe options...>: asked
-# again until it's so, for up to 15 s (or $tries half seconds).
+# again until it's so, for up to 15 s (or $tries half seconds). As Linux unless the options say (the
+# machine's own platform may be macOS, which is apart).
 listed() {
     name=$1; count=$2; line=$3; shift 3
     i=0
     while :; do
-        "$probe" list --signal 127.0.0.1:27220 "$@" > "$name.txt" 2>&1
+        "$probe" list --signal 127.0.0.1:27220 --platform 1 "$@" > "$name.txt" 2>&1
         if grep -qx "$count" "$name.txt" && { [ "$line" = - ] || grep -q "^listed $line" "$name.txt"; }; then echo "$name: passed"; return; fi
         [ $i -ge "${tries:-30}" ] && break
         sleep 0.5
@@ -232,11 +234,11 @@ listed() {
     done
     echo "$name: FAILED (wanted $count, $line)"; cat "$name.txt"; failed=1
 }
-"$probe" host room --players 3 --public 1 --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.host.txt 2>&1 &
+"$probe" host room --players 3 --public 1 --platform 1 --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.host.txt 2>&1 &
 lobby_host=$!
 lobby_room=$(room_of lobby.host.txt)
 others=
-"$probe" host room --public 1 --mods 2 --signal 127.0.0.1:27220 --direct 1 > lobby.mods.txt 2>&1 &
+"$probe" host room --public 1 --platform 1 --mods 2 --signal 127.0.0.1:27220 --direct 1 > lobby.mods.txt 2>&1 &
 others="$others $!"
 "$probe" host room --public 1 --platform 3 --signal 127.0.0.1:27220 --direct 1 > lobby.mac.txt 2>&1 &
 others="$others $!"
@@ -244,7 +246,7 @@ others="$others $!"
 others="$others $!"
 room_of lobby.mods.txt > /dev/null; room_of lobby.mac.txt > /dev/null; room_of lobby.private.txt > /dev/null
 listed lobby-list "rooms 1, others 1" "$lobby_room 1/3 direct rollback 0"
-"$probe" host room --public 1 --mods 3 --signal 127.0.0.1:27220 --direct 1 > lobby.capped.txt 2>&1 &
+"$probe" host room --public 1 --platform 1 --mods 3 --signal 127.0.0.1:27220 --direct 1 > lobby.capped.txt 2>&1 &
 others="$others $!"
 room_of lobby.capped.txt > /dev/null
 sleep 1
@@ -266,6 +268,31 @@ done
 # rooms are listed.
 kill $others 2>/dev/null
 tries=60 listed lobby-gone "rooms 0, others 0" -
+# An older game's signalling (version 2, before public rooms): two of them play through a room, but
+# neither version finds the other's rooms.
+"$probe" host room --speak 2 --signal 127.0.0.1:27220 --direct 1 --reads 60 > old.host.txt 2>&1 &
+old_host=$!
+old_room=$(room_of old.host.txt)
+expect old-from-new "no room $old_room on the server" join "$old_room" --signal 127.0.0.1:27220 --direct 1
+if "$probe" join "$old_room" --speak 2 --signal 127.0.0.1:27220 --direct 1 --reads 60 > old.join.txt 2>&1 && wait $old_host; then
+    echo "old: passed"; else echo "old: FAILED"; cat old.host.txt old.join.txt; failed=1; fi
+"$probe" host room --signal 127.0.0.1:27220 --direct 1 --reads 30 > new.host.txt 2>&1 &
+new_host=$!
+new_room=$(room_of new.host.txt)
+expect new-from-old "no room $new_room on the server" join "$new_room" --speak 2 --signal 127.0.0.1:27220 --direct 1
+kill $new_host 2>/dev/null
+# This version on a server that only speaks version 2 (posing as an older one): it speaks that too, and
+# plays through a room, without public rooms.
+"$bin/netplay_server" --port 27221 --connection-burst 1000 --newest-version 2 > older.server.txt 2>&1 &
+older_server=$!
+"$probe" host room --public 1 --signal 127.0.0.1:27221 --direct 1 --reads 60 > older.host.txt 2>&1 &
+older_host=$!
+older_room=$(room_of older.host.txt)
+if "$probe" join "$older_room" --signal 127.0.0.1:27221 --direct 1 --reads 60 > older.join.txt 2>&1 && wait $older_host &&
+    grep -q "speaking its signalling version 2" older.join.txt; then echo "older-server: passed"; else
+    echo "older-server: FAILED"; cat older.host.txt older.join.txt; failed=1; fi
+expect older-list "has no public rooms" list --signal 127.0.0.1:27221
+kill $older_server 2>/dev/null
 # Guessing codes: after 10 that aren't there (one above; a slow machine's may be refilled, one each 6 s),
 # the server closes the connection.
 i=0

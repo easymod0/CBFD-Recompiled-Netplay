@@ -19,7 +19,8 @@
 // A room (ListedRoom): u64 room (1 to max_room; Publish's 0 or any), u8 players (2 to max_players),
 // u8 joined (1 to players), u8 flags (bit 0 playing, bit 1 direct; the others 0), u8 rollback (0 to
 // max_rollback).
-// A packet of any other size, version or kind, or with any field out of range, is refused.
+// Kinds 12 to 14 came with version 3; version 2 has the others, as they are here. A packet of any other
+// size, version or kind (or a kind its version hasn't), or with any field out of range, is refused.
 
 #include "signal_packets.hpp"
 #include "join_code.hpp"
@@ -33,6 +34,9 @@ namespace conker::netplay::signal {
             room_found, no_room, turn, publish, list_rooms, rooms };
         constexpr size_t header_size = 5;
         constexpr size_t room_size = 12;
+        // The version a kind came with.
+        uint16_t since(uint8_t kind) { return kind >= publish ? 3 : 2; }
+        bool spoken(uint16_t as) { return as >= oldest_version && as <= version; }
 
         struct Writer {
             uint8_t* p;
@@ -81,11 +85,15 @@ namespace conker::netplay::signal {
         }
     }
 
-    size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out) {
+    size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out, uint16_t as) {
+        // Publish, ListRooms and Rooms (the variant's last three) came with version 3.
+        if (!spoken(as) || (packet.index() >= std::variant_size_v<Packet> - 3 && as < since(publish))) {
+            return 0;
+        }
         Writer w{ out.data() };
         w.u8('C');
         w.u8('S');
-        w.u16(version);
+        w.u16(as);
         // A kind of one u64, checked.
         const auto one = [&w](Kind kind, uint64_t value, bool valid) {
             if (!valid) return false;
@@ -159,9 +167,9 @@ namespace conker::netplay::signal {
         return ok ? (size_t)(w.p - out.data()) : 0;
     }
 
-    std::optional<Packet> decode(std::span<const uint8_t> data) {
-        if (data.size() < header_size || data[0] != 'C' || data[1] != 'S' ||
-            (uint16_t)(data[2] | (data[3] << 8)) != version) {
+    std::optional<Packet> decode(std::span<const uint8_t> data, uint16_t as) {
+        if (!spoken(as) || data.size() < header_size || data[0] != 'C' || data[1] != 'S' ||
+            (uint16_t)(data[2] | (data[3] << 8)) != as || as < since(data[4])) {
             return std::nullopt;
         }
         Reader r{ data.data() + header_size };
@@ -258,7 +266,13 @@ namespace conker::netplay::signal {
         }
     }
 
-    bool other_version(std::span<const uint8_t> data) {
-        return data.size() >= 4 && data[0] == 'C' && data[1] == 'S' && (uint16_t)(data[2] | (data[3] << 8)) != version;
+    bool other_version(std::span<const uint8_t> data, uint16_t as) {
+        return data.size() >= 4 && data[0] == 'C' && data[1] == 'S' && (uint16_t)(data[2] | (data[3] << 8)) != as;
+    }
+
+    uint16_t spoken_version(std::span<const uint8_t> data) {
+        if (data.size() < 4 || data[0] != 'C' || data[1] != 'S') return 0;
+        const uint16_t as = (uint16_t)(data[2] | (data[3] << 8));
+        return spoken(as) ? as : 0;
     }
 }

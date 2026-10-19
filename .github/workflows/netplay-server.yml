@@ -9,14 +9,15 @@ name: netplay-server
 on:
   push:
     branches: ['**']
-    # Only what goes into the image: the server, its packets, how they're built.
+    # Only what goes into the image: the server, its packets, how they're built. A game update that doesn't
+    # touch these needs no new server (the game's own packets, packets.cpp, go only between players).
     paths:
       - 'host/src/netplay/net/signal_server.cpp'
       - 'host/src/netplay/net/signal_packets.*'
       - 'host/src/netplay/net/signal_packets_test.cpp'
       - 'host/src/netplay/net/join_code.*'
       - 'host/src/netplay/net/turn_credentials*'
-      - 'host/src/netplay/net/packets.*'
+      - 'host/src/netplay/net/packets.hpp'
       - 'host/src/netplay/net/vcpkg.*'
       - 'host/src/netplay/net/CMakeLists.txt'
       - 'tools/netplay/server/Dockerfile'

@@ -10,7 +10,7 @@
 // traffic (coturn, beside it: tools/netplay/server/).
 //
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]
-//                  [--max-listed-per-address 2]
+//                  [--max-listed-per-address 2] [--newest-version <n>]   (a test: speak no newer one)
 //                  [--turn <host:port> [--turn-hours 12]]   (with the secret in TURN_SECRET)
 //
 // With --turn, each peer is offered that TURN relay as it registers (Turn), with credentials of its own
@@ -26,6 +26,10 @@
 // given out again for an hour after it closes. A peer without a room that sends nothing for 10 minutes is
 // closed, and any after 12 hours. Anything broken or past a limit closes the connection, after Refused. It
 // logs counts, never addresses, codes or signals.
+//
+// It speaks every signalling version from signal::oldest_version on, each peer in the one its first packet
+// has (a version without public rooms just can't use them), and keeps the versions apart: a peer only
+// reaches the peers of its own, and only finds their rooms.
 //
 // It runs until SIGINT or SIGTERM (docker stop).
 
@@ -118,6 +122,7 @@ namespace {
     };
 
     struct Peer {
+        uint16_t version = 0;      // the signalling version it speaks, from its first packet
         uint64_t id = 0;           // 0 until it registers
         std::string address;       // its IP, for the per-address limits only
         double connected_at = 0;
@@ -151,6 +156,8 @@ namespace {
         // Public rooms from one address at once (--max-listed-per-address): more aren't listed (they stay
         // private), so one network can't fill the list with rooms nobody answers in.
         int max_listed_per_address = 2;
+        // The newest signalling version spoken (--newest-version: a test, posing as an older server).
+        uint16_t newest_version = signal::version;
         size_t max_peers = 4096;
         std::string turn;           // the TURN relay offered, if any
         std::string turn_secret;
@@ -163,9 +170,12 @@ namespace {
         uint64_t rooms_missed = 0;
         uint64_t lists_sent = 0;
 
+        // In the peer's version (the newest, before it's said).
         void send(HSteamNetConnection connection, const signal::Packet& packet) {
+            const auto peer = peers.find(connection);
+            const uint16_t as = peer != peers.end() && peer->second.version != 0 ? peer->second.version : newest_version;
             uint8_t buffer[signal::max_packet_size];
-            const size_t size = signal::encode(packet, buffer);
+            const size_t size = signal::encode(packet, buffer, as);
             if (size != 0) {
                 SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
             }
@@ -241,9 +251,18 @@ namespace {
             }
             Peer& peer = it->second;
             peer.last_packet = now();
-            const std::optional<signal::Packet> packet = signal::decode(data);
+            // The version is the first packet's, for good.
+            uint16_t as = signal::spoken_version(data);
+            if (as > newest_version) {
+                as = 0;
+            }
+            if (peer.version == 0 && as != 0) {
+                peer.version = as;
+            }
+            const uint16_t expected = peer.version != 0 ? peer.version : newest_version;
+            const std::optional<signal::Packet> packet = signal::decode(data, expected);
             if (!packet) {
-                refuse(connection, signal::other_version(data) ? signal::Refusal::version : signal::Refusal::protocol);
+                refuse(connection, as == 0 && signal::other_version(data, expected) ? signal::Refusal::version : signal::Refusal::protocol);
                 return;
             }
             if (const signal::Register* r = std::get_if<signal::Register>(&*packet)) {
@@ -277,7 +296,8 @@ namespace {
             }
             if (const signal::Signal* s = std::get_if<signal::Signal>(&*packet)) {
                 const auto to = by_id.find(s->peer);
-                if (to == by_id.end()) {
+                const auto to_peer = to == by_id.end() ? peers.end() : peers.find(to->second);
+                if (to_peer == peers.end() || to_peer->second.version != peer.version) {
                     send(connection, signal::Unreachable{ s->peer });
                     return;
                 }
@@ -303,6 +323,12 @@ namespace {
             else if (const signal::FindRoom* f = std::get_if<signal::FindRoom>(&*packet)) {
                 const auto found = rooms.find(f->room);
                 const auto host_it = found == rooms.end() ? peers.end() : peers.find(found->second);
+                if (host_it != peers.end() && host_it->second.version != peer.version) {
+                    // Another version's room: there for this peer's game, but not to be reached by it (and
+                    // not a guess).
+                    send(connection, signal::NoRoom{ f->room });
+                    return;
+                }
                 if (host_it != peers.end()) {
                     const Peer& host = host_it->second;
                     rooms_found++;
@@ -340,7 +366,7 @@ namespace {
                     refuse(connection, signal::Refusal::busy);
                     return;
                 }
-                send(connection, listed_for(*l));
+                send(connection, listed_for(*l, peer.version));
                 lists_sent++;
             }
             else {
@@ -349,15 +375,15 @@ namespace {
             }
         }
 
-        // The listed rooms for `ask`: of its fit and platform group, open ones first (the fullest, then the
+        // The listed rooms for `ask` (from a peer of `version`): of that version, its fit and platform group, open ones first (the fullest, then the
         // oldest: to fill matches), then those being played; at most signal::max_listed. And how many of
         // its game and platform group have another fit.
-        signal::Rooms listed_for(const signal::ListRooms& ask) const {
+        signal::Rooms listed_for(const signal::ListRooms& ask, uint16_t version) const {
             std::vector<const Peer*> fitting;
             size_t others = 0;
             for (const auto& [room, connection] : rooms) {
                 const auto host = peers.find(connection);
-                if (host == peers.end() || !host->second.listed ||
+                if (host == peers.end() || !host->second.listed || host->second.version != version ||
                     platform_group(host->second.listing.platform) != platform_group(ask.platform)) {
                     continue;
                 }
@@ -416,7 +442,7 @@ namespace {
 
     int usage() {
         std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]\n"
-                             "                      [--max-listed-per-address 2]\n"
+                             "                      [--max-listed-per-address 2] [--newest-version <n>]\n"
                              "                      [--turn <host:port> [--turn-hours 12]]   (the secret in TURN_SECRET)\n");
         return 2;
     }
@@ -438,6 +464,7 @@ int main(int argc, char** argv) {
         else if (arg == "--connection-burst" && value > 0) state.connection_burst = value;
         else if (arg == "--max-per-address" && value > 0) state.max_per_address = value;
         else if (arg == "--max-listed-per-address" && value > 0) state.max_listed_per_address = value;
+        else if (arg == "--newest-version" && value >= signal::oldest_version && value <= signal::version) state.newest_version = (uint16_t)value;
         else if (arg == "--max-peers" && value > 0) state.max_peers = (size_t)value;
         else return usage();
     }
@@ -481,7 +508,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     state.group = SteamNetworkingSockets()->CreatePollGroup();
-    std::printf("netplay_server: listening on UDP port %d (signalling version %u)%s\n", port, (unsigned)signal::version,
+    std::printf("netplay_server: listening on UDP port %d (signalling versions %u to %u)%s\n", port, (unsigned)signal::oldest_version,
+        (unsigned)state.newest_version,
         state.turn.empty() ? ", no TURN relay" : ", offering a TURN relay");
     std::fflush(stdout);
 

@@ -1348,6 +1348,9 @@ namespace {
                     return fail("The netplay server has no relay: allow direct connections, or use another server.");
                 }
                 std::printf("[netplay] on the netplay server%s\n", signaller->turn() ? ", with its relay" : "");
+                if (public_option && host_room && !signaller->has_public_rooms()) {
+                    std::printf("[netplay] the netplay server is older and has no public rooms: this one is private\n");
+                }
                 rendezvous_since = now();
                 if (host_room) {
                     session = new conker::netplay::Session();
@@ -1583,6 +1586,11 @@ conker::lockstep::Browse conker::lockstep::poll_browse() {
     if (browser->state() == Signaller::State::failed) {
         out.state = Browse::State::failed;
         out.error = browser->error();
+        return out;
+    }
+    if (browser->state() == Signaller::State::ready && !browser->has_public_rooms()) {
+        out.state = Browse::State::failed;
+        out.error = "the netplay server is older and has no public rooms (rooms by code still work)";
         return out;
     }
     if (browser->state() != Signaller::State::ready) {

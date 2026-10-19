@@ -3,6 +3,7 @@
 #include "signalling.hpp"
 
 #include <initializer_list>
+#include <cstdio>
 #include <thread>
 #include <utility>
 
@@ -104,6 +105,7 @@ namespace conker::netplay {
     bool Signaller::connect(const std::string& server, std::string& error) {
         close();
         failure.clear();
+        speaks = newest;
         offered_turn.reset();
         creating_room = false;
         asked_room = created_room = 0;
@@ -138,14 +140,15 @@ namespace conker::netplay {
     }
 
     void Signaller::open(const std::string& address_text) {
-        SteamNetworkingIPAddr address;
-        address.ParseString(address_text.c_str());
+        address = address_text;
+        SteamNetworkingIPAddr ip;
+        ip.ParseString(address_text.c_str());
         SteamNetworkingConfigValue_t options[4];
         options[0].SetPtr(k_ESteamNetworkingConfig_Callback_ConnectionStatusChanged, (void*)status_changed);
         options[1].SetInt32(k_ESteamNetworkingConfig_RecvMaxMessageSize, (int32_t)signal::max_packet_size);
         options[2].SetInt32(k_ESteamNetworkingConfig_RecvBufferMessages, 256);
         options[3].SetInt32(k_ESteamNetworkingConfig_RecvBufferSize, 256 * (int32_t)signal::max_packet_size);
-        connection = SteamNetworkingSockets()->ConnectByIPAddress(address, 4, options);
+        connection = SteamNetworkingSockets()->ConnectByIPAddress(ip, 4, options);
         if (connection == k_HSteamNetConnection_Invalid) {
             fail("couldn't connect to the server");
         }
@@ -169,13 +172,23 @@ namespace conker::netplay {
         switch (info->m_info.m_eState) {
             case k_ESteamNetworkingConnectionState_Connected: {
                 uint8_t buffer[signal::max_packet_size];
-                const size_t size = signal::encode(signal::Register{ local_id() }, buffer);
+                const size_t size = signal::encode(signal::Register{ local_id() }, buffer, speaks);
                 SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
                 registering = true;
                 break;
             }
             case k_ESteamNetworkingConnectionState_ClosedByPeer:
             case k_ESteamNetworkingConnectionState_ProblemDetectedLocally: {
+                // An older server, which doesn't speak this version: it closes the connection for that (its
+                // Refused, in its own version, may not even be read first).
+                if (registering && info->m_info.m_eEndReason == k_ESteamNetConnectionEnd_App_Min + (int)signal::Refusal::version &&
+                    speaks > signal::oldest_version) {
+                    SteamNetworkingSockets()->CloseConnection(connection, 0, nullptr, false);
+                    connection = k_HSteamNetConnection_Invalid;
+                    registering = false;
+                    speak_older = true;
+                    break;
+                }
                 std::string why = info->m_info.m_eState == k_ESteamNetworkingConnectionState_ProblemDetectedLocally
                     ? "couldn't reach the server" : "the server closed the connection";
                 std::string detail;
@@ -208,6 +221,13 @@ namespace conker::netplay {
             }
         }
         sockets->RunCallbacks();
+        if (speak_older) {
+            speak_older = false;
+            speaks--;
+            std::printf("[netplay] the netplay server is older: speaking its signalling version %u\n", (unsigned)speaks);
+            open(address);
+            return;
+        }
         if (current_state != State::ready && !registering) {
             return;
         }
@@ -218,13 +238,19 @@ namespace conker::netplay {
             (count = sockets->ReceiveMessagesOnConnection(connection, messages, 16)) > 0; taken += count) {
             for (int i = 0; i < count; i++) {
                 const std::span<const uint8_t> data{ (const uint8_t*)messages[i]->m_pData, (size_t)messages[i]->m_cbSize };
-                const std::optional<signal::Packet> packet = signal::decode(data);
+                const std::optional<signal::Packet> packet = signal::decode(data, speaks);
+                // Read before the message is released, with its bytes.
+                const bool other_version = !packet && signal::other_version(data, speaks);
                 messages[i]->Release();
                 if (current_state != State::ready && !registering) {
                     continue;
                 }
+                if (other_version && registering) {
+                    // An older server's Refused, before it closes the connection (on_status_changed).
+                    continue;
+                }
                 if (!packet) {
-                    fail(signal::other_version(data) ? "the server runs another version" : "the server sent a broken packet");
+                    fail(other_version ? "the server runs another version" : "the server sent a broken packet");
                 }
                 else if (const signal::Registered* r = std::get_if<signal::Registered>(&*packet); r != nullptr && registering && r->id == local_id()) {
                     registering = false;
@@ -277,7 +303,7 @@ namespace conker::netplay {
         if (current_state == State::ready) {
             uint8_t buffer[signal::max_packet_size];
             for (const signal::Signal& s : out->take()) {
-                const size_t size = signal::encode(s, buffer);
+                const size_t size = signal::encode(s, buffer, speaks);
                 if (size != 0) {
                     sockets->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
                 }
@@ -287,7 +313,7 @@ namespace conker::netplay {
 
     void Signaller::send_now(const signal::Packet& packet) {
         uint8_t buffer[signal::max_packet_size];
-        const size_t size = signal::encode(packet, buffer);
+        const size_t size = signal::encode(packet, buffer, speaks);
         if (size != 0 && current_state == State::ready) {
             SteamNetworkingSockets()->SendMessageToConnection(connection, buffer, (uint32)size, k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
         }
@@ -311,7 +337,7 @@ namespace conker::netplay {
     }
 
     void Signaller::publish(const Hello& hello, const signal::ListedRoom& room, signal::Platform platform) {
-        if (current_state != State::ready || created_room == 0) {
+        if (current_state != State::ready || created_room == 0 || !has_public_rooms()) {
             return;
         }
         signal::Publish packet{ fit_of(hello), game_of(hello), platform, room };
@@ -323,7 +349,7 @@ namespace conker::netplay {
     }
 
     void Signaller::list_rooms(const Hello& hello, signal::Platform platform) {
-        if (current_state != State::ready || room_listing == Lookup::waiting) {
+        if (current_state != State::ready || room_listing == Lookup::waiting || !has_public_rooms()) {
             return;
         }
         room_listing = Lookup::waiting;

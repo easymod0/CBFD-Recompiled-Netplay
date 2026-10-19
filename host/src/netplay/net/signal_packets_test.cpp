@@ -195,6 +195,31 @@ int main() {
     bad = bytes_of(Rooms{ 0, std::vector<ListedRoom>(max_listed, room) }); bad[7] = max_listed + 1;
     bad.insert(bad.end(), list.begin() + 8, list.begin() + 20); CHECK(!decodes(bad));
 
+    // Older versions: the same kinds as they were, but none that came later; a version not spoken is refused.
+    {
+        uint8_t buffer[max_packet_size];
+        const size_t size = encode(Register{ 5 }, buffer, 2);
+        const std::vector<uint8_t> old(buffer, buffer + size);
+        CHECK(size == 13 && old[2] == 2 && old[3] == 0);
+        CHECK(decode(old, 2) && std::get<Register>(*decode(old, 2)).id == 5);
+        CHECK(!decodes(old) && other_version(old) && !other_version(old, 2));
+        CHECK(spoken_version(old) == 2 && spoken_version(reg) == version);
+        CHECK(encode(Publish{ 1, 1, Platform::windows, room }, buffer, 2) == 0);
+        CHECK(encode(ListRooms{ 1, 1, Platform::windows }, buffer, 2) == 0);
+        CHECK(encode(Rooms{}, buffer, 2) == 0);
+        CHECK(encode(Turn{ "s", "u", "p" }, buffer, 2) != 0);
+        CHECK(encode(Register{ 5 }, buffer, oldest_version - 1) == 0);
+        CHECK(encode(Register{ 5 }, buffer, version + 1) == 0);
+        std::vector<uint8_t> old_publish = pub;
+        old_publish[2] = 2;
+        CHECK(!decode(old_publish, 2));
+        std::vector<uint8_t> ancient = old;
+        ancient[2] = oldest_version - 1;
+        CHECK(spoken_version(ancient) == 0 && !decode(ancient, oldest_version - 1));
+        ancient[2] = version + 1;
+        CHECK(spoken_version(ancient) == 0);
+    }
+
     if (failures == 0) {
         std::printf("signal_packets_test: all passed\n");
     }

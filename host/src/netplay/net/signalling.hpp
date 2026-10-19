@@ -122,6 +122,14 @@ namespace conker::netplay {
         const std::vector<signal::ListedRoom>& rooms() const { return listed.rooms; }
         int others() const { return listed.others; }
 
+        // Speaks an older signalling version (signal::oldest_version on), as an older game does: a test of the
+        // server's. Before connect.
+        void speak(uint16_t version) { newest = speaks = version; }
+        // A server older than this game refuses its version: then it connects again in the next older one,
+        // down to signal::oldest_version, doing without what came later. Whether the server has public rooms
+        // (publish and list_rooms; version 3), once ready.
+        bool has_public_rooms() const { return speaks >= 3; }
+
         // Closes the connection.
         void close();
 
@@ -134,6 +142,10 @@ namespace conker::netplay {
         friend void signaller_status_changed(void* info);
 
         uint32_t connection = 0;
+        uint16_t newest = signal::version;   // the version it tries first
+        uint16_t speaks = signal::version;   // the one it speaks now
+        std::string address;            // the server's, resolved: to connect again in an older version
+        bool speak_older = false;       // the server refused this version: again in the next older one
         // A name being looked up: its thread fills it in (and may outlive this, holding it).
         struct Resolving {
             std::mutex mutex;

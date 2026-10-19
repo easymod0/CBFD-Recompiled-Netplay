@@ -111,6 +111,16 @@ is always given out at the public address.
 
 `docker compose down` stops them.
 
+## Versions
+
+A game update doesn't need a new server: the server only passes signals on, keeps rooms and compares
+hashes it doesn't read, so it works for any build of the game. Only a change to signalling itself (a
+new kind of packet, for something new the game needs from the server) makes a new signalling version,
+and then the server still speaks the older ones (from version 2), each to the games that speak it, and
+keeps them apart: a game finds rooms of its own version only. A game newer than its server speaks the
+server's version instead, and goes without what's newer (public rooms need version 3: on an older
+server, rooms by code still work). The image is only rebuilt when the server's code changes.
+
 ## What's limited
 
 - **Signalling:** a peer must register within 5 s, with an id nobody else has (nor had in the last

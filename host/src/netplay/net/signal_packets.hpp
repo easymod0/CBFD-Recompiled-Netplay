@@ -17,7 +17,9 @@
 // has no name on the wire: the game makes one from its number (join_code.hpp: room_name).
 //
 // The layout, little-endian: "CS", u16 version, u8 kind, then the kind's fields (see signal_packets.cpp).
-// New kinds come with a new version.
+// New kinds come with a new version, which leaves the older kinds as they were: so the server still speaks
+// the older versions it can (oldest_version on), each to the peers that speak it, and keeps them apart (a
+// peer only reaches, and finds the rooms of, peers of its own version).
 
 #pragma once
 
@@ -32,6 +34,8 @@
 namespace conker::netplay::signal {
     // Changes whenever any packet's layout or meaning does: a peer with another one is refused.
     constexpr uint16_t version = 3;
+    // The oldest version the server still speaks: 2 (no public rooms: Publish, ListRooms and Rooms came with 3).
+    constexpr uint16_t oldest_version = 2;
     // The largest signal GameNetworkingSockets sends (4200 bytes of message data at most, plus its
     // own), with room to spare.
     constexpr size_t max_signal = 8192;
@@ -153,10 +157,13 @@ namespace conker::netplay::signal {
     using Packet = std::variant<Register, Signal, Unreachable, Refused, Registered, CreateRoom, RoomCreated, FindRoom,
         RoomFound, NoRoom, Turn, Publish, ListRooms, Rooms>;
 
-    // The packet's bytes into `out` (max_packet_size): their size, or 0 for a packet that isn't valid.
-    size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out);
-    // The packet in `data`, or nothing if it isn't exactly one valid packet of this version.
-    std::optional<Packet> decode(std::span<const uint8_t> data);
-    // Whether `data` starts like a signalling packet of another version (to say so, not "broken").
-    bool other_version(std::span<const uint8_t> data);
+    // The packet's bytes into `out` (max_packet_size), as version `as` (oldest_version to version) has it:
+    // their size, or 0 for a packet that isn't valid (or a kind `as` hasn't).
+    size_t encode(const Packet& packet, std::span<uint8_t, max_packet_size> out, uint16_t as = version);
+    // The packet in `data`, or nothing if it isn't exactly one valid packet of version `as`.
+    std::optional<Packet> decode(std::span<const uint8_t> data, uint16_t as = version);
+    // Whether `data` starts like a signalling packet of another version than `as` (to say so, not "broken").
+    bool other_version(std::span<const uint8_t> data, uint16_t as = version);
+    // The version `data` starts like, if it's one this code speaks (oldest_version to version); 0 if not.
+    uint16_t spoken_version(std::span<const uint8_t> data);
 }

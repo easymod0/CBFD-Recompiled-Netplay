@@ -29,6 +29,7 @@
 //     --public 1         (hosting a room) list it in public, as the players join and the match starts
 //     --platform <n>     (hosting a public room, or listing) say this platform (1 Linux, 2 Windows, 3 macOS)
 //                        instead of this one's
+//     --speak <version>  (a test, with --signal) speak this older signalling version, as an older game does
 //
 // It exits 0 once it has every other port's pads for every read and they're all right, 1 otherwise;
 // --silent, once the host has closed the connection for a timeout; --oversize, once it's closed before
@@ -171,6 +172,7 @@ int main(int argc, char** argv) {
     bool again = false;
     bool listed = false;
     signal::Platform platform = this_platform();
+    uint16_t speaks = signal::version;
     for (int i = listing ? 2 : 3; i + 1 < argc; i += 2) {
         const std::string option = argv[i];
         const char* value = argv[i + 1];
@@ -190,9 +192,11 @@ int main(int argc, char** argv) {
         else if (option == "--again") again = std::atoi(value) != 0;
         else if (option == "--public") listed = std::atoi(value) != 0;
         else if (option == "--platform") platform = (signal::Platform)std::atoi(value);
+        else if (option == "--speak") speaks = (uint16_t)std::atoi(value);
         else return usage();
     }
-    if ((uint8_t)platform < 1 || platform > signal::Platform::last || (listing && signal_server.empty())) {
+    if ((uint8_t)platform < 1 || platform > signal::Platform::last || (listing && signal_server.empty()) ||
+        speaks < signal::oldest_version || speaks > signal::version) {
         return usage();
     }
     const bool oversize = !hosting && argc == 4 && std::strcmp(argv[3], "--oversize") == 0;
@@ -215,6 +219,7 @@ int main(int argc, char** argv) {
         int list_result = 1;
         {
             Signaller signaller;
+            signaller.speak(speaks);
             const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             const auto wait = [&](auto done) {
                 while (!done() && signaller.state() != Signaller::State::failed && std::chrono::steady_clock::now() < until) {
@@ -224,8 +229,11 @@ int main(int argc, char** argv) {
                 return done();
             };
             if (signaller.connect(signal_server, error) && wait([&] { return signaller.state() == Signaller::State::ready; })) {
+                if (!signaller.has_public_rooms()) {
+                    error = "the server has no public rooms (an older one)";
+                }
                 signaller.list_rooms(me, platform);
-                if (wait([&] { return signaller.listing() == Signaller::Lookup::found; })) {
+                if (signaller.has_public_rooms() && wait([&] { return signaller.listing() == Signaller::Lookup::found; })) {
                     for (const signal::ListedRoom& room : signaller.rooms()) {
                         std::printf("listed %s %d/%d%s%s rollback %d\n", encode_room_code(room.room).c_str(), room.joined, room.players,
                             room.playing ? " playing" : "", room.direct ? " direct" : "", room.rollback);
@@ -250,6 +258,7 @@ int main(int argc, char** argv) {
         // Through a room on the server: registered there first, then the host makes its room and a joiner
         // looks it up.
         Signaller signaller;
+        signaller.speak(speaks);
         Session session;
         bool started = false;
         uint64_t room = 0;
