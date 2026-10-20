@@ -139,6 +139,26 @@ that differed. No addresses, memory or inputs: the full reports stay on the play
 count line says how many came in, and how many weren't logged. Matches by join code or on a LAN don't go through the server, so they
 send nothing.
 
+## The status page
+
+Set `STATUS_PORT` in `.env` (e.g. `27180`) and `docker compose up -d`, and the signalling server serves a
+status on that TCP port, for you to open in a browser: `http://<server>:27180/`. It refreshes itself every
+30 s; `/status.json` has the same as JSON (for a script or a dashboard) and `/status.txt` as plain text.
+
+- **Now:** players online, rooms (private, public: being played or waiting, and how many watch them),
+  public rooms by the release they say, and the relays coturn has open (read from coturn's own metrics,
+  every 15 s, which it serves on 127.0.0.1 only, at `TURN_METRICS_PORT`, 9641 by default).
+- **Today** (UTC): players (each time one goes online), the most at once, rooms made and joined, desyncs.
+- **Since it started:** rooms made, found and codes not found, signals, room lists, relay credentials,
+  desyncs (and how many weren't logged).
+- **The latest desyncs:** the last 20 summaries logged, as in the log (below).
+
+It never shows an address or a room code, and there's nothing to log in with: it's for your own network.
+It listens on all this machine's addresses (`STATUS_ADDRESS`, `0.0.0.0` by default): at home, behind a router
+that forwards only the UDP ports above, only your network reaches it. **On a VPS**, where the machine's
+address is public, set `STATUS_ADDRESS` to a private one (a VPN's, say), or keep the port closed in its
+firewall. Without `STATUS_PORT` it's off. The 10-minute log line has the same headline numbers either way.
+
 ## What's limited
 
 - **Signalling:** a peer must register within 5 s, with an id nobody else has (nor had in the last

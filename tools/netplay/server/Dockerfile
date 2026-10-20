@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY host/src/netplay/net /src
 RUN cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /build --target netplay_server signal_packets_test turn_credentials_test \
-    && /build/signal_packets_test && /build/turn_credentials_test
+    && cmake --build /build --target netplay_server signal_packets_test turn_credentials_test server_status_test \
+    && /build/signal_packets_test && /build/turn_credentials_test && /build/server_status_test
 
 FROM debian:bookworm-slim
 # nftables and iproute2 for compose.yaml's net service (as root), which uses this image too.

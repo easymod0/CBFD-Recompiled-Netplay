@@ -6,7 +6,8 @@
 #        this machine, translating to and from its LAN address. Matches through a room with
 #        netplay_probe, relay-only with the TURN credentials the server hands out: two players (the
 #        joiner must be told only the relay's address, never the host's own) and three with 20% of
-#        packets lost. Then a credential coturn must refuse; the peers coturn denies (private ones, this
+#        packets lost; and one the status page (STATUS_PORT) counts the relays of, from coturn's metrics.
+#        Then a credential coturn must refuse; the peers coturn denies (private ones, this
 #        machine's LAN address, cloud metadata); net's guard (a relay reaches this machine only on the
 #        relay ports); its translation, for a packet from outside (a container on Docker's bridge) to the
 #        LAN address on a relay port; that the servers looked the name up; and that the public address is
@@ -34,6 +35,8 @@ failed=0
 TEST_IP=$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')
 [ -n "$TEST_IP" ] || { echo "no network address"; exit 1; }
 export TEST_PUBLIC_IP=5.5.5.5 PUBLIC_HOST=netplay-test.invalid PUBLIC_IP= HOME_LAN_IP= TURN_SECRET=test-only-secret-0123456789
+# The status page on, at a port of its own (README.md), and coturn's metrics too.
+export STATUS_PORT=27188 STATUS_ADDRESS=127.0.0.1 TURN_METRICS_PORT=27189
 compose="docker compose -p conker-netplay-test -f $here/compose.yaml -f $here/compose.build.yaml -f $here/compose.test.yaml"
 image=conker-netplay-server:local
 # A command as root, with network-admin rights, on this machine's network (the vps pass's address).
@@ -183,6 +186,38 @@ relay nat-two 2 --reads 150
 tries=2
 relay nat-three-lossy 3 --reads 150 --loss 20
 tries=
+# The status page: during a match through the relay (30 s, so coturn's metrics are read at least once), it says
+# how many relays coturn has open, more than before it (the matches before may have left some for a while); and
+# never an address.
+before=-1
+i=0
+while [ $i -lt 100 ] && [ "$before" -lt 0 ]; do
+    before=$(curl -s "http://127.0.0.1:$STATUS_PORT/status.json" | sed -n 's/.*"relay":{"offered":true,"known":true,"open":\([0-9]*\).*/\1/p')
+    [ -n "$before" ] || before=-1
+    [ "$before" -ge 0 ] || sleep 0.2
+    i=$((i + 1))
+done
+"$probe" host room --players 2 $ice --reads 900 > status-match.host.txt 2>&1 &
+pids=$!
+room=$(room_of status-match.host.txt)
+"$probe" join "$room" $ice --reads 900 > status-match.join.txt 2>&1 &
+pids="$pids $!"
+ok=0
+i=0
+while [ $i -lt 150 ]; do
+    curl -s "http://127.0.0.1:$STATUS_PORT/status.json" > status-match.json.txt
+    open=$(sed -n 's/.*"relay":{"offered":true,"known":true,"open":\([0-9]*\).*/\1/p' status-match.json.txt)
+    [ -n "$open" ] && [ "$before" -ge 0 ] && [ "$open" -gt "$before" ] && { ok=1; break; }
+    sleep 0.2
+    i=$((i + 1))
+done
+counted=$ok
+for pid in $pids; do
+    wait "$pid" || { ok=0; echo "status: the match through the relay failed"; cat status-match.host.txt status-match.join.txt; }
+done
+[ $counted -eq 1 ] || { echo "status: the relays weren't counted ($before before)"; cat status-match.json.txt; $compose logs signal | tail -n 5; }
+grep -q -F -e "$TEST_PUBLIC_IP" -e "$TEST_IP" -e "$room" status-match.json.txt && { ok=0; echo "status: an address or the room code shown"; }
+check nat-status $ok
 # The menu's connection test: the server, and its relay working (through it to itself). Whether direct
 # connections would work isn't checked here: this machine's packets straight to a relay port are dropped.
 connection_test() {

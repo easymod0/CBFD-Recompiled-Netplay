@@ -18,6 +18,7 @@ on:
       - 'host/src/netplay/net/signal_packets_test.cpp'
       - 'host/src/netplay/net/join_code.*'
       - 'host/src/netplay/net/turn_credentials*'
+      - 'host/src/netplay/net/server_status*'
       - 'host/src/netplay/net/packets.hpp'
       - 'host/src/netplay/net/vcpkg.*'
       - 'host/src/netplay/net/CMakeLists.txt'

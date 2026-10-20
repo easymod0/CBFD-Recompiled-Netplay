@@ -249,7 +249,8 @@ kill $lan_host 2>/dev/null
 
 # Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
 # (Every probe connects from the same address: more than the server lets one make in a burst, or have at once.)
-"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-per-address 32 --max-listed-per-address 3 --desync-burst 8 > ice.server.txt 2>&1 &
+"$bin/netplay_server" --port 27220 --connection-burst 1000 --max-per-address 32 --max-listed-per-address 3 --desync-burst 8 \
+    --status 127.0.0.1:27224 > ice.server.txt 2>&1 &
 server=$!
 room_of() {
     i=0
@@ -299,6 +300,18 @@ sleep 0.5
 logged=$(grep -c "^netplay_server: desync: match 5eed1234, build 0123456789abcdef, Linux, 2 players, port 2 against port 1, read [0-9]*, regions 64, rollback 0, delay 2$" ice.server.txt)
 if grep -qx "sent 6" desync-report.txt && grep -qx "sent 1" desync-report2.txt && [ "$logged" -eq 5 ] && ! grep "desync:" ice.server.txt | grep -q "127.0.0.1"; then
     echo "desync-reports: passed (5 logged)"; else echo "desync-reports: FAILED ($logged logged)"; grep "desync" ice.server.txt; failed=1; fi
+# The status (--status): the rooms made and joined, the 7 summaries reported and the 5 logged, as the page, JSON
+# and text; never an address or a room code; other paths and methods turned away.
+curl -s http://127.0.0.1:27224/status.json > status.json.txt
+curl -s http://127.0.0.1:27224/status.txt > status.txt
+curl -s http://127.0.0.1:27224/ > status.page.txt
+status_codes=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:27224/nope; curl -s -o /dev/null -w " %{http_code}" -X POST http://127.0.0.1:27224/)
+recent=$(grep -o '"build":"0123456789abcdef"' status.json.txt | wc -l)
+if grep -q '"desyncs":7,"desyncs_not_logged":2' status.json.txt && [ "$recent" -eq 5 ] && grep -q '"rooms_created":[3-9]' status.json.txt &&
+    grep -q '"matches":[2-9]' status.json.txt && grep -q "^  desyncs: 7 (2 not logged)" status.txt && grep -q "<h1>Netplay server</h1>" status.page.txt &&
+    [ "$status_codes" = "404 405" ] && ! grep -q "127\.0\.0\.1" status.json.txt status.txt status.page.txt &&
+    ! grep -q -e "$room" -e "$(sed -n 's/^room //p' ice.host.txt)" status.json.txt status.txt status.page.txt; then
+    echo "status: passed"; else echo "status: FAILED ($status_codes)"; cat status.json.txt status.txt; failed=1; fi
 # expect <name> <text> <probe options...>: the probe fails, saying <text>.
 expect() {
     name=$1; text=$2; shift 2
@@ -366,6 +379,9 @@ listed lobby-joined "rooms 1, others 1, older 0" "$lobby_room 2/3"
 "$probe" join "$lobby_room" --signal 127.0.0.1:27220 --direct 1 --reads 300 > lobby.join2.txt 2>&1 &
 lobby_joiners="$lobby_joiners $!"
 listed lobby-playing "rooms 1, others 1, older 0" "$lobby_room 3/3 playing"
+# The status counts it: public and being played, of its release.
+if curl -s http://127.0.0.1:27224/status.json | grep -q '"public_playing":[1-9][0-9]*,.*"probe":[1-9]'; then echo "status-playing: passed"; else
+    echo "status-playing: FAILED"; curl -s http://127.0.0.1:27224/status.json; failed=1; fi
 for pid in $lobby_host $lobby_joiners; do
     wait "$pid" || { echo "lobby-match: FAILED"; failed=1; }
 done
