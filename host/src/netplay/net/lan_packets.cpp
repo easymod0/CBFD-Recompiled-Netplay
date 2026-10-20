@@ -8,7 +8,8 @@ namespace conker::netplay::lan {
     namespace {
         bool valid(const Beacon& b) {
             return b.fit != 0 && (uint8_t)b.platform >= 1 && b.platform <= signal::Platform::last && b.port != 0 && b.key != 0 &&
-                b.players >= 2 && b.players <= max_players && b.joined >= 1 && b.joined <= b.players && b.rollback <= max_rollback;
+                b.players >= 2 && b.players <= max_players && b.joined >= 1 && b.joined <= b.players && b.rollback <= max_rollback &&
+                b.watching <= max_spectators;
         }
     }
 
@@ -29,8 +30,9 @@ namespace conker::netplay::lan {
         u64(beacon.key);
         u8(beacon.players);
         u8(beacon.joined);
-        u8(beacon.playing ? 1 : 0);
+        u8((uint8_t)((beacon.playing ? 1 : 0) | (beacon.spectators ? 2 : 0)));
         u8(beacon.rollback);
+        u8(beacon.watching);
         return true;
     }
 
@@ -54,8 +56,10 @@ namespace conker::netplay::lan {
         b.joined = u8();
         const uint8_t flags = u8();
         b.rollback = u8();
+        b.watching = u8();
         b.playing = (flags & 1) != 0;
-        if ((flags & ~1) != 0 || !valid(b)) {
+        b.spectators = (flags & 2) != 0;
+        if ((flags & ~3) != 0 || !valid(b)) {
             return std::nullopt;
         }
         return b;

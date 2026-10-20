@@ -182,6 +182,8 @@ namespace conker::lockstep {
         int rollback = 0;
         std::string release;    // its release's name (hello.hpp: release_name); empty: not known (an older server)
         bool other_build = false;   // another build of the game than this one's: not to be joined (another release)
+        int watching = 0;           // spectators in it
+        bool spectators = false;    // it takes spectators
     };
     struct Browse {
         enum class State { connecting, listed, failed };

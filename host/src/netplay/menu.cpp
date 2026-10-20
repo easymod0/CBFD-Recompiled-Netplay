@@ -890,6 +890,7 @@ namespace {
             text(line, room.name, recompui::theme::Typography::LabelMD);
             std::string about = std::to_string(room.joined) + " of " + std::to_string(room.players) + " players";
             about += room.playing ? ", playing" : "";
+            about += room.watching > 0 ? ", " + std::to_string(room.watching) + " watching" : "";
             about += room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : "";
             about += box == lan_box ? "" : room.direct ? ", direct allowed" : ", relay only";
             if (room.other_build) {
@@ -913,8 +914,7 @@ namespace {
                     on_join();
                 });
             }
-            // (A host that takes no spectators says so when it refuses.)
-            if (!room.other_build) {
+            if (!room.other_build && room.spectators) {
                 recompui::Button* watch_room = context.create_element<recompui::Button>(line, "Watch", recompui::ButtonStyle::Tertiary);
                 watch_room->add_pressed_callback([this, code]() {
                     if (state != State::idle) {
@@ -931,7 +931,8 @@ namespace {
         void show_lan(const std::vector<conker::lockstep::ListedRoom>& matches) {
             std::string summary;
             for (const conker::lockstep::ListedRoom& room : matches) {
-                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "");
+                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + "w" +
+                    std::to_string(room.watching) + (room.spectators ? "s" : "");
             }
             // Nothing yet for the first 2 s: a host's beacon comes once a second.
             const bool listening = matches.empty() && std::chrono::steady_clock::now() - lan_since < std::chrono::seconds(2);
@@ -962,7 +963,8 @@ namespace {
             }
             std::string summary = std::to_string(list.others) + " " + std::to_string(list.older);
             for (const conker::lockstep::ListedRoom& room : list.rooms) {
-                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + (room.other_build ? "o" : "");
+                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + (room.other_build ? "o" : "") +
+                    "w" + std::to_string(room.watching) + (room.spectators ? "s" : "");
             }
             if (summary == shown_rooms) {
                 return;

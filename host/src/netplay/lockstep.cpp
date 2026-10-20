@@ -2504,6 +2504,8 @@ namespace {
             conker::netplay::signal::ListedRoom room{ 0, (uint8_t)match_players, (uint8_t)listed_joined(), match_started,
                 direct_option, (uint8_t)rollback_option };
             room.release = conker::netplay::release_name();
+            room.watching = (uint8_t)std::popcount(session->spectators());
+            room.spectators = session->takes_spectators();
             signaller->publish(sent, room);
         }
     }
@@ -2515,7 +2517,8 @@ namespace {
             return;
         }
         lan_beacon->send({ conker::netplay::fit_of(sent), conker::netplay::this_platform(), (uint16_t)host_port, session->key(),
-            (uint8_t)match_players, (uint8_t)listed_joined(), true, (uint8_t)rollback_option });
+            (uint8_t)match_players, (uint8_t)listed_joined(), true, (uint8_t)rollback_option,
+            (uint8_t)std::popcount(session->spectators()), session->takes_spectators() });
         next_beacon = now() + 1.0;
     }
 
@@ -2951,7 +2954,8 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         }
         if (now() >= next_beacon) {
             lan_beacon->send({ netplay::fit_of(sent), netplay::this_platform(), (uint16_t)host_port, session->key(), (uint8_t)match_players,
-                (uint8_t)std::clamp(joined, 1, match_players), false, (uint8_t)rollback_option });
+                (uint8_t)std::clamp(joined, 1, match_players), false, (uint8_t)rollback_option, (uint8_t)std::popcount(session->spectators()),
+                session->takes_spectators() });
             next_beacon = now() + 1.0;
         }
     }
@@ -3107,7 +3111,7 @@ conker::lockstep::Browse conker::lockstep::poll_browse() {
                 continue;
             }
             out.rooms.push_back({ netplay::encode_room_code(room.room), netplay::room_name(room.room), room.players, room.joined,
-                room.playing, room.direct, room.rollback, room.release, room.other_build });
+                room.playing, room.direct, room.rollback, room.release, room.other_build, room.watching, room.spectators });
         }
     }
     return out;
@@ -3176,7 +3180,7 @@ std::vector<conker::lockstep::ListedRoom> conker::lockstep::poll_lan() {
     lan_listener->poll(now());
     for (const netplay::LanMatch& match : lan_listener->matches()) {
         out.push_back({ match.code, netplay::room_name(match.beacon.key), match.beacon.players, match.beacon.joined, match.beacon.playing,
-            true, match.beacon.rollback });
+            true, match.beacon.rollback, {}, false, match.beacon.watching, match.beacon.spectators });
     }
     return out;
 }

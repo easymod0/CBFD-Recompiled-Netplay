@@ -274,7 +274,9 @@ predicts, whatever the match's rollback. Watching from the start, it gets Start 
 match under way, it gets the host's game as a new player does, without the Back (nobody waits for its inputs).
 A spectator whose game goes another way is sent the host's game alone (a Resync to no ports, to it only), and
 removed if it goes another way again soon after; it never ends the match. The waiting room and the Esc menu's
-Netplay tab list the spectators, and the host can kick them. A spectator sees the whole split screen, or one
+Netplay tab list the spectators, and the host can kick them. The public room list (from signalling version 7: the
+server must be that new) and the LAN beacon (version 2) say how many watch a match, and whether it takes spectators:
+Watch is offered only where it does. A spectator sees the whole split screen, or one
 player's view across the window, whatever the match's rule for the players: L and R on its first controller (or the
 D-pad's left and right) go from everyone's to each player's in turn (view.cpp, lockstep's `watched_ports`).
 

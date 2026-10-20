@@ -23,8 +23,9 @@
 // A room (ListedRoom): u64 room (1 to max_room; Publish's 0 or any), u8 players (2 to max_players),
 // u8 joined (1 to players), u8 flags (bit 0 playing, bit 1 direct; the others 0), u8 rollback (0 to
 // max_rollback); from version 5, then u64 host (any: 0, not known); from version 6, then u8 size (1 to
-// max_release) and the release's name (! to ~), and flags' bit 2 is other_build (Publish's 0). So 12 bytes,
-// 20 from version 5, 21 + the name's from version 6.
+// max_release) and the release's name (! to ~), and flags' bit 2 is other_build (Publish's 0); from version 7,
+// then u8 watching (0 to max_spectators), and flags' bit 3 is spectators (taken). So 12 bytes, 20 from version 5,
+// 21 + the name's from version 6, 22 + the name's from 7.
 // Kinds 12 to 14 came with version 3, and 15 with 4 (6 changed 12 to 14 as above); version 2 has the others, as they are here. A packet of any other
 // size, version or kind (or a kind its version hasn't), or with any field out of range, is refused.
 
@@ -74,23 +75,25 @@ namespace conker::netplay::signal {
         // them (a release from 6 on; versions before it leave it out, and other_build).
         bool valid_listing(const ListedRoom& room, uint16_t as) {
             return room.players >= 2 && room.players <= max_players && room.joined >= 1 && room.joined <= room.players &&
-                room.rollback <= max_rollback && (as < 6 || valid_release(room.release));
+                room.rollback <= max_rollback && (as < 6 || valid_release(room.release)) && room.watching <= max_spectators;
         }
         void write_room(Writer& w, const ListedRoom& room, uint16_t as) {
             w.u64(room.room);
             w.u8(room.players);
             w.u8(room.joined);
-            w.u8((uint8_t)((room.playing ? 1 : 0) | (room.direct ? 2 : 0) | (as >= 6 && room.other_build ? 4 : 0)));
+            w.u8((uint8_t)((room.playing ? 1 : 0) | (room.direct ? 2 : 0) | (as >= 6 && room.other_build ? 4 : 0) |
+                (as >= 7 && room.spectators ? 8 : 0)));
             w.u8(room.rollback);
             if (as >= 5) w.u64(room.host);
             if (as >= 6) {
                 w.u8((uint8_t)room.release.size());
                 w.p = std::copy(room.release.begin(), room.release.end(), w.p);
             }
+            if (as >= 7) w.u8(room.watching);
         }
         // A room ending by `end`, if its fields but the number are valid (the caller checks that).
         std::optional<ListedRoom> read_room(Reader& r, const uint8_t* end, uint16_t as) {
-            if (end - r.p < (as >= 6 ? 21 : as >= 5 ? 20 : 12)) return std::nullopt;
+            if (end - r.p < (as >= 7 ? 22 : as >= 6 ? 21 : as >= 5 ? 20 : 12)) return std::nullopt;
             ListedRoom room;
             room.room = r.u64();
             room.players = r.u8();
@@ -107,7 +110,12 @@ namespace conker::netplay::signal {
                 room.release.assign((const char*)r.p, length);
                 r.p += length;
             }
-            if ((flags & ~(as >= 6 ? 7 : 3)) != 0 || !valid_listing(room, as)) return std::nullopt;
+            if (as >= 7) {
+                if (end - r.p < 1) return std::nullopt;
+                room.watching = r.u8();
+                room.spectators = (flags & 8) != 0;
+            }
+            if ((flags & ~(as >= 7 ? 15 : as >= 6 ? 7 : 3)) != 0 || !valid_listing(room, as)) return std::nullopt;
             return room;
         }
         bool valid_text(const std::string& text) {

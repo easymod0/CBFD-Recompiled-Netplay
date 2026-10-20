@@ -17,7 +17,8 @@
 // has no name on the wire: the game makes one from its number (join_code.hpp: room_name). From version 6
 // a room carries its release's name too (hello.hpp: release_name), and the list has the rooms of the same
 // ROM on other builds besides (marked: they can't be joined, but the player sees which release to get),
-// and how many rooms there are of older signalling versions (which can't say their ROM or release).
+// and how many rooms there are of older signalling versions (which can't say their ROM or release). From version 7
+// a room says how many are watching it and whether it takes spectators.
 //
 // And a player whose game went another way than another's (a desync) may tell the server, which logs it
 // for its operator (DesyncReport): a summary, with no address, memory or inputs in it.
@@ -40,10 +41,10 @@
 
 namespace conker::netplay::signal {
     // Changes whenever any packet's layout or meaning does: a peer with another one is refused.
-    constexpr uint16_t version = 6;
+    constexpr uint16_t version = 7;
     // The oldest version the server still speaks: 2 (no public rooms: Publish, ListRooms and Rooms came with 3;
     // DesyncReport with 4; a listed room's host player id with 5; its release, the ROM's hash alone and the
-    // rooms of other builds with 6).
+    // rooms of other builds with 6; a room's spectators with 7).
     constexpr uint16_t oldest_version = 2;
     // The largest signal GameNetworkingSockets sends (4200 bytes of message data at most, plus its
     // own), with room to spare.
@@ -54,7 +55,7 @@ namespace conker::netplay::signal {
     constexpr size_t max_release = 40;
     // The largest packet, to size buffers and the library's message limit.
     constexpr size_t max_packet_size = 5 + 10 + max_signal;
-    static_assert(5 + 5 + max_listed * (21 + max_release) <= max_packet_size, "a full Rooms fits");
+    static_assert(5 + 5 + max_listed * (22 + max_release) <= max_packet_size, "a full Rooms fits");
 
     // Peer to server, first and once: the id it's reached by (never 0). The library's identity for this
     // process is made from it (session.hpp: local_id()).
@@ -134,7 +135,8 @@ namespace conker::netplay::signal {
     // and from version 5, its host's player id (packets.hpp's Hello: for block lists; 0, not known: a host
     // of an older version), which versions before it don't carry. From version 6, its release's name (1 to
     // max_release printable characters, no spaces), and in a list, whether it's of another build than the
-    // asker's (`other_build`: the server says; never in Publish).
+    // asker's (`other_build`: the server says; never in Publish). From version 7, how many are watching (0 to
+    // max_spectators) and whether it takes spectators.
     struct ListedRoom {
         uint64_t room = 0;
         uint8_t players = 2;
@@ -145,6 +147,8 @@ namespace conker::netplay::signal {
         uint64_t host = 0;
         std::string release;
         bool other_build = false;
+        uint8_t watching = 0;
+        bool spectators = false;
         bool operator==(const ListedRoom&) const = default;
     };
     // Peer to server, once its room is made: lists it in public, as `room` says (its number is ignored:

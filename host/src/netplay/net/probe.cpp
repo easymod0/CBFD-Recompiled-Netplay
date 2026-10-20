@@ -324,8 +324,10 @@ int main(int argc, char** argv) {
         }
         const std::vector<LanMatch> matches = listener.matches();
         for (const LanMatch& match : matches) {
-            std::printf("lan %s %s %d/%d%s rollback %d\n", match.address.c_str(), match.code.c_str(), match.beacon.joined,
-                match.beacon.players, match.beacon.playing ? " playing" : "", match.beacon.rollback);
+            std::printf("lan %s %s %d/%d%s rollback %d%s", match.address.c_str(), match.code.c_str(), match.beacon.joined,
+                match.beacon.players, match.beacon.playing ? " playing" : "", match.beacon.rollback, match.beacon.spectators ? " spectators" : "");
+            if (match.beacon.watching != 0) std::printf(" watching %d", match.beacon.watching);
+            std::printf("\n");
         }
         std::printf("matches %zu\n", matches.size());
         shutdown();
@@ -385,6 +387,8 @@ int main(int argc, char** argv) {
                         if (room.host != 0) std::printf(" host %016llx", (unsigned long long)room.host);
                         if (!room.release.empty()) std::printf(" release %s", room.release.c_str());
                         if (room.other_build) std::printf(" other-build");
+                        if (room.spectators) std::printf(" spectators");
+                        if (room.watching != 0) std::printf(" watching %d", room.watching);
                         std::printf("\n");
                     }
                     std::printf("rooms %zu, others %d, older %d\n", signaller.rooms().size(), signaller.others(), signaller.older());

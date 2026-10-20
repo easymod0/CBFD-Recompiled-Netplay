@@ -6,8 +6,8 @@
 //
 // The layout, little-endian: "CL", u16 version, then u64 fit (not 0: signalling.hpp's fit_of), u8 platform
 // (1 to signal::Platform::last), u16 port (not 0: the host's game port), u64 key (not 0: the match's),
-// u8 players (2 to max_players), u8 joined (1 to players), u8 flags (bit 0 playing; the others 0),
-// u8 rollback (0 to max_rollback): 27 bytes.
+// u8 players (2 to max_players), u8 joined (1 to players), u8 flags (bit 0 playing, bit 1 takes spectators; the
+// others 0), u8 rollback (0 to max_rollback), u8 watching (0 to max_spectators): 28 bytes.
 
 #pragma once
 
@@ -20,10 +20,10 @@
 
 namespace conker::netplay::lan {
     // Changes whenever the beacon's layout or meaning does: another version's beacons are ignored.
-    constexpr uint16_t version = 1;
+    constexpr uint16_t version = 2;
     // The UDP port beacons are broadcast to.
     constexpr uint16_t default_port = 27016;
-    constexpr size_t beacon_size = 27;
+    constexpr size_t beacon_size = 28;
 
     struct Beacon {
         uint64_t fit = 0;
@@ -34,6 +34,8 @@ namespace conker::netplay::lan {
         uint8_t joined = 1;
         bool playing = false;
         uint8_t rollback = 0;
+        uint8_t watching = 0;
+        bool spectators = false;
         bool operator==(const Beacon&) const = default;
     };
 

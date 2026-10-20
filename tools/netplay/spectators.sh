@@ -28,8 +28,9 @@
 #   behind     as claim, the spectator stopped for 2 s just before it asks: the host seats it only once its game is
 #              near the host's (or gives up), never ending the match
 # Every copy, players and spectators, must match a solo replay of the recording with the port idle while nobody had it.
+# And through a room on a netplay server (beside the game's build), in public: its list says one is watching.
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a temporary
-# folder, deleted if all passed. It uses UDP ports 27340 to 27350.
+# folder, deleted if all passed. It uses UDP ports 27340 to 27351.
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -263,6 +264,39 @@ if finish "was the last: quitting" claim-host claim-join claim-watch swap-host s
 else
     failed=1
 fi
+
+echo "listed"
+# Through a room on a netplay server (beside the game's build, on loopback), in public: the server's list says how
+# many watch it, and that it takes spectators.
+"$(dirname "$EXE")/src/netplay/net/netplay_server" --port 27351 > "$OUT/listed-server.out" 2>&1 &
+pids="$pids $!"
+room="--netplay-server 127.0.0.1:27351 --netplay-direct"
+# shellcheck disable=SC2086
+pads=1.pads start listed-host --netplay-host room --netplay-public $room --players 2
+code=$(room_of listed-host)
+# shellcheck disable=SC2086
+pads=other.pads start listed-watch --netplay-join "$code" --netplay-watch $room
+wait_for listed-watch "watching, a match"
+hashes=$(sed -n 's/^\[harness\] build .*: build \([0-9a-f]*\), ROM \([0-9a-f]*\), profile \([0-9a-f]*\)$/--build \1 --rom \2 --profile \3/p' "$OUT/listed-host.out")
+listed=
+i=0
+while [ $i -lt 20 ] && [ -z "$listed" ]; do
+    # shellcheck disable=SC2086
+    "$(dirname "$EXE")/src/netplay/net/netplay_probe" list --signal 127.0.0.1:27351 $hashes --mods 0 > "$OUT/listed-list.out" 2>&1
+    listed=$(grep "^listed $code 1/2 .* spectators watching 1$" "$OUT/listed-list.out")
+    i=$((i + 1))
+    [ -z "$listed" ] && sleep 0.5
+done
+# shellcheck disable=SC2086
+pads=2.pads start listed-join --netplay-join "$code" $room
+if [ -z "$listed" ]; then
+    echo "  the list doesn't say one watches:"
+    sed 's/^/    /' "$OUT/listed-list.out"
+    failed=1
+else
+    echo "  $listed"
+fi
+finish "was the last: quitting" listed-host listed-join listed-watch || failed=1
 
 if [ $failed -ne 0 ]; then
     echo "FAILED (logs: $OUT)"
