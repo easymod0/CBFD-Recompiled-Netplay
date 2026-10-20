@@ -38,5 +38,8 @@ Licenses: see LICENSES.txt. The program as a whole is under the GNU GPL version 
 Saves, settings and the stored ROM are kept in your user folder, not here, so a
 newer version can be unpacked anywhere.
 
-If the game crashes, Windows writes crash.log next to ConkerRecomp.exe; please
-attach it to an issue on the GitHub page.
+Logs: each run writes conker.log next to the game (on macOS, and wherever the
+game's folder can't be written to, in your user folder), and keeps the run
+before as conker.prev.log; a run's log stops at 10 MB. If the game crashes,
+Windows also writes crash.log next to ConkerRecomp.exe. Please attach them to an
+issue on the GitHub page; they hold the addresses netplay connected to.

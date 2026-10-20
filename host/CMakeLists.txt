@@ -96,6 +96,7 @@ endif()
 
 add_executable(ConkerRecomp
     src/main.cpp
+    src/log_file.cpp
     src/null_renderer.cpp
     src/overlays.cpp
     src/ultra_extras.cpp

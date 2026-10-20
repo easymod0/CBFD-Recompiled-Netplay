@@ -422,6 +422,13 @@ namespace conker {
 
     // notices.cpp: a line in the top-left corner for a few seconds, one at a time (an unlock, a save state's
     // "State saved"...).
+    namespace log_file {
+        // From then on, stdout and stderr go to `folder`/conker.log, or else `otherwise`/conker.log (log_file.cpp):
+        // for a game whose output would go nowhere.
+        void start(const std::filesystem::path& folder, const std::filesystem::path& otherwise);
+        // As the frontend updates: a log past its most stops there.
+        void check();
+    }
     namespace notices {
         // From any thread. With replace, it's shown at once in place of what's shown (and of an earlier one to
         // replace), as a save state's slot is as F6 is pressed again and again.
@@ -471,6 +478,8 @@ namespace conker {
         void save();
         void load();
         void next_slot();
+        // As the program ends: the states still being written are (5 s at most).
+        void wait_for_writes();
         // On the General tab (conker_config.cpp): Save State Notifications (issue #133).
         void add_options(recomp::config::Config& config);
     }
