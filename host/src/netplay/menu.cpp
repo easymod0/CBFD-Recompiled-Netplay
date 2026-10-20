@@ -89,7 +89,7 @@ namespace {
         int players = 2;
         bool public_room = false;
         int input_delay = -1;       // -1: auto
-        int rollback = 0;
+        int rollback = 12;          // rollback by default (issue #26: the playtest felt it smoother than lockstep)
         bool own_view = true;
         bool directly = false;
         int port = default_port;
@@ -346,7 +346,7 @@ namespace {
         ServerSettings settings = load_or_make_settings();
         bool own_view_for_everyone = true;  // hosting: the match's screens rule
         int input_delay = -1;               // hosting: reads, or -1 for auto
-        int rollback = 0;                   // hosting: reads predicted, 0 (off) to 12
+        int rollback = 12;                  // hosting: reads predicted, 0 (off) to 12
         bool spectators = true;             // hosting: the match takes spectators
         bool watching = false;              // joining (or in) as a spectator
         std::string port_text = std::to_string(default_port);
@@ -1079,14 +1079,14 @@ namespace {
         }
 
         // Not the Host tab's settings: the room it may host has a place for one more player, with lockstep's
-        // defaults (its own view for everyone, input delay auto, no rollback).
+        // defaults (its own view for everyone, input delay auto), and the Host tab's default rollback.
         void on_quick() {
             if (!use_server()) {
                 return;
             }
             settings.host.local_players = local_players;
             save();
-            conker::lockstep::set_quick(local_players + 1, true, -1, local_players, 0, settings.host.spectators);
+            conker::lockstep::set_quick(local_players + 1, true, -1, local_players, HostChoices{}.rollback, settings.host.spectators);
             quick = true;
             begin();
         }
@@ -1391,8 +1391,8 @@ namespace {
                 rollback = 4 * (int)index;
                 show_advanced();
             });
-            text(advanced_box, "Experimental: guesses the others' input up to that many reads ahead (about 30 a second) and "
-                "corrects a wrong guess, so lag is felt less.", Typography::Body, color::TextDim);
+            text(advanced_box, "Guesses the others' input up to that many reads ahead (about 30 a second) and corrects a wrong "
+                "guess, so lag is felt less. 12 suits most matches; Off waits for every input instead.", Typography::Body, color::TextDim);
             recompui::Element* screens_row = row(advanced_box);
             text(screens_row, "Screens", Typography::LabelMD);
             recompui::Radio* screens_radio = context.create_element<recompui::Radio>(screens_row);

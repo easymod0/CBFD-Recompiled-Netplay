@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -174,6 +175,23 @@ namespace {
     constexpr uint64_t late_reads_to_raise = 3;
     constexpr double lower_spare_ms = 12.0;
     constexpr uint64_t settle_reads = 90;
+    // With rollback, the delay is for rollback, and steady (issue #26): a change of delay is felt (the own inputs'
+    // timing shifts), while rollback covers a round trip's spikes. So it isn't chosen from the latest round trips
+    // but from the median of the last rollback_trip_checks checks' (each one what the round trips then needed),
+    // less rollback_cover reads that predicting covers (shallow rollbacks, rather than none), but at least 1 unless
+    // the round trips need none (a LAN: the others' inputs come as soon as the own). It goes a read at a time,
+    // at most once in rollback_settle_reads: up as the median needs it, or one more for reads late from waiting
+    // (past the window) at least rollback_late_to_raise times in the last rollback_late_checks checks, up to
+    // most_raised_for_waiting more; and down only after rollback_calm_checks checks in a row with no read late.
+    constexpr size_t rollback_trip_checks = 30;
+    constexpr int rollback_cover = 3;
+    constexpr uint64_t rollback_settle_reads = 300;
+    constexpr size_t rollback_late_checks = 10;
+    constexpr uint64_t rollback_late_to_raise = 10;
+    constexpr int rollback_calm_checks = 30;
+    std::deque<int> rollback_trips_needed;
+    std::deque<uint64_t> rollback_late;
+    int rollback_calm = 0;
     std::vector<uint64_t> desync_at;    // --netplay-desync-at's reads
     // Desync recovery (#21): hosting, whether a desync is set right by sending the host's game to the joiners whose
     // game went another way (--netplay-no-recovery: the match ends, as before).
@@ -190,6 +208,12 @@ namespace {
     double outage_until = 0;
     uint64_t lag_at = never;
     int lag_then = 0;
+    // And a spike every `spike_every` reads, of `spike_lag` ms for spike_reads (a mobile link's, as in the #24
+    // playtest), the lag going back to what it was after.
+    uint64_t spike_every = 0;
+    int spike_lag = 0;
+    int lag_between_spikes = -1;   // (-1: the lag from the start, not yet taken)
+    constexpr uint64_t spike_reads = 60;
     // --netplay-stall-at's: the game stops at that read for that long, as on a hitch (loading, the system), by read.
     std::map<uint64_t, long> stalls;
     bool options_valid = true;
@@ -299,6 +323,14 @@ namespace {
     // game as it really went. It's the match's, the same on every peer: the host's (--rollback), which the joiners
     // get with Start.
     int rollback_option = 0;
+    // With rollback, falling a few reads behind makes nobody wait (they predict this peer's inputs), and running
+    // fast for them is a hitch here (the #24 playtest: dozens of them): time sync slows the others for it
+    // instead. It catches up only from half the window behind, as the others near waiting for it. How far behind
+    // it is comes from the inputs that have come, which are the one-way trip late (`one_way_reads`, from the
+    // round trips at each hash), so that's taken off, or on a slow link the others would wait on it before it
+    // started. (Not in the boot's first reads, nor near a replay's end: everyone waits for every input there.)
+    int64_t one_way_reads = 0;
+    int64_t reads_behind_to_catch_up(uint64_t read);
     // Its most (--rollback's), which the horizon and the host's delay changes leave room for.
     constexpr int most_rollback_window = conker::netplay::max_rollback;
     // The boot changes the game's main loop at once (a state from before can't be loaded after): no
@@ -583,6 +615,7 @@ namespace {
 
     void say_goodbye() {
         std::scoped_lock lock(session_mutex);
+        print_waits();
         if (catching_up) set_catching_up(false);
         if (session != nullptr && !left) {
             session->leave(Reason::quit);
@@ -898,6 +931,12 @@ namespace {
     }
 
     void take_resync(const Resync& r);
+
+    int64_t reads_behind_to_catch_up(uint64_t read) {
+        if (watching) return spectator_catch_up;
+        if (rollback_option == 0 || read < rollback_from_read || read + rollback_option >= last_read) return behind_to_catch_up;
+        return std::max<int64_t>(behind_to_catch_up, rollback_option / 2 - one_way_reads);
+    }
     void list_room();
     void play_again(uint8_t ports, uint64_t from);
     bool can_play_again(int port, uint64_t from);
@@ -1331,13 +1370,20 @@ namespace {
         return list.empty() ? std::string("unknown") : list;
     }
 
+    // With rollback: the delay for what the round trips need (delay_needed's).
+    int rollback_delay(int needed) {
+        return needed == 0 ? 0 : std::max(1, needed - rollback_cover);
+    }
+
     int delay_for(const std::vector<int>& round_trips, size_t joiners) {
         // A round trip the library doesn't know yet: the delay a match had before it was chosen.
         if (round_trips.size() < joiners) {
-            std::printf("[netplay] the round trips to the players aren't all known: input delay 2\n");
-            return 2;
+            const int chosen = rollback_option > 0 ? 1 : 2;
+            std::printf("[netplay] the round trips to the players aren't all known: input delay %d\n", chosen);
+            return chosen;
         }
-        const int chosen = delay_needed(round_trips, spare_ms);
+        const int needed = delay_needed(round_trips, spare_ms);
+        const int chosen = rollback_option > 0 ? rollback_delay(needed) : needed;
         std::printf("[netplay] round trips to the players: %s ms: input delay %d\n", trips_text(round_trips).c_str(), chosen);
         return chosen;
     }
@@ -1347,7 +1393,12 @@ namespace {
     // it hears: a joiner is at most the delay ahead (it needs the host's pads, sent the delay ahead), and
     // can make the read after its last of the host's pads before the Delay (sent after them) arrives; with
     // rollback (the match's, the same for everyone), a joiner predicts up to its window further.
+    void adapt_rollback_delay(uint64_t read);
     void adapt_delay(uint64_t read) {
+        if (rollback_option > 0) {
+            adapt_rollback_delay(read);
+            return;
+        }
         const std::vector<int> trips = session->round_trips_ms();
         if (trips.empty() || trips.size() < (size_t)session->joiners() || read < delays.from + settle_reads) {
             late_from_waiting = 0;
@@ -1385,6 +1436,54 @@ namespace {
         session->send(Delay{ (uint8_t)to, (uint32_t)delays.from });
         wanted_higher = 0;
         wanted_lower = 0;
+    }
+
+    // adapt_delay's with rollback: steady (rollback_trip_checks's comment).
+    void adapt_rollback_delay(uint64_t read) {
+        const std::vector<int> trips = session->round_trips_ms();
+        const uint64_t late = late_from_waiting;
+        late_from_waiting = 0;
+        if (trips.empty() || trips.size() < (size_t)session->joiners()) {
+            return;
+        }
+        rollback_trips_needed.push_back(delay_needed(trips, spare_ms));
+        if (rollback_trips_needed.size() > rollback_trip_checks) rollback_trips_needed.pop_front();
+        rollback_late.push_back(late);
+        if (rollback_late.size() > rollback_late_checks) rollback_late.pop_front();
+        rollback_calm = late == 0 ? rollback_calm + 1 : 0;
+        if (read < delays.from + rollback_settle_reads) {
+            return;
+        }
+        std::vector<int> sorted(rollback_trips_needed.begin(), rollback_trips_needed.end());
+        std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+        const int median = sorted[sorted.size() / 2];
+        const int wanted = rollback_delay(median);
+        uint64_t late_lately = 0;
+        for (const uint64_t n : rollback_late) late_lately += n;
+        int to = delay;
+        if (late_lately >= rollback_late_to_raise && raised_for_waiting < most_raised_for_waiting &&
+            delay < conker::netplay::max_delay) {
+            to = delay + 1;
+            raised_for_waiting++;
+        }
+        else if (wanted + raised_for_waiting > delay && delay < conker::netplay::max_delay) {
+            to = delay + 1;
+        }
+        else if (rollback_calm >= rollback_calm_checks && (raised_for_waiting > 0 || wanted < delay)) {
+            if (raised_for_waiting > 0) raised_for_waiting--;
+            if (wanted + raised_for_waiting < delay) to = delay - 1;
+            rollback_calm = 0;
+        }
+        if (to == delay) {
+            return;
+        }
+        std::printf("[netplay] round trips to the players: %s ms, needing %d reads at the median of %zu checks; "
+            "%llu reads late from waiting in the last %zu\n", trips_text(trips).c_str(), median, rollback_trips_needed.size(),
+            (unsigned long long)late_lately, rollback_late.size());
+        change_delay(to, read + delay + 2 + rollback_option);
+        session->send(Delay{ (uint8_t)to, (uint32_t)delays.from });
+        rollback_late.clear();
+        rollback_calm = 0;
     }
 
     // The read a peer is at whose pads reach `last`: the earliest it can be, as the delay changes.
@@ -2083,11 +2182,13 @@ bool conker::lockstep::parse_option(int argc, char** argv, int& i) {
             else if (key == "dup" && !pair && a <= 50) fake.dup = (float)a;
             else if (key == "outage" && pair && b > 0 && b <= 8) { outage_at = (uint64_t)a; outage_seconds = b; }
             else if (key == "lag-at" && pair && b <= 2000) { lag_at = (uint64_t)a; lag_then = (int)b; }
+            else if (key == "spikes" && pair && a > spike_reads && b <= 2000) { spike_every = (uint64_t)a; spike_lag = (int)b; }
             else good = false;
         }
         if (!good) {
             std::fprintf(stderr, "[netplay] --netplay-fake-network takes lag=<ms>, jitter=<ms>, loss=<%%>, reorder=<%%>, dup=<%%>, "
-                "outage=<read>:<s> (8 s at most) and lag-at=<read>:<ms>, separated by commas\n");
+                "outage=<read>:<s> (8 s at most), lag-at=<read>:<ms> and spikes=<every reads>:<ms> (each 60 reads long), "
+                "separated by commas\n");
             options_valid = false;
         }
         return true;
@@ -2442,6 +2543,10 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     wanted_lower = 0;
     raised_for_waiting = 0;
     late_from_waiting = 0;
+    rollback_trips_needed.clear();
+    rollback_late.clear();
+    rollback_calm = 0;
+    one_way_reads = 0;
     outage_until = 0;
     if (catching_up) set_catching_up(false);
     initial_sent = false;
@@ -3695,8 +3800,17 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
         if (faking && read == lag_at) {
             fake.lag_ms = lag_then;
+            lag_between_spikes = lag_then;
             netplay::set_fake_network(fake);
             std::printf("[netplay] read %llu: the lag is %d ms now (--netplay-fake-network)\n", (unsigned long long)read, lag_then);
+        }
+        if (faking && spike_every > 0) {
+            if (lag_between_spikes < 0) lag_between_spikes = fake.lag_ms;
+            const int lag = read >= spike_every && read % spike_every < spike_reads ? spike_lag : lag_between_spikes;
+            if (fake.lag_ms != lag) {
+                fake.lag_ms = lag;
+                netplay::set_fake_network(fake);
+            }
         }
         if (const auto stall = stalls.find(read); stall != stalls.end()) {
             const long stall_ms = stall->second;
@@ -3804,6 +3918,11 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
     }
 
+    if (read % hash_every == 0 && session != nullptr) {
+        const std::vector<int> trips = session->round_trips_ms();
+        const int slowest = trips.empty() ? 0 : *std::max_element(trips.begin(), trips.end());
+        one_way_reads = (int64_t)(slowest / 2 / (1000.0 / 30.0));
+    }
     // How far behind the others this peer is: how many reads ahead of it they are, by how far their inputs reach.
     int64_t behind = INT64_MIN;
     for (int port = 0; port < match_players; port++) {
@@ -3812,7 +3931,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
     }
     last_behind = behind;
-    if (!catching_up && behind >= (watching ? spectator_catch_up : behind_to_catch_up)) {
+    if (!catching_up && behind >= reads_behind_to_catch_up(read)) {
         std::printf("[netplay] read %llu: %lld reads behind the others: catching up\n", (unsigned long long)read, (long long)behind);
         set_catching_up(true);
         caught_up_from = read;

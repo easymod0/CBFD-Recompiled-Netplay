@@ -70,7 +70,8 @@
 //   --netplay-fake-network <spec>  (a test) fakes a bad network on this peer's side, through the library:
 //                                lag=<ms>, jitter=<ms>, loss=<%>, reorder=<%> and dup=<%> on what it sends,
 //                                outage=<read>:<s> (nothing sent or received for that long from that read)
-//                                and lag-at=<read>:<ms> (the lag changes), separated by commas. It only makes
+//                                lag-at=<read>:<ms> (the lag changes) and spikes=<every reads>:<ms> (that lag
+//                                for 60 reads, every so many reads), separated by commas. It only makes
 //                                this player's own match worse, so it's in every build, like the above
 //   --netplay-stall-at <read>:<ms>  (a test) the game stops at that read for that long, as on a hitch (again for more)
 //   --rollback <reads>           (hosting; issue #22) instead of waiting for the others' inputs, every peer
