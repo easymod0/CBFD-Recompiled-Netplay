@@ -601,6 +601,14 @@ bool conker::look_aim::leaping_now() {
     return leaping;
 }
 
+// Aiming: Swap Sticks in a leap (issue #138: the Matrix lobby's leaps didn't swap). The leap isn't an aiming
+// mode (swap_sticks_now goes by those): in it the game's stick moves the crosshair and the C-buttons turn the
+// camera, as the sticks swapped give them, so only the sticks are swapped (frontend.cpp), not what
+// swap_sticks_now also does while aiming (Conker facing the view as he walks, the view following the aim).
+bool conker::look_aim::swap_sticks_in_leap() {
+    return leaping && option<Toggle>(options::aim_swap_sticks) == Toggle::On && recompinput::players::is_single_player_mode();
+}
+
 void conker::look_aim::leap_stick(float& x, float& y) {
     if (!leaping || conker::netplay_profile::active()) {
         leap_x = leap_y = 0.0f;

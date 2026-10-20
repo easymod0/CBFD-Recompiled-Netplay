@@ -192,6 +192,11 @@ void conker::init_config() {
             "in the settings while playing (Esc or the controller's menu button).",
             choices, StartDirectly::Off);
     }
+#if defined(CONKER_NETPLAY)
+    // Netplay next to General, where it's always in sight: with every tab, the last ones are past the bar's
+    // edge, and during a match this is where a player leaves, or the host kicks or moves people.
+    conker::netplay_menu::add_tab();
+#endif
     conker::look_aim::add_camera_options(recompui::config::create_config_tab("Camera", camera_tab_id, false));
     conker::look_aim::add_mouse_gyro_options(recompui::config::create_config_tab("Mouse & Gyro", mouse_gyro_tab_id, false));
 
@@ -205,9 +210,6 @@ void conker::init_config() {
     conker::sound_volumes::add_options(recompui::config::create_sound_tab());
 
     conker::local_achievements::add_tab();
-#if defined(CONKER_NETPLAY)
-    conker::netplay_menu::add_tab();
-#endif
 
     recompui::config::create_mods_tab();
 

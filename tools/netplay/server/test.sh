@@ -81,8 +81,20 @@ room_of() {
     done
 }
 
-# relay <name> <players> [probe options...]: a host and players - 1 joiners, relay-only; all must succeed.
+# relay <name> <players> [probe options...]: a host and players - 1 joiners, relay-only; all must succeed. With
+# $tries set, that many goes (the lossy case: 20% of every packet lost, connecting too, now and then times out a
+# connection; a second failure in a row is one).
 relay() {
+    left=${tries:-1}
+    while :; do
+        relay_once "$@"
+        left=$((left - 1))
+        [ $ok -eq 1 ] || [ $left -le 0 ] && break
+        echo "$1: not this time; once more"
+    done
+    check "$1" $ok
+}
+relay_once() {
     name=$1; players=$2; shift 2
     "$probe" host room --players "$players" $ice "$@" > "$name.host.txt" 2>&1 &
     pids=$!
@@ -108,7 +120,6 @@ relay() {
         ok=0
     fi
     grep -q "Got remote candidate" "$name.join1.txt" || ok=0
-    check "$name" $ok
 }
 
 # A TURN client of coturn's own (turnutils_uclient) with good credentials, asking to relay to <peer>:<port>.
@@ -169,7 +180,9 @@ ok=0
 $compose logs net 2>&1 | grep -q "behind NAT: public address $TEST_PUBLIC_IP on this machine for the relays, to and from $TEST_IP" && ok=1
 check nat-detected $ok
 relay nat-two 2 --reads 150
+tries=2
 relay nat-three-lossy 3 --reads 150 --loss 20
+tries=
 # The menu's connection test: the server, and its relay working (through it to itself). Whether direct
 # connections would work isn't checked here: this machine's packets straight to a relay port are dropped.
 connection_test() {

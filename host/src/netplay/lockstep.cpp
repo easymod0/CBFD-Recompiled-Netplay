@@ -2875,8 +2875,9 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
         }
     }
     // The host starts the match once every port is taken and everyone's ready (the host too: its Start); or with
-    // whoever's in (--netplay-start-with, the menu's start_now), the free ports open for players joining later.
-    const bool open_now = start_open || (start_with > 0 && joined >= start_with);
+    // whoever's in (--netplay-start-with, the menu's start_now), the free ports open for players joining later: once
+    // a room has its code (a host alone would otherwise start before the server made it, and nobody could join).
+    const bool open_now = rendezvous == Rendezvous::none && (start_open || (start_with > 0 && joined >= start_with));
     if (hosting && !match_started && (joined == match_players || open_now) && session->everyone_ready(!open_now)) {
         const int chosen = delay_option == auto_delay ? delay_for(session->round_trips_ms(), (size_t)session->joiners()) : delay_option;
         if (session->start(host_own_view, chosen, rollback_option, open_now)) {

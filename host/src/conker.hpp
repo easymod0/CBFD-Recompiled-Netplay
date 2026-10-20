@@ -296,6 +296,9 @@ namespace conker {
         void leap_frame(uint8_t* rdram);
         bool leaping_now();
         void leap_stick(float& x, float& y);
+        // Aiming: Swap Sticks in a leap (issue #138): player 1's sticks swapped, the right stick moving the
+        // crosshair (the game's stick) and the left the camera (the C-buttons), as when aiming elsewhere.
+        bool swap_sticks_in_leap();
         // Camera: Invert Turning, for the free camera's stick: turning (x) and tilting (y).
         void free_camera_invert(bool& x, bool& y);
         // Camera: Turning Speed, 1 at 100%.
