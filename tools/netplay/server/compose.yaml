@@ -22,11 +22,16 @@ services:
     image: ${IMAGE:-ghcr.io/easymod0/conker-netplay-server:latest}
     network_mode: host
     restart: unless-stopped
-    # It hands each player TURN credentials of their own, made from the secret it shares with coturn.
+    # It hands each player TURN credentials of their own, made from the secret it shares with coturn, and
+    # reads coturn's metrics (on this machine only) for how many relays are open. With STATUS_PORT, it serves
+    # its status on that TCP port (README.md: The status page).
     environment:
       TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET in .env}
       PUBLIC_IP: ${PUBLIC_IP:-}
       PUBLIC_HOST: ${PUBLIC_HOST:-}
+      STATUS_PORT: ${STATUS_PORT:-}
+      STATUS_ADDRESS: ${STATUS_ADDRESS:-0.0.0.0}
+      TURN_METRICS_PORT: ${TURN_METRICS_PORT:-9641}
     entrypoint:
       - sh
       - -c
@@ -34,7 +39,8 @@ services:
         ip=$${PUBLIC_IP:-$$(getent ahostsv4 "$$PUBLIC_HOST" | awk 'NR == 1 { print $$1 }')}
         [ -n "$$ip" ] || { echo "set PUBLIC_IP in .env, or PUBLIC_HOST to a name that resolves" >&2; exit 1; }
         echo "public address $$ip"
-        exec netplay_server "$$@" --turn "$$ip:3478"
+        exec netplay_server "$$@" --turn "$$ip:3478" --turn-metrics "127.0.0.1:$$TURN_METRICS_PORT" \
+            $${STATUS_PORT:+--status "$$STATUS_ADDRESS:$$STATUS_PORT"}
       - sh
     command: ["--port", "${SIGNAL_PORT:-27100}", "--max-per-address", "${MAX_PER_ADDRESS:-8}", "--turn-hours", "${TURN_HOURS:-12}"]
 
@@ -177,6 +183,10 @@ services:
       - --max-port=49659
       - --fingerprint
       - --no-cli
+      # Its metrics, for the signalling server's status: on this machine only.
+      - --prometheus
+      - --prometheus-address=127.0.0.1
+      - --prometheus-port=${TURN_METRICS_PORT:-9641}
       - --no-tls
       - --no-dtls
       - --no-multicast-peers

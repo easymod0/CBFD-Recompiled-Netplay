@@ -11,7 +11,8 @@
 //
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]
 //                  [--max-listed-per-address 2] [--desync-burst 4] [--newest-version <n>]   (a test: speak no newer one)
-//                  [--turn <host:port> [--turn-hours 12]]   (with the secret in TURN_SECRET)
+//                  [--turn <host:port> [--turn-hours 12] [--turn-metrics <address:port>]]   (with the secret in TURN_SECRET)
+//                  [--status <address:port>]
 //
 // With --turn, each peer is offered that TURN relay as it registers (Turn), with credentials of its own
 // made from the secret it shares with coturn (turn_credentials.hpp), which expire after --turn-hours.
@@ -38,9 +39,16 @@
 // the rooms of the same ROM on other builds of version 6 on too, with their releases (they can't be joined
 // from there: the player sees which release to get), and counts those of older versions.
 //
+// With --status, it serves its operator a status on that TCP address (IPv4) and port: a page at /, JSON at
+// /status.json and text at /status.txt (server_status.hpp): players, rooms, the relay's open relays, today's
+// numbers and the latest desync summaries, never an address or a room code. Off by default; on its own port, for
+// the operator's network only (nothing to log in with). With --turn-metrics, coturn's metrics (its --prometheus,
+// on this machine) are read every 15 s for how many relays it has open.
+//
 // It runs until SIGINT or SIGTERM (docker stop).
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -49,6 +57,7 @@
 #include <ctime>
 #include <deque>
 #include <map>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -56,12 +65,28 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(_WIN32)
+// (windows.h, which winsock2.h brings, would otherwise define min and max as macros.)
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include <steam/isteamnetworkingsockets.h>
 #include <steam/isteamnetworkingutils.h>
 #include <steam/steamnetworkingsockets.h>
 
 #include "join_code.hpp"
 #include "packets.hpp"
+#include "server_status.hpp"
 #include "signal_packets.hpp"
 #include "turn_credentials.hpp"
 
@@ -117,6 +142,52 @@ namespace {
         const uint8_t* b = address.m_ipv6;
         std::snprintf(text, sizeof(text), "%02x%02x:%02x%02x:%02x%02x:%02x%02x::/64", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
         return text;
+    }
+
+#if defined(_WIN32)
+    using Socket = SOCKET;
+    constexpr Socket no_socket = INVALID_SOCKET;
+    bool start_sockets() {
+        WSADATA data;
+        return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    }
+    void close_socket(Socket s) { closesocket(s); }
+    bool non_blocking(Socket s) {
+        u_long on = 1;
+        return ioctlsocket(s, FIONBIO, &on) == 0;
+    }
+    bool would_block() { return WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINPROGRESS; }
+    constexpr int send_flags = 0;
+    constexpr int shut_write = SD_SEND;
+#else
+    using Socket = int;
+    constexpr Socket no_socket = -1;
+    bool start_sockets() { return true; }
+    void close_socket(Socket s) { ::close(s); }
+    bool non_blocking(Socket s) {
+        const int flags = fcntl(s, F_GETFL, 0);
+        return flags >= 0 && fcntl(s, F_SETFL, flags | O_NONBLOCK) == 0;
+    }
+    bool would_block() { return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS || errno == EINTR; }
+    constexpr int shut_write = SHUT_WR;
+    // (A page closed before it's all sent mustn't stop the server: no SIGPIPE, here or, on macOS, from main.)
+#if defined(MSG_NOSIGNAL)
+    constexpr int send_flags = MSG_NOSIGNAL;
+#else
+    constexpr int send_flags = 0;
+#endif
+#endif
+
+    // "address:port" (IPv4) as a socket address, or nothing.
+    std::optional<sockaddr_in> ipv4_endpoint(const std::string& text) {
+        const size_t colon = text.rfind(':');
+        if (colon == std::string::npos) return std::nullopt;
+        const int port = std::atoi(text.c_str() + colon + 1);
+        sockaddr_in out{};
+        out.sin_family = AF_INET;
+        if (port <= 0 || port > 65535 || inet_pton(AF_INET, text.substr(0, colon).c_str(), &out.sin_addr) != 1) return std::nullopt;
+        out.sin_port = htons((uint16_t)port);
+        return out;
     }
 
     // A rate: `tokens` that come back at `per_second`, up to `burst`.
@@ -188,6 +259,25 @@ namespace {
         uint64_t desyncs_unlogged = 0;     // reported past the limits: counted, not logged
         std::unordered_map<std::string, Bucket> reports;   // each address's, kept like `misses`
         Bucket all_reports{ all_report_burst, 0 };
+        // For the status (--status): when it started, relay credentials given, today's numbers (and the rooms
+        // joined today, to count each once), the latest desync summaries logged, and coturn's last metrics.
+        double started_at = now();
+        uint64_t credentials_given = 0;
+        status::Day today;
+        std::unordered_set<uint64_t> joined_today;
+        std::deque<status::Desync> recent_desyncs;
+        std::optional<status::TurnMetrics> turn_metrics;
+        double turn_metrics_at = -1e9;
+
+        // Today's numbers start again at midnight (UTC).
+        void roll_day() {
+            const std::string date = status::date_of((int64_t)std::time(nullptr));
+            if (date != today.date) {
+                today = status::Day{ date };
+                joined_today.clear();
+            }
+            today.peak_players = std::max(today.peak_players, by_id.size());
+        }
 
         // In the peer's version (the newest, before it's said).
         void send(HSteamNetConnection connection, const signal::Packet& packet) {
@@ -294,11 +384,14 @@ namespace {
                 else {
                     peer.id = r->id;
                     by_id[r->id] = connection;
+                    roll_day();
+                    today.players++;
                     // The relay first: once registered, a peer may connect at once.
                     if (!turn.empty()) {
                         const uint64_t expires = (uint64_t)std::time(nullptr) + (uint64_t)(turn_hours * 3600);
                         const TurnCredentials credentials = turn_credentials(turn_secret, r->id, expires);
                         send(connection, signal::Turn{ turn, credentials.user, credentials.password });
+                        credentials_given++;
                     }
                     send(connection, signal::Registered{ r->id });
                 }
@@ -337,6 +430,8 @@ namespace {
                 peer.room_key = c->key;
                 rooms[room] = connection;
                 rooms_created++;
+                roll_day();
+                today.rooms++;
                 send(connection, signal::RoomCreated{ room });
             }
             else if (const signal::FindRoom* f = std::get_if<signal::FindRoom>(&*packet)) {
@@ -352,6 +447,10 @@ namespace {
                     const Peer& host = host_it->second;
                     rooms_found++;
                     peer.found_room = f->room;
+                    roll_day();
+                    if (joined_today.insert(f->room).second) {
+                        today.matches++;
+                    }
                     send(connection, signal::RoomFound{ f->room, host.id, host.room_key });
                     return;
                 }
@@ -384,6 +483,8 @@ namespace {
             else if (const signal::DesyncReport* d = std::get_if<signal::DesyncReport>(&*packet)) {
                 // A few each, from each address, and in all: more are only counted (the log isn't to be filled).
                 desyncs_reported++;
+                roll_day();
+                today.desyncs++;
                 if (++peer.desync_reports > max_desync_reports ||
                     !reports.try_emplace(peer.address, Bucket{ report_burst, t }).first->second.take(t, reports_per_second, report_burst) ||
                     !all_reports.take(t, all_reports_per_second, all_report_burst)) {
@@ -398,6 +499,11 @@ namespace {
                     }
                 }
                 if (count > 16) regions += " and " + std::to_string(count - 16) + " more";
+                recent_desyncs.push_front({ (int64_t)std::time(nullptr), d->build, (int)d->platform, d->players, d->port, d->other, d->read,
+                    count, d->rollback, d->delay });
+                if (recent_desyncs.size() > status::max_recent) {
+                    recent_desyncs.pop_back();
+                }
                 static const char* const platforms[] = { "?", "Linux", "Windows", "macOS" };
                 std::printf("netplay_server: desync: match %08x, build %016llx, %s, %d players, port %d against port %d, read %u, "
                             "regions %s, rollback %d, delay %d\n", d->match, (unsigned long long)d->build, platforms[(int)d->platform],
@@ -478,6 +584,7 @@ namespace {
         // out again; addresses whose limits are full again. Once a second.
         void expire() {
             const double t = now();
+            roll_day();
             std::vector<HSteamNetConnection> late;
             for (const auto& [connection, peer] : peers) {
                 // A joiner sends nothing during its match, but stays while the room it found is open (it
@@ -503,6 +610,46 @@ namespace {
                 return entry.second.tokens + (t - entry.second.at) * connections_per_second >= connection_burst;
             });
         }
+
+        // What the status shows, now.
+        status::Status snapshot() const {
+            status::Status s;
+            s.now = (int64_t)std::time(nullptr);
+            s.uptime_seconds = now() - started_at;
+            s.oldest_version = signal::oldest_version;
+            s.newest_version = newest_version;
+            s.connected = peers.size();
+            s.players = by_id.size();
+            s.rooms = rooms.size();
+            for (const auto& [room, connection] : rooms) {
+                const auto host = peers.find(connection);
+                if (host == peers.end() || !host->second.listed) {
+                    continue;
+                }
+                const signal::ListedRoom& listed = host->second.listing.room;
+                s.public_rooms++;
+                s.public_playing += listed.playing ? 1 : 0;
+                s.watching += listed.watching;
+                s.releases[listed.release]++;
+            }
+            s.relay = !turn.empty();
+            s.relay_known = turn_metrics.has_value() && now() - turn_metrics_at < 60;
+            if (s.relay_known) {
+                s.relays = turn_metrics->allocations;
+                s.relayed_bytes = turn_metrics->bytes;
+            }
+            s.today = today;
+            s.signals = signals_passed;
+            s.rooms_created = rooms_created;
+            s.rooms_found = rooms_found;
+            s.rooms_missed = rooms_missed;
+            s.lists = lists_sent;
+            s.credentials = credentials_given;
+            s.desyncs = desyncs_reported;
+            s.desyncs_unlogged = desyncs_unlogged;
+            s.recent.assign(recent_desyncs.begin(), recent_desyncs.end());
+            return s;
+        }
     };
 
     Server* server = nullptr;
@@ -510,10 +657,186 @@ namespace {
         if (server != nullptr) server->on_status(info);
     }
 
+    // The status's HTTP listener (--status): each request read, answered (server_status.hpp's respond) and the
+    // connection closed. A few at once, each with a few seconds to say what it wants: it's for one operator.
+    struct StatusPage {
+        static constexpr size_t max_clients = 16;
+        static constexpr size_t max_request = 8192;
+        static constexpr double client_seconds = 5.0;
+        static constexpr double closing_seconds = 1.0;
+        struct Client {
+            Socket socket = no_socket;
+            std::string in;
+            std::string out;
+            size_t sent = 0;
+            double since = 0;
+            double closing_at = 0;  // all sent: what's left of the request is read and dropped for a moment, so
+                                    // closing doesn't reset the connection before the answer is read
+        };
+        Socket listener = no_socket;
+        std::vector<Client> clients;
+
+        bool open(const sockaddr_in& at) {
+            listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (listener == no_socket) return false;
+            // A port another program has is an error (Windows' SO_REUSEADDR would share it instead).
+            int on = 1;
+#if defined(_WIN32)
+            setsockopt(listener, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&on, sizeof(on));
+#else
+            setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof(on));
+#endif
+            if (!non_blocking(listener) || bind(listener, (const sockaddr*)&at, sizeof(at)) != 0 || listen(listener, 16) != 0) {
+                close_socket(listener);
+                listener = no_socket;
+                return false;
+            }
+            return true;
+        }
+
+        void poll(const Server& state) {
+            if (listener == no_socket) return;
+            const double t = now();
+            for (int i = 0; i < 16; i++) {
+                const Socket s = accept(listener, nullptr, nullptr);
+                if (s == no_socket) break;
+                if (clients.size() >= max_clients || !non_blocking(s)) {
+                    close_socket(s);
+                    continue;
+                }
+                clients.push_back({ s, {}, {}, 0, t });
+            }
+            for (Client& c : clients) {
+                if (c.out.empty()) {
+                    char buffer[2048];
+                    const int got = (int)recv(c.socket, buffer, sizeof(buffer), 0);
+                    if (got > 0) {
+                        c.in.append(buffer, (size_t)got);
+                    }
+                    else if (got == 0 || !would_block()) {
+                        c.since = -1e9;     // gone, or broken: closed below
+                        continue;
+                    }
+                    const size_t head_end = c.in.find("\r\n\r\n");
+                    if (head_end != std::string::npos || c.in.size() >= max_request) {
+                        c.out = status::respond(std::string_view(c.in).substr(0, head_end), state.snapshot());
+                    }
+                }
+                if (!c.out.empty() && c.sent < c.out.size()) {
+                    const int put = (int)::send(c.socket, c.out.data() + c.sent, (int)(c.out.size() - c.sent), send_flags);
+                    if (put > 0) c.sent += (size_t)put;
+                    else if (!would_block()) c.since = -1e9;
+                    if (c.sent >= c.out.size()) {
+                        shutdown(c.socket, shut_write);
+                        c.closing_at = t;
+                    }
+                }
+                else if (c.closing_at != 0) {
+                    char drop[2048];
+                    const int got = (int)recv(c.socket, drop, sizeof(drop), 0);
+                    if (got == 0 || (got < 0 && !would_block())) c.since = -1e9;    // the client closed: done
+                }
+            }
+            std::erase_if(clients, [t](Client& c) {
+                const bool done = (c.closing_at != 0 && t - c.closing_at > closing_seconds) || t - c.since > client_seconds;
+                if (done) close_socket(c.socket);
+                return done;
+            });
+        }
+    };
+
+    // coturn's metrics (--turn-metrics: its --prometheus, on this machine), asked for every 15 s, a few seconds
+    // allowed for each answer: how many relays it has open.
+    struct TurnMetricsReader {
+        static constexpr double every_seconds = 15.0;
+        static constexpr double answer_seconds = 3.0;
+        static constexpr size_t max_answer = 1 << 20;
+        sockaddr_in at{};
+        Socket socket = no_socket;
+        bool asked = false;
+        std::string in;
+        double since = 0;
+        double next = 0;
+
+        void finish(Server& state, bool read) {
+            close_socket(socket);
+            socket = no_socket;
+            if (read) {
+                const size_t body = in.find("\r\n\r\n");
+                const auto metrics = status::parse_turn_metrics(body == std::string::npos ? std::string_view() : std::string_view(in).substr(body + 4));
+                if (metrics) {
+                    state.turn_metrics = metrics;
+                    state.turn_metrics_at = now();
+                }
+            }
+            in.clear();
+        }
+
+        void poll(Server& state) {
+            const double t = now();
+            if (socket == no_socket) {
+                if (t < next) return;
+                next = t + every_seconds;
+                socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                if (socket == no_socket) return;
+                if (!non_blocking(socket) || (connect(socket, (const sockaddr*)&at, sizeof(at)) != 0 && !would_block())) {
+                    finish(state, false);
+                    return;
+                }
+                asked = false;
+                since = t;
+                return;
+            }
+            if (t - since > answer_seconds) {
+                finish(state, false);
+                return;
+            }
+            if (!asked) {
+                // Connected once it can be written to.
+#if !defined(_WIN32)
+                if (socket >= FD_SETSIZE) {
+                    finish(state, false);
+                    return;
+                }
+#endif
+                fd_set writable, failed;
+                FD_ZERO(&writable);
+                FD_ZERO(&failed);
+                FD_SET(socket, &writable);
+                FD_SET(socket, &failed);
+                timeval none{ 0, 0 };
+                if (select((int)socket + 1, nullptr, &writable, &failed, &none) <= 0) return;
+                // (Windows says a connection that failed in `failed`.)
+                if (FD_ISSET(socket, &failed)) {
+                    finish(state, false);
+                    return;
+                }
+                static const char request[] = "GET /metrics HTTP/1.0\r\nHost: localhost\r\n\r\n";
+                if (::send(socket, request, (int)sizeof(request) - 1, send_flags) != (int)sizeof(request) - 1) {
+                    finish(state, false);
+                    return;
+                }
+                asked = true;
+            }
+            char buffer[4096];
+            for (int i = 0; i < 64; i++) {
+                const int got = (int)recv(socket, buffer, sizeof(buffer), 0);
+                if (got > 0 && in.size() < max_answer) {
+                    in.append(buffer, (size_t)got);
+                    continue;
+                }
+                if (got == 0) finish(state, true);          // the whole answer (HTTP/1.0: it closes after)
+                else if (got > 0 || !would_block()) finish(state, false);
+                return;
+            }
+        }
+    };
+
     int usage() {
         std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]\n"
                              "                      [--max-listed-per-address 2] [--desync-burst 4] [--newest-version <n>]\n"
-                             "                      [--turn <host:port> [--turn-hours 12]]   (the secret in TURN_SECRET)\n");
+                             "                      [--turn <host:port> [--turn-hours 12] [--turn-metrics <address:port>]]   (the secret in TURN_SECRET)\n"
+                             "                      [--status <address:port>]\n");
         return 2;
     }
 }
@@ -521,11 +844,22 @@ namespace {
 int main(int argc, char** argv) {
     int port = 27100;
     Server state;
+    std::optional<sockaddr_in> status_at;
+    std::optional<sockaddr_in> metrics_at;
     for (int i = 1; i < argc; i++) {
         const std::string arg = argv[i];
         if (i + 1 >= argc) return usage();
         if (arg == "--turn") {
             state.turn = argv[++i];
+            continue;
+        }
+        if (arg == "--status" || arg == "--turn-metrics") {
+            const std::optional<sockaddr_in> at = ipv4_endpoint(argv[++i]);
+            if (!at) {
+                std::fprintf(stderr, "netplay_server: %s takes an IPv4 address and a port: 0.0.0.0:27180, 127.0.0.1:9641\n", arg.c_str());
+                return 2;
+            }
+            (arg == "--status" ? status_at : metrics_at) = at;
             continue;
         }
         const int value = std::atoi(argv[++i]);
@@ -556,6 +890,22 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+#if !defined(_WIN32)
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+    if ((status_at || metrics_at) && !start_sockets()) {
+        std::fprintf(stderr, "netplay_server: no sockets\n");
+        return 1;
+    }
+    StatusPage page;
+    if (status_at && !page.open(*status_at)) {
+        std::fprintf(stderr, "netplay_server: couldn't serve the status on TCP port %d\n", (int)ntohs(status_at->sin_port));
+        return 1;
+    }
+    TurnMetricsReader metrics;
+    if (metrics_at) {
+        metrics.at = *metrics_at;
+    }
 
     SteamNetworkingErrMsg message;
     if (!GameNetworkingSockets_Init(nullptr, message)) {
@@ -582,6 +932,9 @@ int main(int argc, char** argv) {
     std::printf("netplay_server: listening on UDP port %d (signalling versions %u to %u)%s\n", port, (unsigned)signal::oldest_version,
         (unsigned)state.newest_version,
         state.turn.empty() ? ", no TURN relay" : ", offering a TURN relay");
+    if (status_at) {
+        std::printf("netplay_server: status on TCP port %d (/, /status.json, /status.txt)\n", (int)ntohs(status_at->sin_port));
+    }
     std::fflush(stdout);
 
     double next_report = now() + 600;
@@ -601,12 +954,20 @@ int main(int argc, char** argv) {
             state.expire();
             next_expiry = now() + 1;
         }
+        page.poll(state);
+        if (metrics_at) {
+            metrics.poll(state);
+        }
         if (now() >= next_report) {
-            const size_t listed = (size_t)std::count_if(state.peers.begin(), state.peers.end(), [](const auto& p) { return p.second.listed; });
-            std::printf("netplay_server: %zu peers, %zu rooms (%zu listed); %llu signals passed, rooms %llu created, %llu found, %llu missed; %llu lists; %llu desyncs reported (%llu not logged)\n",
-                state.peers.size(), state.rooms.size(), listed, (unsigned long long)state.signals_passed, (unsigned long long)state.rooms_created,
-                (unsigned long long)state.rooms_found, (unsigned long long)state.rooms_missed, (unsigned long long)state.lists_sent,
-                (unsigned long long)state.desyncs_reported, (unsigned long long)state.desyncs_unlogged);
+            const status::Status s = state.snapshot();
+            const std::string relays = !s.relay ? "" : s.relay_known ? ", " + std::to_string(s.relays) + " relays open" : ", relays unknown";
+            std::printf("netplay_server: %zu players online, %zu rooms (%zu public, %zu playing, %zu watching)%s; today %llu players (%zu at once), "
+                        "%llu rooms, %llu joined, %llu desyncs; since the start %llu signals passed, rooms %llu created, %llu found, %llu missed; "
+                        "%llu lists; %llu desyncs reported (%llu not logged)\n",
+                s.players, s.rooms, s.public_rooms, s.public_playing, s.watching, relays.c_str(), (unsigned long long)s.today.players,
+                s.today.peak_players, (unsigned long long)s.today.rooms, (unsigned long long)s.today.matches, (unsigned long long)s.today.desyncs,
+                (unsigned long long)s.signals, (unsigned long long)s.rooms_created, (unsigned long long)s.rooms_found,
+                (unsigned long long)s.rooms_missed, (unsigned long long)s.lists, (unsigned long long)s.desyncs, (unsigned long long)s.desyncs_unlogged);
             std::fflush(stdout);
             next_report = now() + 600;
         }
