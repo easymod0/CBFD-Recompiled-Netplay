@@ -284,7 +284,7 @@ index 43509ba..39b4a99 100644
      ctx->r2 = 0;
  }
 diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
-index 850689d..ba1ee35 100644
+index 850689d..2fdd7a1 100644
 --- a/librecomp/src/recomp.cpp
 +++ b/librecomp/src/recomp.cpp
 @@ -21,6 +21,7 @@
@@ -407,19 +407,30 @@ index 850689d..ba1ee35 100644
          }
      }
  #endif
-@@ -1000,10 +1029,10 @@ void recomp::start(const recomp::Configuration& cfg) {
-     bool free_failed;
- #ifdef _WIN32
-     // VirtualFree returns zero on failure.
+@@ -995,18 +1024,10 @@ void recomp::start(const recomp::Configuration& cfg) {
+     ultramodern::join_event_threads();
+     ultramodern::join_thread_cleaner_thread();
+     ultramodern::join_saving_thread();
++    ultramodern::join_timer_thread();
+     
+-    // Free rdram.
+-    bool free_failed;
+-#ifdef _WIN32
+-    // VirtualFree returns zero on failure.
 -    free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
-+    free_failed = (VirtualFree(allocation, 0, MEM_RELEASE) == 0);
- #else
-     // munmap returns -1 on failure.
+-#else
+-    // munmap returns -1 on failure.
 -    free_failed = (munmap(rdram, allocation_size) == -1);
-+    free_failed = (munmap(allocation, allocation_size + 2 * rdram_guard) == -1);
- #endif
- 
-     if (free_failed) {
+-#endif
+-
+-    if (free_failed) {
+-        printf("Failed to free rdram\n");
+-    }
++    // Game memory is left as it is, for the process's end to free: the game's own threads (not joined: they're
++    // blocked in the game's code, or about to run it) may still read it as the process ends, and freeing it
++    // first made quitting crash in them now and then.
++    (void)allocation;
+ }
 diff --git a/librecomp/src/save_states.cpp b/librecomp/src/save_states.cpp
 new file mode 100644
 index 0000000..db75227
@@ -1288,7 +1299,7 @@ index 0000000..a0ffef6
 +
 +#endif
 diff --git a/ultramodern/include/ultramodern/ultramodern.hpp b/ultramodern/include/ultramodern/ultramodern.hpp
-index 46aea61..17be6dd 100644
+index 46aea61..f02b2fe 100644
 --- a/ultramodern/include/ultramodern/ultramodern.hpp
 +++ b/ultramodern/include/ultramodern/ultramodern.hpp
 @@ -25,6 +25,19 @@ struct UltraThreadContext {
@@ -1321,6 +1332,14 @@ index 46aea61..17be6dd 100644
  void set_entrypoint_thread();
  bool is_entrypoint_thread();
  bool is_game_thread();
+@@ -148,6 +164,7 @@ void quit();
+ void join_event_threads();
+ void join_thread_cleaner_thread();
+ void join_saving_thread();
++void join_timer_thread();
+ 
+ void set_audio_callbacks(const audio_callbacks_t& callbacks);
+ 
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
 index 17d7a47..47d1957 100644
 --- a/ultramodern/src/events.cpp
@@ -2512,7 +2531,7 @@ index 0000000..ebf7321
 +    }
 +}
 diff --git a/ultramodern/src/timer.cpp b/ultramodern/src/timer.cpp
-index ee26c45..7e25f1a 100644
+index ee26c45..b872110 100644
 --- a/ultramodern/src/timer.cpp
 +++ b/ultramodern/src/timer.cpp
 @@ -1,10 +1,16 @@
@@ -2533,7 +2552,7 @@ index ee26c45..7e25f1a 100644
  
  #ifdef _WIN32
  #define WIN32_LEAN_AND_MEAN
-@@ -29,20 +35,25 @@ struct OSTimer {
+@@ -29,20 +35,27 @@ struct OSTimer {
      OSMesg msg;
  };
  
@@ -2547,12 +2566,14 @@ index ee26c45..7e25f1a 100644
 +// in game memory, which loading a save state overwrites (save_states.hpp), and a timer set again while
 +// it runs gets a new one. There are only ever a few, so the next one is found by looking at each.
 +//
-+// Made once and never destroyed: the timer thread is detached and waits on `changed` until the process
-+// ends. A static one was destroyed as the program exited, with the thread still waiting on it, and on
-+// Linux destroying a condition variable waits for its waiters (glibc's pthread_cond_destroy), so quitting
-+// hung (issue #127); the queue it replaced didn't wait.
++// Made once and never destroyed: a static one was destroyed as the program exited, with the thread still
++// waiting on it, and on Linux destroying a condition variable waits for its waiters (glibc's
++// pthread_cond_destroy), so quitting hung (issue #127); the queue it replaced didn't wait. The thread is
++// stopped and joined as the game quits (join_timer_thread): left running, a timer running out as the
++// program ended read game memory freed, and quitting crashed.
 +struct TimerContext {
 +    std::thread thread;
++    bool stopping = false;
 +    std::mutex mutex;
 +    std::condition_variable changed;
 +    std::vector<PTR(OSTimer)> active;
@@ -2571,14 +2592,14 @@ index ee26c45..7e25f1a 100644
  
  uint64_t duration_to_ticks(std::chrono::high_resolution_clock::duration duration) {
      uint64_t delta_micros = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-@@ -59,83 +70,121 @@ std::chrono::microseconds ticks_to_duration(uint64_t ticks) {
+@@ -59,90 +72,138 @@ std::chrono::microseconds ticks_to_duration(uint64_t ticks) {
  }
  
  std::chrono::high_resolution_clock::time_point ticks_to_timepoint(uint64_t ticks) {
 -    return start_time + ticks_to_duration(ticks);
 +    return start_time + ticks_to_duration(ticks + clock_offset.load());
- }
- 
++}
++
 +// The virtual clock, in deterministic mode (timeline.hpp): the timeline's time, which each read of
 +// the clock moves on a step, so reads still differ and loops that wait on the clock still end.
 +static std::atomic<bool> virtual_clock = false;
@@ -2588,8 +2609,8 @@ index ee26c45..7e25f1a 100644
 +
 +uint64_t real_time_now() {
 +    return duration_to_ticks(std::chrono::high_resolution_clock::now() - start_time) - clock_offset.load();
-+}
-+
+ }
+ 
 +// The game's clock, for the game's own reads: with the virtual clock, each moves it on.
  uint64_t time_now() {
 -    return duration_to_ticks(std::chrono::high_resolution_clock::now() - start_time);
@@ -2690,17 +2711,17 @@ index ee26c45..7e25f1a 100644
 +        }
 +    }
 +}
-+
-+void timer_thread(RDRAM_ARG1) {
-+    ultramodern::set_native_thread_name("Timer Thread");
-+    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::VeryHigh);
  
 -        // If there's no timer to act on, wait for one to come in from the action queue
 -        while (active_timers.empty()) {
 -            timer_context.action_queue.wait_dequeue(cur_action);
 -            process_timer_action(cur_action);
++void timer_thread(RDRAM_ARG1) {
++    ultramodern::set_native_thread_name("Timer Thread");
++    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::VeryHigh);
++
 +    std::unique_lock lock{ timer_context.mutex };
-+    while (true) {
++    while (!timer_context.stopping) {
 +        // If there's no timer to act on, wait for one. In deterministic mode the timeline runs them.
 +        if (timer_context.active.empty() || virtual_clock.load()) {
 +            timer_context.changed.wait(lock);
@@ -2750,7 +2771,25 @@ index ee26c45..7e25f1a 100644
          }
      }
  }
-@@ -180,30 +229,68 @@ extern "C" void osSetTime(OSTime t) {
+ 
+ void ultramodern::init_timers(RDRAM_ARG1) {
+     timer_context.thread = std::thread{ timer_thread, PASS_RDRAM1 };
+-    timer_context.thread.detach();
++}
++
++void ultramodern::join_timer_thread() {
++    {
++        std::lock_guard lock{ timer_context.mutex };
++        timer_context.stopping = true;
++    }
++    timer_context.changed.notify_all();
++    if (timer_context.thread.joinable()) {
++        timer_context.thread.join();
++    }
+ }
+ 
+ uint32_t ultramodern::get_speed_multiplier() {
+@@ -180,30 +241,68 @@ extern "C" void osSetTime(OSTime t) {
  
  extern "C" int osSetTimer(RDRAM_ARG PTR(OSTimer) t_, OSTime countdown, OSTime interval, PTR(OSMesgQueue) mq, OSMesg msg) {
      OSTimer* t = TO_PTR(OSTimer, t_);
