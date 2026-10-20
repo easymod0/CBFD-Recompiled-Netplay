@@ -1,18 +1,53 @@
 <img width="1360" height="768" alt="image" src="https://github.com/user-attachments/assets/abb979d7-24a5-44f8-98d3-088ba2054a74" />
 
 > **This is the netplay fork** of [sciaschi/CBFD-Recompiled](https://github.com/sciaschi/CBFD-Recompiled):
-> the same game with **online multiplayer**, built for every push to this fork's `netplay` branch.
-> Download the [latest release](https://github.com/easymod0/CBFD-Recompiled-Netplay/releases/latest) (Windows, Linux, macOS); you still need your own US ROM.
-> Everyone in a match must use the **same release**.
->
-> **To play online:** in the launcher pick **Netplay**. One player hosts (**Host a match**: their address and
-> UDP port, 27015 by default, forwarded on their router for players outside their home; the input delay;
-> **Rollback**, which hides lag by predicting the others' input and correcting it), then sends the **join code**
-> it shows; the others paste it under **Join a match**. Share the code only with people you trust: it holds
-> the host's address.
->
-> Netplay problems: [report them here](https://github.com/easymod0/CBFD-Recompiled-Netplay/issues/new?template=netplay_report.yml) with the log lines the
-> template asks for. Everything else about the game: [upstream](https://github.com/sciaschi/CBFD-Recompiled/issues).
+> the same game with **online multiplayer**. Download the [latest release](https://github.com/easymod0/CBFD-Recompiled-Netplay/releases/latest)
+> (Windows, Linux, macOS); you still need your own US ROM. Everyone in a match must use the **same release**.
+> What's in it and playtest feedback: [the announcement](https://github.com/easymod0/CBFD-Recompiled-Netplay/discussions/38).
+> Netplay problems: [report them here](https://github.com/easymod0/CBFD-Recompiled-Netplay/issues/new?template=netplay_report.yml).
+> Everything else about the game: [upstream](https://github.com/sciaschi/CBFD-Recompiled/issues).
+
+## Netplay
+
+Pick **Netplay** in the launcher. Every player sees the match on their own screen, at full resolution.
+
+**Getting into a match** (the **Play** tab)
+- **Quick Match** puts you in the first open public room, or opens one.
+- **Open matches** lists the public rooms, with how many play and watch.
+- **Room code**: paste a code a friend sent you.
+- **On this network**: matches hosted on your home or LAN-party network show up by themselves.
+- **Rejoin last match**: dropped out? Go straight back to your place.
+
+**Hosting** (the **Host** tab): choose how many play and who can join (**Private**, with the code, or
+**Public**, in the room list), then **Host**, and send the room code. No port forwarding needed: the server
+connects everyone, through its relay when it must. **More options**: input delay, rollback, screens,
+spectators, or hosting **Without a server** (your address and a forwarded UDP port).
+
+**In the waiting room** players mark themselves **Ready** and the host starts. The host can **Kick** or
+**Block** anyone, start with places still open, and move people between playing and watching.
+
+**During a match**
+- **Late joining**: new players can join a match under way, on an open place or one left empty.
+- **Leaving doesn't end it**: someone who drops out can rejoin their place; the others play on.
+- **Desync recovery**: if one game drifts from the host's, the host sends its game and the match carries on.
+- **Bad connections**: the input delay adapts to the connection, a computer that falls behind catches up,
+  and the status on screen shows ping, delay and who you're waiting for.
+- **Rollback** (experimental, the host's choice): hides lag by guessing the others' input and correcting it.
+- **Spectators**: up to 8 watch a match, from its start or joining in the middle, seeing everyone's view or one
+  player's (**L** and **R** to switch). They don't take a place. A spectator can take a free place or a
+  leaver's, and the host can swap players and spectators. The host can turn spectators off.
+
+**Players and controls**
+- **Several players on one computer**: couch and online together, each with their own controller.
+- **Mouse and gyro** aiming, each player's own field of view, **Swap Sticks**.
+- **My view only**: each player sees just their own view, full screen (the host decides, or lets players choose).
+
+**Privacy**: by default nobody sees your address: matches go through the relay. Settings has
+**Peer-to-peer when possible**, quicker but the others see your address. There's no free text: nothing a player
+types is shown to anyone else.
+
+The netplay server's address is under **Settings** (`conker.jesp.ca:27100` by default), with **Test connection**.
+How it works and how to test it: [tools/netplay/README.md](tools/netplay/README.md).
 
 # Conker's Bad Fur Day: Recompiled
 
