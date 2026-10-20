@@ -1565,6 +1565,49 @@ namespace {
             return label;
         }
 
+        // One person in the match (the right column is narrow): a line saying who, kept on one line, and under it
+        // their buttons, which go on to another line if they must.
+        struct Entry {
+            recompui::Element* who;
+            recompui::Element* buttons;
+        };
+
+        Entry add_entry(recompui::Element* parent, const std::string& title) {
+            recompui::ContextId context = recompui::get_current_context();
+            recompui::Element* entry = context.create_element<recompui::Element>(parent);
+            entry->set_display(recompui::Display::Flex);
+            entry->set_flex_direction(recompui::FlexDirection::Column);
+            entry->set_gap(6.0f);
+            recompui::Element* who = context.create_element<recompui::Element>(entry);
+            who->set_display(recompui::Display::Flex);
+            who->set_flex_direction(recompui::FlexDirection::Row);
+            who->set_align_items(recompui::AlignItems::Center);
+            who->set_gap(12.0f);
+            recompui::Element* buttons = context.create_element<recompui::Element>(entry);
+            buttons->set_display(recompui::Display::Flex);
+            buttons->set_flex_direction(recompui::FlexDirection::Row);
+            buttons->set_flex_wrap(recompui::FlexWrap::Wrap);
+            buttons->set_gap(8.0f);
+            add_words(who, title, recompui::theme::Typography::LabelMD);
+            return { who, buttons };
+        }
+
+        // Words on an entry's line: never wrapped or squeezed (a long line runs past the column rather than
+        // over its neighbours).
+        recompui::Label* add_words(recompui::Element* line, const std::string& words, recompui::theme::Typography typography,
+            recompui::theme::color color = recompui::theme::color::Text) {
+            recompui::Label* label = add_text(line, words, typography, color);
+            label->set_white_space(recompui::WhiteSpace::Nowrap);
+            label->set_flex_shrink(0.0f);
+            return label;
+        }
+
+        recompui::Button* add_button(const Entry& entry, const std::string& words, recompui::ButtonStyle style = recompui::ButtonStyle::Tertiary) {
+            recompui::Button* button = recompui::get_current_context().create_element<recompui::Button>(entry.buttons, words, style);
+            button->set_white_space(recompui::WhiteSpace::Nowrap);
+            return button;
+        }
+
         void build(const conker::lockstep::WaitingRoom& room) {
             using recompui::theme::Typography;
             using recompui::theme::color;
@@ -1579,7 +1622,7 @@ namespace {
             right->clear_children();
             right->set_display(recompui::Display::Flex);
             right->set_flex_direction(recompui::FlexDirection::Column);
-            right->set_gap(10.0f);
+            right->set_gap(18.0f);
             if (!room.in) {
                 add_text(left, "No netplay match is being played. Start one from the launcher's Netplay menu.", Typography::Body, color::TextDim);
                 return;
@@ -1598,17 +1641,11 @@ namespace {
             leave->add_pressed_callback([]() { conker::lockstep::leave_match(); });
             for (int port = 0; port < room.players; port++) {
                 const conker::lockstep::Seat& seat = room.seats[port];
-                recompui::Element* line = context.create_element<recompui::Element>(right);
-                line->set_display(recompui::Display::Flex);
-                line->set_flex_direction(recompui::FlexDirection::Row);
-                line->set_align_items(recompui::AlignItems::Center);
-                line->set_gap(16.0f);
-                add_text(line, "Player " + std::to_string(port + 1), Typography::LabelMD);
+                const Entry entry = add_entry(right, "Player " + std::to_string(port + 1));
                 if (seat.player == 0) {
-                    add_text(line, seat.open ? "open" : seat.left ? "left" : "not known", Typography::Body, color::TextDim);
+                    add_words(entry.who, seat.open ? "open" : seat.left ? "left" : "not known", Typography::Body, color::TextDim);
                     if (room.watching && seat.open) {
-                        recompui::Button* play = context.create_element<recompui::Button>(line, "Play as Player " + std::to_string(port + 1),
-                            recompui::ButtonStyle::Secondary);
+                        recompui::Button* play = add_button(entry, "Play as Player " + std::to_string(port + 1), recompui::ButtonStyle::Secondary);
                         play->add_pressed_callback([this, port]() {
                             conker::lockstep::claim(port);
                             shown.clear();
@@ -1616,14 +1653,14 @@ namespace {
                     }
                     continue;
                 }
-                add_text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body, seat.left ? color::TextDim : color::Text);
+                add_words(entry.who, seat.name + (seat.mine ? " (you)" : ""), Typography::Body, seat.left ? color::TextDim : color::Text);
                 std::string about = seat.left ? "left" : platform_name(seat.platform);
                 about += !seat.left && seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
-                add_text(line, about, Typography::Body, color::TextDim);
+                add_words(entry.who, about, Typography::Body, color::TextDim);
                 if (seat.mine) {
                     // (A joiner's players can stop playing and watch.)
                     if (seat.movable && !room.hosting && room.takes_spectators && room.spectators.size() < conker::netplay::max_spectators) {
-                        recompui::Button* watch = context.create_element<recompui::Button>(line, "Watch instead", recompui::ButtonStyle::Tertiary);
+                        recompui::Button* watch = add_button(entry, "Watch instead");
                         watch->add_pressed_callback([this]() {
                             conker::lockstep::step_out();
                             shown.clear();
@@ -1633,40 +1670,35 @@ namespace {
                 }
                 const uint64_t player = seat.player;
                 if (room.hosting && !seat.left && seat.movable && room.takes_spectators) {
-                    recompui::Button* unseat = context.create_element<recompui::Button>(line, "Make spectator", recompui::ButtonStyle::Tertiary);
+                    recompui::Button* unseat = add_button(entry, "Make spectator");
                     unseat->add_pressed_callback([this, port, player]() {
                         conker::lockstep::make_spectator(port, player);
                         shown.clear();
                     });
                 }
                 if (room.hosting && !seat.left) {
-                    recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
+                    recompui::Button* kick = add_button(entry, "Kick");
                     kick->add_pressed_callback([this, port, player]() {
                         conker::lockstep::kick(port, player);
                         shown.clear();
                     });
                 }
-                recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
+                recompui::Button* block = add_button(entry, "Block");
                 block->add_pressed_callback([this, player]() {
                     block_player(player);
                     shown.clear();
                 });
             }
             for (const conker::lockstep::Spectator& spectator : room.spectators) {
-                recompui::Element* line = context.create_element<recompui::Element>(right);
-                line->set_display(recompui::Display::Flex);
-                line->set_flex_direction(recompui::FlexDirection::Row);
-                line->set_align_items(recompui::AlignItems::Center);
-                line->set_gap(16.0f);
-                add_text(line, "Watching", Typography::LabelMD);
-                add_text(line, spectator.name + (spectator.mine ? " (you)" : ""), Typography::Body);
-                add_text(line, platform_name(spectator.platform), Typography::Body, color::TextDim);
+                const Entry entry = add_entry(right, "Watching");
+                add_words(entry.who, spectator.name + (spectator.mine ? " (you)" : ""), Typography::Body);
+                add_words(entry.who, platform_name(spectator.platform), Typography::Body, color::TextDim);
                 if (spectator.mine) {
                     continue;
                 }
                 const uint64_t player = spectator.player;
                 if (room.hosting) {
-                    recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
+                    recompui::Button* kick = add_button(entry, "Kick");
                     kick->add_pressed_callback([this, number = spectator.number, player]() {
                         conker::lockstep::kick_spectator(number, player);
                         shown.clear();
@@ -1679,14 +1711,14 @@ namespace {
                         }
                         const std::string label = (seat.player != 0 && !seat.left ? "Swap with " : "Seat as ") + std::string("Player ") +
                             std::to_string(port + 1);
-                        recompui::Button* seat_button = context.create_element<recompui::Button>(line, label, recompui::ButtonStyle::Tertiary);
+                        recompui::Button* seat_button = add_button(entry, label);
                         seat_button->add_pressed_callback([this, port, number = spectator.number, player]() {
                             conker::lockstep::seat(port, number, player);
                             shown.clear();
                         });
                     }
                 }
-                recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
+                recompui::Button* block = add_button(entry, "Block");
                 block->add_pressed_callback([this, player]() {
                     block_player(player);
                     shown.clear();
