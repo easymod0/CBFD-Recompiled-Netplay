@@ -27,10 +27,14 @@
 #   step-out   in a 2-player match the joiner steps out at read 700 (--netplay-step-out-at), and watches to the end
 #   behind     as claim, the spectator stopped for 2 s just before it asks: the host seats it only once its game is
 #              near the host's (or gives up), never ending the match
+#   couch-out  a joiner with ports 2 and 3 (--local-players 2) steps out at read 700: both idle (open) from then on
+# and before the start (the host makes the change at once):
+#   pre-claim  a spectator asks for port 3 (--netplay-claim-at 0:3) and plays it, the match starting full
+#   pre-out    a joiner steps out (--netplay-step-out-at 0), and two more take ports 2 and 3; it watches the match
 # Every copy, players and spectators, must match a solo replay of the recording with the port idle while nobody had it.
 # And through a room on a netplay server (beside the game's build), in public: its list says one is watching.
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a temporary
-# folder, deleted if all passed. It uses UDP ports 27340 to 27351.
+# folder, deleted if all passed. It uses UDP ports 27340 to 27354.
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -70,6 +74,12 @@ python3 tools/netplay/make_match.py "$OUT/mouse.pads" --mode deathmatch --player
 python3 tools/netplay/make_match.py "$OUT/mouse-other.pads" --mode deathmatch --players 3 --mouse --seed "$((SEED + 1))" --own-view > /dev/null || exit 2
 scramble "$OUT/mouse.pads" "$OUT/mouse-other.pads" 3 "$OUT/mouse-" || exit 2
 MOUSE_READS=$(( ($(wc -c < "$OUT/mouse.pads") - 40) / 73 ))
+# A machine with ports 2 and 3 shows their views two to a window, which widens their culls: its solo replays are the
+# recording marked so (the header's view pairs), as lockstep.sh's couch matches.
+python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[36:40]=(6).to_bytes(4,'little'); open(sys.argv[2],'wb').write(d)" \
+    "$OUT/mouse.pads" "$OUT/couch-solo.pads" || exit 2
+scramble_own "$OUT/couch-solo.pads" "$OUT/mouse-other.pads" 3 "$OUT/couch-23.pads" 23 || exit 2
+scramble_own "$OUT/couch-solo.pads" "$OUT/mouse-other.pads" 3 "$OUT/couch-1.pads" 1 || exit 2
 
 failed=0
 echo "solo"
@@ -184,6 +194,9 @@ solo_idle() {
     finish "was the last: quitting" "$1"
 }
 
+pads=mouse.pads start solo-mouse
+finish "was the last: quitting" solo-mouse || failed=1
+
 echo "claim, swap, takeover, step-out"
 pads=mouse-1.pads start claim-host --netplay-host 27346 --netplay-address 127.0.0.1 --players 3 --netplay-start-with 2
 code=$(code_of claim-host)
@@ -261,6 +274,47 @@ if finish "was the last: quitting" claim-host claim-join claim-watch swap-host s
     else
         failed=1
     fi
+else
+    failed=1
+fi
+
+echo "couch-out, pre-claim, pre-out"
+pads=couch-1.pads start couch-host --netplay-host 27352 --netplay-address 127.0.0.1 --players 3
+code=$(code_of couch-host)
+pads=couch-23.pads start couch-join --netplay-join "$code" --local-players 2 --netplay-step-out-at 700
+pads=mouse-1.pads start pre-host --netplay-host 27353 --netplay-address 127.0.0.1 --players 3
+code=$(code_of pre-host)
+pads=mouse-2.pads start pre-join --netplay-join "$code"
+wait_for pre-join "in, on port 2"
+pads=mouse-3.pads start pre-watch --netplay-join "$code" --netplay-watch --netplay-claim-at 0:3
+pads=mouse-1.pads start out-pre-host --netplay-host 27354 --netplay-address 127.0.0.1 --players 3
+code=$(code_of out-pre-host)
+pads=mouse-other.pads start out-pre-gone --netplay-join "$code" --netplay-step-out-at 0
+wait_for out-pre-gone "the host moved this machine: watching"
+pads=mouse-2.pads start out-pre-join1 --netplay-join "$code"
+wait_for out-pre-join1 "in, on port 2"
+pads=mouse-3.pads start out-pre-join2 --netplay-join "$code"
+if finish "was the last: quitting" couch-host couch-join pre-host pre-join pre-watch out-pre-host out-pre-gone out-pre-join1 out-pre-join2; then
+    from=$(stepped couch-host 2)
+    if [ -z "$from" ] || [ "$from" != "$(stepped couch-host 3)" ]; then
+        echo "  the couch didn't step out of ports 2 and 3 (from read '$from')"
+        failed=1
+    elif solo_idle couch-out-solo 23 "$from" "$MOUSE_READS" couch-solo.pads; then
+        for copy in couch-host couch-join; do same "$copy" couch-out-solo "$MOUSE_READS" || failed=1; done
+    else
+        failed=1
+    fi
+    if ! grep -q "the host moved this machine: on port 3" "$OUT/pre-watch.out"; then
+        echo "  the spectator didn't take port 3 before the start"
+        failed=1
+    fi
+    if ! grep -q "the match starts: 3 players, this is a spectator" "$OUT/out-pre-gone.out"; then
+        echo "  the joiner that stepped out isn't watching"
+        failed=1
+    fi
+    for copy in pre-host pre-join pre-watch out-pre-host out-pre-gone out-pre-join1 out-pre-join2; do
+        same "$copy" solo-mouse "$MOUSE_READS" || failed=1
+    done
 else
     failed=1
 fi

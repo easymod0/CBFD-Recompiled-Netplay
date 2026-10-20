@@ -584,6 +584,9 @@ int main(int argc, char** argv) {
                                 joined -= std::popcount(event.ports);
                             }
                             break;
+                        case Event::Type::moved:
+                            std::printf("moved: ports %x\n", event.ports);
+                            break;
                         case Event::Type::ended:
                             std::printf("ended: %s (%s)%s%s\n", describe(event.reason), event.detail.c_str(),
                                 event.release.empty() ? "" : ", host's release ", event.release.c_str());

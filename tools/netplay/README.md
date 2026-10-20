@@ -280,15 +280,19 @@ Watch is offered only where it does. A spectator sees the whole split screen, or
 player's view across the window, whatever the match's rule for the players: L and R on its first controller (or the
 D-pad's left and right) go from everyone's to each player's in turn (view.cpp, lockstep's `watched_ports`).
 
-**Changing places** (#21). In a match, spectators and players can change places, one machine of one player at a
-time (the Esc menu's Netplay tab). A spectator can take a free place (Play as; `--netplay-claim-at`), and the host
-can seat one in a free place, in one held for a player who left (who then can't come back to it), or in a player's
-(a swap: Seat as, Swap with; `--netplay-seat-at`). A spectator's game is the match's already, so no state is sent:
-the host picks a read past any input sent and tells everyone (Back, naming the spectator's player id), and it plays
-from there. A player (not the host) can step out to watch, of their own accord (Watch instead;
-`--netplay-step-out-at`) or as the host asks (Make spectator, or a swap: Unseat): their machine sends no more inputs
-and says so (Unseat), and the host tells everyone their port is idle, and open, from the read after their last
-(Gone's 2); they watch from then on. A swap is the two in turn, the place idle a moment between.
+**Changing places** (#21). Spectators and players can change places, before the match (the waiting room) and in it
+(the Esc menu's Netplay tab). A spectator can take a free place (Play as; `--netplay-claim-at`), and the host can seat
+one: in a free place, in one held for a player who left (who then can't come back to it), or in a joiner's (a swap:
+Seat as, Swap with; `--netplay-seat-at`). A joiner's players (every one on that computer) can step out to watch, of
+their own accord (Watch instead; `--netplay-step-out-at`) or as the host asks (Make spectator, or a swap). Before the
+start nothing has been played: the host just makes the change, and its roster tells everyone (a joiner finds where it
+is in it). In the match, a spectator's game is the match's already, so no state is sent: the host picks a read past
+any input sent and tells everyone (Back, naming the spectator's player id), and it plays from there, once its game is
+near the host's. A machine stepping out sends no more inputs and says so (Unseat, with all its ports), and the host
+tells everyone its ports are idle, and open, from the read after its last (Gone's 2); it watches from then on. A swap
+is the two in turn, the place idle a moment between. Spectators take one place each. The view pairs stay as they were at the start (Start's): a
+port of a two-player computer that's taken by someone else in the match is culled as a pair's still, so the edges of
+its view may show things a moment late (as for a late joiner; it can't desync).
 
 **Desync reports.** The hash a peer sends comes with a hash of each 64 KB region of memory (128 of them,
 16 bits each), so a desync names the regions that differ. Each peer whose game differs from another's
@@ -479,7 +483,7 @@ so.
 | `check.sh` | the determinism check: replays a made-up recording headless twice, with `--jitter` and with `--state-test`, and fails unless all four give the same hashes (about 30 s; the CI runs it, `.github/workflows/netplay.yml`) |
 | `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), players leaving partway, through a room on a local netplay server (public: the server lists it), Quick Match (joining a public host; two at once meeting in one room), block lists (a host keeping a player out, a joiner leaving, Quick Match passing over a blocked host's room), a kick during a match, a joiner's desync set right by the host's game, players coming back and new players joining a match under way (an open port, a seat someone left), and a desync is caught and reported, by the players and, through a room, in the server's log (a few minutes); `--match-options` gives every copy in a match more options, `--host-options` every hosting one (e.g. `--rollback 8`) |
 | `network.sh` | the bad-network check: matches with lag, jitter, loss, an outage and a change of lag give the same game as a replay alone, and how long each waited (about 70 s) |
-| `spectators.sh` | the spectators check: a spectator watching from the start, joining a match under way, set right after a desync, in a rollback match and leaving partway sees the players' game (the same as a replay alone) and never holds them up, a host that takes none refuses one, and spectators and players change places (taking an open place, a swap, a place someone left, a player stepping out) (about a minute) |
+| `spectators.sh` | the spectators check: a spectator watching from the start, joining a match under way, set right after a desync, in a rollback match and leaving partway sees the players' game (the same as a replay alone) and never holds them up, a host that takes none refuses one, spectators and players change places (taking an open place, a swap, a place someone left, a player or two on one computer stepping out, before the start too), and the server's room list says how many watch (about 2 minutes) |
 | `rollback.sh` | the rollback check: matches where the copies predict the others' inputs (the host's `--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone; then a match on real time must keep to time, with time sync keeping both copies predicting (about 90 s) |
 | `rollback-modes.sh` | rollback across the game's own changes: every multiplayer mode (4 players, a pause, a Race's match end) replayed going back every 3 reads, 12 deep, and with other machines' inputs up to 8 reads late, must give the plain replay's game; `--recording` adds a real one (about 90 s) |
 | `try-network.sh` | netplay over a faked bad network on this one computer, in two windows: `watch` (a made-up 2-player Deathmatch, each window one player's, with `--net`, `--rollback`, `--delay`) or `play` (both at the launcher: host, join, play with the keyboard); prints each side's rollback, time sync and waits |

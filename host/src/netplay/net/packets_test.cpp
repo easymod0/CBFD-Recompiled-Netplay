@@ -328,9 +328,11 @@ int main() {
     CHECK(bytes_of(Back{ 0x06, 5, 0x06, 9 }).empty());              // ...one port only
     CHECK(bytes_of(Back{ 0x04, 5, 0, 9 }).empty());                 // ...as a new player
     CHECK(round_trips(Claim{ 3 }, 6));
-    CHECK(round_trips(Unseat{ 1 }, 6));
+    CHECK(round_trips(Unseat{ 0x06 }, 6));                          // a machine of two players
+    CHECK(bytes_of(Unseat{ 0 }).empty());
+    CHECK(bytes_of(Unseat{ 1 }).empty());                           // the host's port
     CHECK(bytes_of(Claim{ 0 }).empty());                            // the host's port
-    CHECK(bytes_of(Unseat{ 4 }).empty());
+    CHECK(bytes_of(Unseat{ 0x10 }).empty());
     CHECK(round_trips(Gone{ 2, 30, 2 }, 11));                       // stepped out to watch
     data = bytes_of(Back{ 0x06, 0x01020304, 0x02 });
     CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1 && data[10] == 0x02);

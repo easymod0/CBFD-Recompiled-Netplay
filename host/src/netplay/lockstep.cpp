@@ -218,6 +218,7 @@ namespace {
     int joined = 0;                 // host: the players in so far, the host too (in the match: those still in)
     conker::netplay::Hello sent;    // what this peer said in the handshake (begin's)
     bool initial_sent = false;
+    bool match_started = false; // the match has started (connected)
     bool ended = false;         // the match is over for this peer: nothing more is sent
     bool left = false;
     std::string why_over;       // why the match ended, for the player
@@ -905,56 +906,85 @@ namespace {
     bool take_back(const Back& b);
     bool take_rejoin(const Rejoin& r);
 
-    // `port` stepped out to watch from its idle read: open from now on. `stepped_here`: this machine's player did.
-    bool stepped_here = false;
+    // `port` stepped out to watch from its idle read: open from now on. `stepped_here`: this machine's ports that did,
+    // till each is told.
+    uint8_t stepped_here = 0;
     void stepped_out(int port) {
         open_ports |= (uint8_t)(1u << port);
         {
             std::lock_guard lock(status_mutex);
             shown.open = open_ports;
         }
-        if (stepped_here) {
-            stepped_here = false;
-            tell("You're watching now: L and R switch between everyone and each player.");
+        if ((stepped_here & (1u << port)) != 0) {
+            stepped_here &= (uint8_t)~(1u << port);
+            if (stepped_here == 0) tell("You're watching now: L and R switch between everyone and each player.");
             return;
         }
         tell(players_text((uint8_t)(1u << port)) + " stepped out to watch: their place is open.");
     }
 
-    // The host: the player on `port` stepped out (their Unseat, after their last inputs): they watch from now on.
-    void host_unseated(int port) {
-        const uint64_t from = received[port].size();
-        unseat_asked &= (uint8_t)~(1u << port);
-        const int number = session->unseat(port);
-        if (number < 0) {
-            // (No spectator number free, or none taken: they leave, as a player who quits.)
-            swaps[port] = {};
-            session->kick(port, false);
+    // The host: the joiner's machine on `ports` stepped out (its Unseat, after its last inputs): it watches from now on.
+    // Before the start, nothing's been played: it's a spectator at once.
+    void host_unseated(uint8_t ports) {
+        unseat_asked &= (uint8_t)~ports;
+        const int number = session->unseat(ports);
+        if (!match_started) {
+            if (number >= 0) {
+                joined -= std::popcount(ports);
+                std::printf("[netplay] %s stepped out to watch (spectator %d)\n", ports_text(ports).c_str(), number + 1);
+                spectator_last_read[number] = never;
+                spectator_resyncs[number] = 0;
+                spectator_at[number] = 0;
+            }
             return;
         }
-        // (A state on its way to that port is for nobody now.)
-        if (recovery.read != never && (recovery.ports & (1u << port)) != 0) {
-            recovery.ports &= (uint8_t)~(1u << port);
-            recovery.late &= (uint8_t)~(1u << port);
+        if (number < 0) {
+            // (No spectator number free, or none taken: they leave, as players who quit.)
+            for (int port = 0; port < conker::netplay::max_players; port++) {
+                if ((ports & (1u << port)) != 0) swaps[port] = {};
+            }
+            session->kick(std::countr_zero(ports), false);
+            return;
+        }
+        // (A state on its way to those ports is for nobody now.)
+        if (recovery.read != never && (recovery.ports & ports) != 0) {
+            recovery.ports &= (uint8_t)~ports;
+            recovery.late &= (uint8_t)~ports;
             if (recovery.ports == 0 && recovery.spectators == 0) {
                 recovery.read = never;
                 recovery.state.clear();
             }
         }
-        std::printf("[netplay] %s stepped out to watch (spectator %d), idle from read %llu\n", ports_text((uint8_t)(1u << port)).c_str(),
-            number + 1, (unsigned long long)from);
         spectator_last_read[number] = never;
         spectator_resyncs[number] = 0;
-        gone[port] = true;
-        let_go(port, from);
-        session->send(conker::netplay::Gone{ (uint8_t)port, (uint32_t)from, 2 });
-        stepped_out(port);
-        list_room();
-        // The host's swap: the spectator it chose takes the place.
-        if (swaps[port].spectator >= 0) {
-            seat_moves.push_back(swaps[port]);
-            swaps[port] = {};
+        spectator_at[number] = 0;
+        joined -= std::popcount(ports);
+        for (int port = 0; port < conker::netplay::max_players; port++) {
+            if ((ports & (1u << port)) == 0) continue;
+            const uint64_t from = received[port].size();
+            std::printf("[netplay] port %d stepped out to watch (spectator %d), idle from read %llu\n", port + 1, number + 1,
+                (unsigned long long)from);
+            gone[port] = true;
+            let_go(port, from);
+            session->send(conker::netplay::Gone{ (uint8_t)port, (uint32_t)from, 2 });
+            stepped_out(port);
+            // The host's swap: the spectator it chose takes the place.
+            if (swaps[port].spectator >= 0) {
+                seat_moves.push_back(swaps[port]);
+                swaps[port] = {};
+            }
         }
+        list_room();
+    }
+
+    // Before the start: spectator `n` (still `player`) takes `port`, at once, if it's free (the roster tells everyone).
+    bool seat_before_start(int n, uint64_t player, int port) {
+        if (session->roster().watchers[n].player != player || !session->seat_spectator(n, port)) {
+            return false;
+        }
+        joined++;
+        std::printf("[netplay] spectator %d takes %s\n", n + 1, ports_text((uint8_t)(1u << port)).c_str());
+        return true;
     }
 
     // The host, at a read made the first time: the next spectator to seat, if it still can be (a spectator in the match,
@@ -1045,6 +1075,7 @@ namespace {
                 break;
             case Event::Type::welcomed:
             case Event::Type::started:
+            case Event::Type::moved:
                 break;
             case Event::Type::left:
                 // The host's: a spectator stopped watching (nobody waits for it).
@@ -1184,17 +1215,20 @@ namespace {
                     take_resync(*r);
                 }
                 else if (const Claim* c = std::get_if<Claim>(&event.packet)) {
-                    // The host's: a spectator would take a free port (seat_next, at the next read).
-                    if (event.spectator >= 0 && (session->free_ports() & (1u << c->port)) != 0 &&
+                    // The host's: a spectator would take a free port (seat_next, at the next read; before the start, at once).
+                    if (!match_started && event.spectator >= 0) {
+                        seat_before_start(event.spectator, event.player, c->port);
+                    }
+                    else if (event.spectator >= 0 && (session->free_ports() & (1u << c->port)) != 0 &&
                         std::none_of(seat_moves.begin(), seat_moves.end(), [&](const SeatMove& m) { return m.spectator == event.spectator; })) {
                         std::printf("[netplay] spectator %d would take %s\n", event.spectator + 1, ports_text((uint8_t)(1u << c->port)).c_str());
-                        seat_moves.push_back({ event.spectator, session->roster().watchers[event.spectator].player, c->port });
+                        seat_moves.push_back({ event.spectator, event.player, c->port });
                     }
                 }
                 else if (const Unseat* u = std::get_if<Unseat>(&event.packet)) {
                     // The host's: its player stepped out (their machine's last inputs came first). A joiner's: asked to.
                     if (session->hosting()) {
-                        host_unseated(u->port);
+                        host_unseated(u->ports);
                     }
                     else {
                         step_out_wanted = true;
@@ -2256,7 +2290,6 @@ std::string conker::lockstep::join_code(std::string address) {
 
 namespace {
     double connecting_since = 0;
-    bool match_started = false;
 
     // Updates what status() gives, with the ports the read waits for since `waiting_since` (none: it's not
     // waiting). With the session's lock held, or the session alone.
@@ -2430,7 +2463,7 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     seat_waiting_since = 0;
     seated_from = 0;
     step_out_wanted = false;
-    stepped_here = false;
+    stepped_here = 0;
     open_ports = 0;
     start_open = false;
     rejoining = false;
@@ -2783,6 +2816,17 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                     session->set_ready(true);
                 }
                 break;
+            case Event::Type::moved:
+                // Before the start, the host moved this machine: to `ports`, or out of its places to watch.
+                own_ports = event.ports;
+                watching = own_ports == 0;
+                std::printf("[netplay] the host moved this machine: %s\n", watching ? "watching" : ("on " + ports_text(own_ports)).c_str());
+                if (watching) {
+                    session->set_horizon(horizon());
+                }
+                ready_now = auto_ready && !watching;
+                if (ready_now) session->set_ready(true);
+                break;
             case Event::Type::started:
                 match_started = true;
                 match_own_view = event.own_view;
@@ -2840,6 +2884,19 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
             delay = chosen;
             delays = { 0, chosen, chosen };
             open_from_start(session->open_at_start());
+        }
+    }
+    // (Tests) a claim or a step-out at read 0: before the start, once welcomed.
+    if (!hosting && !match_started && session->welcomed()) {
+        if (claim_at == 0 && session->watching()) {
+            claim_at = never;
+            std::printf("[netplay] claiming %s before the start, as --netplay-claim-at asked\n", ports_text((uint8_t)(1u << claim_port)).c_str());
+            session->claim(claim_port);
+        }
+        if (step_out_at == 0 && own_ports != 0) {
+            step_out_at = never;
+            std::printf("[netplay] stepping out before the start, as --netplay-step-out-at asked\n");
+            session->step_out();
         }
     }
     // A joiner in a room with someone on its block list leaves (Quick Match: for another room).
@@ -3111,7 +3168,9 @@ conker::lockstep::Browse conker::lockstep::poll_browse() {
                 continue;
             }
             out.rooms.push_back({ netplay::encode_room_code(room.room), netplay::room_name(room.room), room.players, room.joined,
-                room.playing, room.direct, room.rollback, room.release, room.other_build, room.watching, room.spectators });
+                room.playing, room.direct, room.rollback, room.release, room.other_build, room.watching,
+                // (A server older than signalling version 7 doesn't say: Watch is offered, and the host refuses if it must.)
+                room.spectators || browser->version() < 7 });
         }
     }
     return out;
@@ -3229,6 +3288,7 @@ conker::lockstep::WaitingRoom conker::lockstep::waiting_room() {
         seat.platform = s.platform;
         seat.mine = (own_ports & (1u << port)) != 0;
         seat.round_trip_ms = seat.mine || s.round_trip_ms == 0xFFFF ? -1 : s.round_trip_ms;
+        seat.movable = port > 0 && s.player != roster.seats[0].player;
     }
     add_spectators(room, roster);
     return room;
@@ -3264,18 +3324,27 @@ bool conker::lockstep::kick(int port, uint64_t player) {
 
 bool conker::lockstep::seat(int port, int spectator, uint64_t player) {
     std::scoped_lock lock(session_mutex);
-    if (session == nullptr || !session->hosting() || ended || !match_started || port < 1 || port >= match_players || spectator < 0 ||
+    if (session == nullptr || !session->hosting() || ended || port < 1 || port >= match_players || spectator < 0 ||
         spectator >= netplay::max_spectators || player == 0 || session->roster().watchers[spectator].player != player) {
         return false;
     }
-    // A player there (alone on their machine): they step out first, then the spectator takes the place (a swap).
+    // Before the start: at once (a joiner's machine there watching instead).
+    if (!match_started) {
+        if (const uint8_t machine = session->machine_of(port); machine != 0) {
+            host_unseated(machine);
+            if (session->machine_of(port) != 0) return false;
+        }
+        return seat_before_start(spectator, player, port);
+    }
+    // A joiner's machine there: it steps out first, then the spectator takes the place (a swap).
     const netplay::Roster roster = session->roster();
     if ((unseat_asked & (1u << port)) != 0 || swaps[port].spectator >= 0) {
         return false;
     }
     if (roster.seats[port].player != 0 && idle_from[port] == never) {
+        const uint8_t machine = session->machine_of(port);
         if (!session->ask_unseat(port)) return false;
-        unseat_asked |= (uint8_t)(1u << port);
+        unseat_asked |= machine;
         std::printf("[netplay] swapping %s for spectator %d\n", ports_text((uint8_t)(1u << port)).c_str(), spectator + 1);
         swaps[port] = { spectator, player, port };
         return true;
@@ -3286,27 +3355,44 @@ bool conker::lockstep::seat(int port, int spectator, uint64_t player) {
 
 bool conker::lockstep::make_spectator(int port, uint64_t player) {
     std::scoped_lock lock(session_mutex);
-    if (session == nullptr || !session->hosting() || ended || !match_started || port < 1 || port >= netplay::max_players ||
-        (unseat_asked & (1u << port)) != 0 || swaps[port].spectator >= 0 || session->roster().seats[port].player != player || player == 0 ||
-        !session->ask_unseat(port)) {
+    const uint8_t machine = session != nullptr ? session->machine_of(port) : 0;
+    if (session == nullptr || !session->hosting() || ended || machine == 0 || (unseat_asked & machine) != 0 ||
+        session->roster().seats[port].player != player || player == 0) {
         return false;
     }
-    unseat_asked |= (uint8_t)(1u << port);
+    for (int p = 0; p < netplay::max_players; p++) {
+        if ((machine & (1u << p)) != 0 && swaps[p].spectator >= 0) return false;
+    }
+    // Before the start: at once.
+    if (!match_started) {
+        host_unseated(machine);
+        return session->machine_of(port) == 0;
+    }
+    if (!session->ask_unseat(port)) {
+        return false;
+    }
+    unseat_asked |= machine;
     return true;
 }
 
 void conker::lockstep::claim(int port) {
     std::scoped_lock lock(session_mutex);
-    if (session != nullptr && watching && !ended && !rejoining && port >= 1 && port < match_players) {
+    if (session != nullptr && session->watching() && !ended && !rejoining && port >= 1 && port < match_players) {
         session->claim(port);
     }
 }
 
 void conker::lockstep::step_out() {
     std::scoped_lock lock(session_mutex);
-    if (session != nullptr && !session->hosting() && !ended && !rejoining && std::popcount(own_ports) == 1) {
-        step_out_wanted = true;
+    if (session == nullptr || session->hosting() || ended || rejoining || own_ports == 0) {
+        return;
     }
+    // Before the start: the host makes it a spectator at once (its roster says: moved).
+    if (!match_started) {
+        session->step_out();
+        return;
+    }
+    step_out_wanted = true;
 }
 
 bool conker::lockstep::kick_spectator(int number, uint64_t player) {
@@ -3341,7 +3427,7 @@ conker::lockstep::WaitingRoom conker::lockstep::match_room() {
         seat.ready = true;
         seat.platform = s.platform;
         seat.round_trip_ms = seat.mine || seat.left ? -1 : trips[port];
-        seat.alone = port > 0 && std::count_if(roster.seats.begin(), roster.seats.end(), [&](const netplay::Seat& o) { return o.player == s.player; }) == 1;
+        seat.movable = port > 0 && s.player != roster.seats[0].player;
     }
     add_spectators(room, roster);
     return room;
@@ -3553,16 +3639,17 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         if (read == step_out_at) {
             step_out_wanted = true;
         }
-        if (step_out_wanted && !session->hosting() && std::popcount(own_ports) == 1 && recovery.read == never) {
+        if (step_out_wanted && !session->hosting() && own_ports != 0 && recovery.read == never) {
             step_out_wanted = false;
-            const int port = std::countr_zero(own_ports);
             std::printf("[netplay] read %llu: stepping out of %s to watch, after read %zu\n", (unsigned long long)read,
-                ports_text(own_ports).c_str(), received[port].size() - 1);
+                ports_text(own_ports).c_str(), received[std::countr_zero(own_ports)].size() - 1);
             session->step_out();
+            for (int port = 0; port < conker::netplay::max_players; port++) {
+                if ((own_ports & (1u << port)) != 0) checked[port] = std::max<uint64_t>(checked[port], received[port].size());
+            }
+            stepped_here = own_ports;
             own_ports = 0;
             watching = true;
-            stepped_here = true;
-            checked[port] = std::max<uint64_t>(checked[port], received[port].size());
         }
         session->set_horizon(horizon());
         if (read == claim_at && watching) {

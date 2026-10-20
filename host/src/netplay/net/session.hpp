@@ -61,10 +61,12 @@ namespace conker::netplay {
                         // (via the host for a joiner; Gone: the port gone), or the host's from spectator `spectator`'s (Hash)
             left,       // host: the peer on `ports` (or spectator `spectator`) left or was dropped, for `reason`
             ended,      // joiner: refused, or the connection to the host ended, for `reason`
+            moved,      // joiner, before the start: the host moved this machine to `ports` (none: watching), its roster says
         };
         Type type;
         int port = -1;          // the peer's first port (packet: the Inputs' port, for a joiner)
         int spectator = -1;     // host: joined, left, packet: the peer is that spectator (0 to max_spectators - 1)
+        uint64_t player = 0;    // host: packet: the peer's player id
         uint8_t ports = 0;      // joined, welcomed, left: the peer's ports (bit n: port n)
         int players = 0;
         bool rejoin = false;    // joined, welcomed: into a match under way (coming back, or `late`: a new player)
@@ -210,14 +212,17 @@ namespace conker::netplay {
         // welcome_back brings each of those joiners in: its Rejoin, the inputs since (`since`), and from then on what every
         // peer gets, but Inputs of reads before `inputs_from` (by port: those it has); its state follows (send_state).
         void back(uint8_t ports, uint32_t read, uint8_t late = 0, uint64_t player = 0);
-        // Seat changes in a match (#21). Host: spectator `spectator` is the player on `port` from now on (a free port, or
-        // one held for a player who left: they can't come back to it), as back() with its player id tells everyone (false:
-        // it can't). unseat: the player on `port` (alone on its machine) has stepped out (its Unseat): it's a spectator from
-        // now on, its number returned (-1: none free, or no such player). ask_unseat: asks that player to (false: it can't).
-        // Joiner: claim asks the host for a free port (watching); step_out tells it this machine's player has stepped out
-        // (its inputs end with those sent: one port only), watching from now on; take_seat: the host's Back gave it `ports`.
+        // Seat changes (#21). Host: spectator `spectator` is the player on `port` from now on (a free port, or one held for
+        // a player who left: they can't come back to it), as back() with its player id tells everyone in a match, the roster
+        // before it (false: it can't). unseat: the machine on `ports` (all of a joiner's) has stepped out (its Unseat, or
+        // the host's say before the start): it's a spectator from now on, its number returned (-1: none free, or none
+        // taken, or no such machine). machine_of: the ports of the joiner's machine on `port` (0: none). ask_unseat: asks
+        // that machine to step out (false: it can't). Joiner: claim asks the host for a free port (watching); step_out
+        // tells it this machine's players have stepped out (its inputs end with those sent), watching from now on (before
+        // the start, once the host's roster says so: moved); take_seat: the host's Back gave it `ports`.
         bool seat_spectator(int spectator, int port);
-        int unseat(int port);
+        int unseat(uint8_t ports);
+        uint8_t machine_of(int port) const;
         bool ask_unseat(int port);
         void claim(int port);
         void step_out();
@@ -332,6 +337,7 @@ namespace conker::netplay {
         bool started = false;       // joiner: Start has arrived
         uint8_t own_ports = 0;      // joiner: 0 until welcomed (and as a spectator)
         bool is_welcomed = false;
+        bool stepping_out = false;  // joiner: stepped out before the start, the host's roster not here yet
         int match_players = 0;
         uint64_t horizon = 64;
         std::array<uint64_t, max_players> next_inputs{};   // host: the read each port's next Inputs start at

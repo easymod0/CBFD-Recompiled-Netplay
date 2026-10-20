@@ -39,7 +39,7 @@
 //              (2^32 - 1, or not below read), a pad (as Inputs'), a motion (as Inputs');
 //              u8 open (idle ports, not port 0)
 //  16 Claim    u8 port (1 to 3)                                                        6 bytes
-//  17 Unseat   u8 port (1 to 3)                                                        6 bytes
+//  17 Unseat   u8 ports (bits: some, not port 0)                                       6 bytes
 // A packet of any other size, version or kind, or with any field out of range, is refused.
 
 #include "packets.hpp"
@@ -178,7 +178,7 @@ namespace conker::netplay {
             return p.port >= 1 && p.port < max_players;
         }
         bool valid_fields(const Unseat& p) {
-            return p.port >= 1 && p.port < max_players;
+            return p.ports != 0 && (p.ports & 1) == 0 && (p.ports >> max_players) == 0;
         }
         bool valid_fields(const Rejoin& p) {
             if (p.at < p.read || p.delay_before > max_delay || p.delay_after > max_delay || (p.open & 1) != 0 || (p.open >> max_players) != 0) {
@@ -389,7 +389,7 @@ namespace conker::netplay {
                 w.u8(p.port);
             }
             else if constexpr (std::is_same_v<T, Unseat>) {
-                w.u8(p.port);
+                w.u8(p.ports);
             }
             else if constexpr (std::is_same_v<T, Rejoin>) {
                 w.u32(p.read);

@@ -290,15 +290,17 @@ namespace conker::netplay {
         uint64_t player = 0;
         bool operator==(const Back&) const = default;
     };
-    // Seat changes in a match (#21). Spectator to host: it would take `port` (free: open, or its player's hold over).
+    // Seat changes (#21), before the match or in it. Spectator to host: it would take `port` (free: open, or its player's
+    // hold over).
     struct Claim {
         uint8_t port = 0;
         bool operator==(const Claim&) const = default;
     };
-    // Host to a player (one port, not the host's): step out of `port` to watch. Player to host: it has (asked or not):
-    // its inputs end with those sent before this, and it watches from then on (the host tells the others, Gone's 2).
+    // Host to a joiner's machine: step out of its `ports` (bit n: port n; all it has) to watch. The machine to the host:
+    // it has (asked or not): its inputs end with those sent before this, and it watches from then on (the host tells the
+    // others, Gone's 2). Before the start, nothing's been sent: the host just makes it a spectator.
     struct Unseat {
-        uint8_t port = 0;
+        uint8_t ports = 0;
         bool operator==(const Unseat&) const = default;
     };
     // Host to the player coming back, before the state (StateParts) it loads: the match as it is at read `read`

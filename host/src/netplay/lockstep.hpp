@@ -47,8 +47,9 @@
 //                                every input and sends none, its game a little behind the players' (nobody waits for
 //                                it); joining a match under way, it gets the host's game as a new player does
 //   --netplay-no-spectators      (hosting) take no spectators (by default the match takes up to 8)
-//   --netplay-claim-at <read>:<port>  (a test, watching) asks the host for that free port (2 to 4) at that read
-//   --netplay-step-out-at <read> (a test, joining with one player) steps out at that read, to watch
+//   --netplay-claim-at <read>:<port>  (a test, watching) asks the host for that free port (2 to 4) at that read (0:
+//                                before the start)
+//   --netplay-step-out-at <read> (a test, joining) steps out at that read (0: before the start), every player here, to watch
 //   --netplay-seat-at <read>:<port>:<n>  (a test, hosting) seats spectator <n> (from 1) in that port at that read, as
 //                                the Esc menu's Netplay tab does (its player stepping out first: a swap)
 //   --local-players <n>          (hosting or joining) players on this machine, 1 to 3 (1 by default): each
@@ -224,7 +225,7 @@ namespace conker::lockstep {
         bool mine = false;
         bool left = false;          // in a match: they've left (or were removed)
         bool open = false;          // in a match: nobody has had it (open since the start), free for a new player
-        bool alone = false;         // the only player on their machine (and not the host): can step out, or be swapped
+        bool movable = false;       // on a joiner's machine (not the host's): it can step out, or be swapped
     };
     // A spectator watching: the host's number for it (0 to max_spectators - 1), and who.
     struct Spectator {
@@ -257,10 +258,10 @@ namespace conker::lockstep {
     // The host's: removes spectator `number`, if it's still `player`.
     bool kick_spectator(int number, uint64_t player);
     // Seat changes during a match (#21). The host's: seat puts spectator `spectator` (still `player`) in `port` (free, or
-    // held for a player who left: they can't come back to it; or a player's alone on their machine, who steps out
-    // first: a swap); make_spectator asks the player on `port` (still `player`) to step out and watch. A spectator's:
-    // claim asks the host for a free port. A player's (alone on their machine, not the host): step_out stops playing and
-    // watches, their place open.
+    // held for a player who left: they can't come back to it; or a joiner's, whose machine steps out first: a swap);
+    // make_spectator asks the joiner's machine on `port` (still `player`) to step out and watch. A spectator's: claim
+    // asks the host for a free port. A joiner's: step_out stops playing (every player on this machine) and watches, their
+    // places open. Before the match starts, each is done at once; in it, at the next read.
     bool seat(int port, int spectator, uint64_t player);
     bool make_spectator(int port, uint64_t player);
     void claim(int port);

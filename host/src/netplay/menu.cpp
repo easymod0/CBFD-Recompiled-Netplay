@@ -39,15 +39,16 @@
 // Spectators: Watch (by a code, or on a listed match) joins with nobody playing here: the match is watched, from its
 // start or as it's played, never waited for. The host chooses whether the match takes them (More options), and sees
 // them in the waiting room and the Esc menu's Netplay tab, where it can kick them as it can a player. There, during a match,
-// a spectator can take an open place (Play as), a player alone on their machine can step out to watch (Watch instead),
-// and the host can seat a spectator (Seat as: a free place, or one someone left; Swap with: a player's, who watches) or
-// make a player a spectator.
+// and in the waiting room before it, a spectator can take an open place (Play as), a joiner's players can step out to
+// watch (Watch instead), and the host can seat a spectator (Seat as: a free place, or one someone left; Swap with: a
+// joiner's, whose players watch) or make a joiner's players spectators (all of that machine's).
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <optional>
@@ -624,17 +625,37 @@ namespace {
                 const conker::lockstep::Seat& seat = room.seats[port];
                 recompui::Element* line = row(waiting_box);
                 text(line, "Player " + std::to_string(port + 1), Typography::LabelMD);
+                // (Seat changes before the start: done by the host at once.)
+                const auto room_button = [&](const std::string& label, std::function<void()> act) {
+                    recompui::Button* button = context.create_element<recompui::Button>(line, label, recompui::ButtonStyle::Tertiary);
+                    button->set_white_space(recompui::WhiteSpace::Nowrap);
+                    button->add_pressed_callback([this, act]() {
+                        act();
+                        shown_waiting.clear();
+                        refocus = true;
+                        queue_update();
+                    });
+                };
                 if (seat.player == 0) {
                     text(line, "free", Typography::Body, color::TextDim);
+                    if (room.watching) {
+                        room_button("Play as Player " + std::to_string(port + 1), [port]() { conker::lockstep::claim(port); });
+                    }
                     continue;
                 }
                 text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body);
                 shown_about[port] = seat_text(seat);
                 seat_about[port] = text(line, shown_about[port], Typography::Body, seat.ready ? color::Text : color::TextDim);
                 if (seat.mine) {
+                    if (seat.movable && !room.hosting && room.takes_spectators) {
+                        room_button("Watch instead", []() { conker::lockstep::step_out(); });
+                    }
                     continue;
                 }
                 const uint64_t player = seat.player;
+                if (room.hosting && seat.movable && room.takes_spectators) {
+                    room_button("Make spectator", [port, player]() { conker::lockstep::make_spectator(port, player); });
+                }
                 if (room.hosting) {
                     recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
                     kick->add_pressed_callback([this, port, player]() {
@@ -740,6 +761,22 @@ namespace {
                         refocus = true;
                         queue_update();
                     });
+                    // Into a place: a free one, or a joiner's (whose players watch instead).
+                    for (int port = 1; port < room.players; port++) {
+                        const conker::lockstep::Seat& seat = room.seats[port];
+                        if (seat.player != 0 && !seat.movable) {
+                            continue;
+                        }
+                        recompui::Button* seat_button = context.create_element<recompui::Button>(line,
+                            (seat.player != 0 ? "Swap with Player " : "Seat as Player ") + std::to_string(port + 1), recompui::ButtonStyle::Tertiary);
+                        seat_button->set_white_space(recompui::WhiteSpace::Nowrap);
+                        seat_button->add_pressed_callback([this, port, number = spectator.number, player]() {
+                            conker::lockstep::seat(port, number, player);
+                            shown_waiting.clear();
+                            refocus = true;
+                            queue_update();
+                        });
+                    }
                 }
                 recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
                 block->add_pressed_callback([this, player]() {
@@ -1584,8 +1621,8 @@ namespace {
                 about += !seat.left && seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
                 add_text(line, about, Typography::Body, color::TextDim);
                 if (seat.mine) {
-                    // (A player alone on their machine, not the host, can stop playing and watch.)
-                    if (seat.alone && !room.hosting && room.takes_spectators) {
+                    // (A joiner's players can stop playing and watch.)
+                    if (seat.movable && !room.hosting && room.takes_spectators) {
                         recompui::Button* watch = context.create_element<recompui::Button>(line, "Watch instead", recompui::ButtonStyle::Tertiary);
                         watch->add_pressed_callback([this]() {
                             conker::lockstep::step_out();
@@ -1595,7 +1632,7 @@ namespace {
                     continue;
                 }
                 const uint64_t player = seat.player;
-                if (room.hosting && !seat.left && seat.alone) {
+                if (room.hosting && !seat.left && seat.movable && room.takes_spectators) {
                     recompui::Button* unseat = context.create_element<recompui::Button>(line, "Make spectator", recompui::ButtonStyle::Tertiary);
                     unseat->add_pressed_callback([this, port, player]() {
                         conker::lockstep::make_spectator(port, player);
@@ -1634,10 +1671,10 @@ namespace {
                         conker::lockstep::kick_spectator(number, player);
                         shown.clear();
                     });
-                    // Into a place: a free one, one someone left, or a player's alone on their machine (a swap).
+                    // Into a place: a free one, one someone left, or a joiner's (a swap).
                     for (int port = 1; port < room.players; port++) {
                         const conker::lockstep::Seat& seat = room.seats[port];
-                        if (seat.player != 0 && (!seat.alone || seat.left)) {
+                        if (seat.player != 0 && (!seat.movable || seat.left)) {
                             continue;
                         }
                         const std::string label = (seat.player != 0 && !seat.left ? "Swap with " : "Seat as ") + std::string("Player ") +

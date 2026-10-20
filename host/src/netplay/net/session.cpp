@@ -419,6 +419,13 @@ namespace conker::netplay {
             rollback < 0 || rollback > max_rollback) {
             return false;
         }
+        // (The roster as it is now first: a joiner moved this very poll learns where it is before the Start.)
+        if (const Roster now_roster = roster(); !(now_roster == sent_roster)) {
+            for (const Peer& peer : peers) {
+                if (in(peer)) send_to(peer.connection, now_roster);
+            }
+            sent_roster = now_roster;
+        }
         entry_open = false;
         match_started = true;
         next_inputs.fill(0);
@@ -973,15 +980,19 @@ namespace conker::netplay {
                 return;
             }
             // Seat changes, in the match: a spectator would take a port; a player of one port (not coming in) has stepped out.
+            // (Before the start too: the host makes the change at once.)
+            // (One from a machine the host has moved already is late, not wrong: ignored.)
             else if (const Claim* claim = std::get_if<Claim>(&packet)) {
-                if (peer.spectator < 0 || !peer.in_match || entry_open || claim->port >= match_players) {
+                if (claim->port >= match_players) {
                     drop(peer, Reason::protocol, &events);
+                    return;
+                }
+                if (peer.spectator < 0 || !peer.in_match || closed) {
                     return;
                 }
             }
             else if (const Unseat* unseat = std::get_if<Unseat>(&packet)) {
-                if (peer.ports != (1u << unseat->port) || !peer.in_match || entry_open) {
-                    drop(peer, Reason::protocol, &events);
+                if (peer.port < 0 || peer.ports != unseat->ports || !peer.in_match || closed) {
                     return;
                 }
             }
@@ -992,6 +1003,7 @@ namespace conker::netplay {
             Event event{ Event::Type::packet };
             event.port = peer.port;
             event.spectator = peer.spectator;
+            event.player = peer.player;
             event.packet = packet;
             events.push_back(std::move(event));
             return;
@@ -1033,14 +1045,25 @@ namespace conker::netplay {
             return;
         }
         if (const Roster* roster = std::get_if<Roster>(&packet)) {
-            // The waiting room's, before the start, with this machine's ports in it.
-            bool mine = true;
+            // The waiting room's, with this machine's ports in it. Before the start the host may move it (to a place, or
+            // out of its places to watch): the roster says where it is.
+            uint8_t seats = 0;
             for (int port = 0; port < max_players; port++) {
-                mine = mine && ((own_ports & (1u << port)) == 0 || roster->seats[port].player == hello.player);
+                if (roster->seats[port].player == hello.player) seats |= (uint8_t)(1u << port);
             }
-            if (roster->players != match_players || !mine) {
+            const bool watcher = std::any_of(roster->watchers.begin(), roster->watchers.end(),
+                [&](const Watcher& w) { return w.player == hello.player; });
+            const bool moved = !started && !rejoining && seats != own_ports && (seats != 0) != watcher && (seats & 1) == 0;
+            if (roster->players != match_players || ((seats & own_ports) != own_ports && !moved)) {
                 drop(peer, Reason::protocol, &events);
                 return;
+            }
+            if (moved) {
+                own_ports = seats;
+                stepping_out = false;
+                Event event{ Event::Type::moved };
+                event.ports = own_ports;
+                events.push_back(std::move(event));
             }
             host_roster = *roster;
             return;
@@ -1063,6 +1086,13 @@ namespace conker::netplay {
             return;
         }
         if (const Start* start = std::get_if<Start>(&packet)) {
+            // (Its step-out crossed the Start: it watches, its places open or the host's to fill, and sends nothing.)
+            if (stepping_out && !started) {
+                stepping_out = false;
+                own_ports = 0;
+                Event event{ Event::Type::moved };
+                events.push_back(std::move(event));
+            }
             if (started || rejoining || start->players != match_players || (start->open & own_ports) != 0) {
                 drop(peer, Reason::protocol, &events);
                 return;
@@ -1117,7 +1147,7 @@ namespace conker::netplay {
                 drop(peer, Reason::protocol, &events);
                 return;
             }
-            if (own_ports != (1u << unseat->port)) {
+            if (own_ports != unseat->ports) {
                 return;
             }
             Event event{ Event::Type::packet };
@@ -1337,6 +1367,7 @@ namespace conker::netplay {
                 peer.spectator = -1;
                 peer.port = port;
                 peer.ports = (uint8_t)(1u << port);
+                peer.ready = false;
                 // (Its place is its own now: whoever left it can't come back to it; nor can it to any it left.)
                 left_players[port] = 0;
                 for (uint64_t& held : left_players) {
@@ -1350,23 +1381,32 @@ namespace conker::netplay {
         return false;
     }
 
-    int Session::unseat(int port) {
+    int Session::unseat(uint8_t ports) {
         const int number = takes_spectators() ? free_spectator() : -1;
         for (Peer& peer : peers) {
-            if (number >= 0 && peer.ports == (1u << port) && peer.in_match) {
+            if (number >= 0 && peer.port >= 0 && peer.ports == ports && peer.in_match) {
                 peer.ports = 0;
                 peer.port = -1;
                 peer.spectator = number;
+                peer.ready = false;
                 return number;
             }
         }
         return -1;
     }
 
+    uint8_t Session::machine_of(int port) const {
+        for (const Peer& peer : peers) {
+            if (port >= 1 && peer.port >= 0 && (peer.ports & (1u << port)) != 0) return peer.ports;
+        }
+        return 0;
+    }
+
     bool Session::ask_unseat(int port) {
         for (const Peer& peer : peers) {
-            if (is_host && port >= 1 && peer.ports == (1u << port) && peer.in_match && takes_spectators() && free_spectator() >= 0) {
-                send_to(peer.connection, Unseat{ (uint8_t)port });
+            if (is_host && port >= 1 && peer.port >= 0 && (peer.ports & (1u << port)) != 0 && peer.in_match && takes_spectators() &&
+                free_spectator() >= 0) {
+                send_to(peer.connection, Unseat{ peer.ports });
                 return true;
             }
         }
@@ -1374,15 +1414,17 @@ namespace conker::netplay {
     }
 
     void Session::claim(int port) {
-        if (!is_host && watching() && started && !peers.empty()) {
+        if (!is_host && watching() && !rejoining && !peers.empty()) {
             send_to(peers[0].connection, Claim{ (uint8_t)port });
         }
     }
 
     void Session::step_out() {
-        if (!is_host && std::popcount(own_ports) == 1 && started && !peers.empty()) {
-            send_to(peers[0].connection, Unseat{ (uint8_t)std::countr_zero(own_ports) });
-            own_ports = 0;
+        if (!is_host && own_ports != 0 && is_welcomed && !rejoining && !peers.empty()) {
+            send_to(peers[0].connection, Unseat{ own_ports });
+            // (Before the start the host moves it, and its roster says so.)
+            if (started) own_ports = 0;
+            else stepping_out = true;
         }
     }
 
