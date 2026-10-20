@@ -59,6 +59,9 @@ int main() {
     CHECK(round_trips(Welcome{ 0x0E, 4 }, 11));     // three players on one machine
     CHECK(round_trips(Welcome{ 0x0C, 4, 1, 1, 0x0C, max_rollback }, 11));    // coming back to a match under way
     CHECK(round_trips(Welcome{ 0x08, 4, 2, 0, 0x06, 0 }, 11));      // joining one under way
+    CHECK(round_trips(Welcome{ 0, 3 }, 11));                        // a spectator
+    CHECK(round_trips(Welcome{ 0, 4, 2, 1, 0x06, 4 }, 11));         // ...of a match under way
+    CHECK(round_trips(Hello{ 1, 2, 3, 4, 5, 0, 1, 1 }, 55));        // nobody playing on the joiner: a spectator
     CHECK(round_trips(Refuse{ Reason::rom }, 47));
     CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
     CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
@@ -104,7 +107,6 @@ int main() {
     // Out-of-range fields are neither sent nor accepted.
     CHECK(bytes_of(Welcome{ 0x04, 2 }).empty());    // a port not below players
     CHECK(bytes_of(Welcome{ 0x03, 3 }).empty());    // the host's port 0
-    CHECK(bytes_of(Welcome{ 0, 3 }).empty());       // no port
     CHECK(bytes_of(Welcome{ 0x02, 1 }).empty());    // players below 2
     CHECK(bytes_of(Welcome{ 0x02, 5 }).empty());    // players above 4
     CHECK(bytes_of(Welcome{ 0x02, 2, 3 }).empty());         // rejoin is 0 to 2
@@ -114,7 +116,6 @@ int main() {
     CHECK(bytes_of(Welcome{ 0x02, 2, 1, 0, 0x04 }).empty());        // pairs past the players
     CHECK(bytes_of(Welcome{ 0x02, 3, 1, 0, 0x01 }).empty());        // an odd number of them
     CHECK(bytes_of(Welcome{ 0x02, 2, 1, 0, 0, max_rollback + 1 }).empty());
-    CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 0, 1, 1 }).empty());  // nobody playing on the joiner
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 4, 1, 1 }).empty());  // nobody left for the host
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 0, 1 }).empty());  // no player id
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 1, 0 }).empty());  // no platform
@@ -130,7 +131,7 @@ int main() {
     CHECK(bytes_of(Start{ 3, 0, 0, 0, 0, 0x08 }).empty());     // an open port past the players
     CHECK(bytes_of(Start{ 4, 0, 0, 0x0C, 0, 0x08 }).empty());  // an open port in a pair
     CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
-    CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
+    CHECK(bytes_of(Gone{ 1, 30, 3 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
     CHECK(bytes_of(Refuse{ Reason::build, "a release" }).empty());
@@ -184,7 +185,7 @@ int main() {
     data[5] = 4;
     CHECK(!decodes(data));
     data = gone;
-    data[10] = 2;                                   // silent is 0 or 1
+    data[10] = 3;                                   // silent is 0 to 2
     CHECK(!decodes(data));
     data = hello;
     data[45] = 4;
@@ -246,15 +247,18 @@ int main() {
     roster.seats[0] = { 0x0102030405060708ull, 1, 1, 0 };
     roster.seats[2] = { 9, 2, 0, 0xFFFF };
     roster.rollback = max_rollback;
-    CHECK(round_trips(roster, 57));
+    roster.watchers[1] = { 0x1112131415161718ull, 3 };
+    CHECK(round_trips(roster, 130));
     Roster settings_only;
     settings_only.delay = max_delay;
-    CHECK(round_trips(settings_only, 57));
+    settings_only.spectators = 0;
+    CHECK(round_trips(settings_only, 130));
     CHECK(round_trips(Ready{ 1 }, 6));
     CHECK(round_trips(Ready{ 0 }, 6));
     const std::vector<uint8_t> r = bytes_of(roster);
     CHECK(r[4] == 10 && r[5] == 8 && r[12] == 1 && r[13] == 1 && r[14] == 1 && r[15] == 0 && r[29] == 9 && r[37] == 2 &&
-        r[39] == 0xFF && r[40] == 0xFF && r[53] == 3 && r[54] == 0 && r[55] == auto_delay && r[56] == max_rollback);
+        r[39] == 0xFF && r[40] == 0xFF && r[53] == 3 && r[54] == 0 && r[55] == auto_delay && r[56] == max_rollback && r[57] == 1 &&
+        r[58] == 0 && r[66] == 0 && r[67] == 0x18 && r[74] == 0x11 && r[75] == 3 && r[129] == 0);
     Roster bad_roster = roster; bad_roster.players = 1; CHECK(bytes_of(bad_roster).empty());
     bad_roster = roster; bad_roster.players = 2; CHECK(bytes_of(bad_roster).empty());           // a seat past the players
     bad_roster = roster; bad_roster.seats[1].ready = 1; CHECK(bytes_of(bad_roster).empty());    // a free seat that isn't all zero
@@ -263,13 +267,18 @@ int main() {
     bad_roster = roster; bad_roster.own_view = 2; CHECK(bytes_of(bad_roster).empty());
     bad_roster = roster; bad_roster.delay = max_delay + 1; CHECK(bytes_of(bad_roster).empty());
     bad_roster = roster; bad_roster.rollback = max_rollback + 1; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.spectators = 2; CHECK(bytes_of(bad_roster).empty());
+    bad_roster = roster; bad_roster.watchers[0].platform = 1; CHECK(bytes_of(bad_roster).empty());    // nobody, but not all zero
+    bad_roster = roster; bad_roster.watchers[1].platform = 4; CHECK(bytes_of(bad_roster).empty());
     CHECK(bytes_of(Ready{ 2 }).empty());
     data = r; data[13] = 4; CHECK(!decodes(data));                 // platform past macOS
     data = r; data[17] = 1; CHECK(!decodes(data));                 // seat 1 free, but not all zero
     data = r; data[53] = 5; CHECK(!decodes(data));
     data = r; data[55] = max_delay + 1; CHECK(!decodes(data));
+    data = r; data[57] = 2; CHECK(!decodes(data));
+    data = r; data[75] = 0; CHECK(!decodes(data));                 // a spectator with no platform
     data = bytes_of(Ready{ 1 }); data[5] = 2; CHECK(!decodes(data));
-    data = bytes_of(Refuse{ Reason::kicked }); CHECK(data.size() == 47 && data[5] == last_reason && data[6] == 0);
+    data = bytes_of(Refuse{ Reason::watching }); CHECK(data.size() == 47 && data[5] == last_reason && data[6] == 0);
 
     // Refuse keeps its layout from version 17 on: read in any of them (decode_refusal), a reason this
     // version doesn't know as Reason::version; not in an older one, nor with the padding not zero.
@@ -292,7 +301,7 @@ int main() {
     CHECK(round_trips(Resync{ 0x01020304, 0x0A }, 10));
     data = bytes_of(Resync{ 0x01020304, 0x0A });
     CHECK(data[4] == 12 && data[5] == 4 && data[8] == 1 && data[9] == 0x0A);
-    CHECK(bytes_of(Resync{ 5, 0 }).empty());                        // nobody
+    CHECK(round_trips(Resync{ 5, 0 }, 10));                         // to a spectator alone
     CHECK(bytes_of(Resync{ 5, 1 }).empty());                        // the host
     CHECK(bytes_of(Resync{ 5, 0x10 }).empty());                     // past the ports
     StatePart part{ 900, 100, 40, 0x1122334455667788ull, std::vector<uint8_t>(60, 0xAB) };
@@ -313,8 +322,18 @@ int main() {
     data = bytes_of(part); data.resize(25 + 61); CHECK(!decodes(data));              // past the state's end
 
     // Rejoining: Back, and Rejoin.
-    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 11));
-    CHECK(round_trips(Back{ 0x06, 5, 0x04 }, 11));
+    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 19));
+    CHECK(round_trips(Back{ 0x06, 5, 0x04 }, 19));
+    CHECK(round_trips(Back{ 0x04, 5, 0x04, 0x0102030405060708ull }, 19));     // a spectator taking port 2
+    CHECK(bytes_of(Back{ 0x06, 5, 0x06, 9 }).empty());              // ...one port only
+    CHECK(bytes_of(Back{ 0x04, 5, 0, 9 }).empty());                 // ...as a new player
+    CHECK(round_trips(Claim{ 3 }, 6));
+    CHECK(round_trips(Unseat{ 0x06 }, 6));                          // a machine of two players
+    CHECK(bytes_of(Unseat{ 0 }).empty());
+    CHECK(bytes_of(Unseat{ 1 }).empty());                           // the host's port
+    CHECK(bytes_of(Claim{ 0 }).empty());                            // the host's port
+    CHECK(bytes_of(Unseat{ 0x10 }).empty());
+    CHECK(round_trips(Gone{ 2, 30, 2 }, 11));                       // stepped out to watch
     data = bytes_of(Back{ 0x06, 0x01020304, 0x02 });
     CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1 && data[10] == 0x02);
     CHECK(bytes_of(Back{ 0x06, 5, 0x08 }).empty());                 // a new player not among them

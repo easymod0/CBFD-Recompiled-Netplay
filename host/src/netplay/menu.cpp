@@ -35,12 +35,20 @@
 // only with people the host trusts. The input delay is lockstep's default, the same on every machine.
 //
 // Rollback (--rollback) is the host's choice too, the same for everyone in the match.
+//
+// Spectators: Watch (by a code, or on a listed match) joins with nobody playing here: the match is watched, from its
+// start or as it's played, never waited for. The host chooses whether the match takes them (More options), and sees
+// them in the waiting room and the Esc menu's Netplay tab, where it can kick them as it can a player. There, during a match,
+// and in the waiting room before it, a spectator can take an open place (Play as), a joiner's players can step out to
+// watch (Watch instead), and the host can seat a spectator (Seat as: a free place, or one someone left; Swap with: a
+// joiner's, whose players watch) or make a joiner's players spectators (all of that machine's).
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <optional>
@@ -88,6 +96,7 @@ namespace {
         std::string address;
         bool lan_visible = true;
         int local_players = 1;
+        bool spectators = true;
     };
 
     // The match this player joined last (not one they hosted), to come back to it after the game quit (#21):
@@ -177,6 +186,7 @@ namespace {
                 if (host.contains("address") && host["address"].is_string()) choices.address = host["address"].get<std::string>().substr(0, 64);
                 flag(host, "lan_visible", choices.lan_visible);
                 number(host, "local_players", 1, conker::netplay::max_players - 1, choices.local_players);
+                flag(host, "spectators", choices.spectators);
             }
             if (json.contains("last_match") && json["last_match"].is_object()) {
                 const nlohmann::json& last = json["last_match"];
@@ -202,7 +212,7 @@ namespace {
                 { "host", { { "players", choices.players }, { "public", choices.public_room }, { "input_delay", choices.input_delay },
                     { "rollback", choices.rollback }, { "own_view", choices.own_view }, { "directly", choices.directly },
                     { "port", choices.port }, { "address", choices.address }, { "lan_visible", choices.lan_visible },
-                    { "local_players", choices.local_players } } } };
+                    { "local_players", choices.local_players }, { "spectators", choices.spectators } } } };
             if (!settings.last.code.empty()) {
                 json["last_match"] = { { "code", settings.last.code }, { "local_players", settings.last.local_players },
                     { "started", settings.last.started } };
@@ -325,6 +335,7 @@ namespace {
         recompui::Element* settings_section = nullptr;
         recompui::Button* host_button = nullptr;
         recompui::Button* join_button = nullptr;
+        recompui::Button* watch_button = nullptr;
         recompui::Button* cancel_button = nullptr;
         int players = 2;
         int local_players = 1;              // the players on this computer, hosting or joining
@@ -336,6 +347,8 @@ namespace {
         bool own_view_for_everyone = true;  // hosting: the match's screens rule
         int input_delay = -1;               // hosting: reads, or -1 for auto
         int rollback = 0;                   // hosting: reads predicted, 0 (off) to 12
+        bool spectators = true;             // hosting: the match takes spectators
+        bool watching = false;              // joining (or in) as a spectator
         std::string port_text = std::to_string(default_port);
         std::string address_text;
         std::string join_text;
@@ -427,6 +440,7 @@ namespace {
             if (state == State::idle) {
                 hosting = false;
                 quick = false;
+                watching = false;
                 shown_in = false;
             }
             show_code();
@@ -434,6 +448,7 @@ namespace {
             status_row->set_display(status.empty() && state != State::connecting ? recompui::Display::None : recompui::Display::Flex);
             host_button->set_enabled(state == State::idle);
             join_button->set_enabled(state == State::idle);
+            watch_button->set_enabled(state == State::idle);
             // Nothing in the setup can change a match under way: it's hidden until it's idle again.
             setup_box->set_display(state == State::idle ? recompui::Display::Flex : recompui::Display::None);
             lobby_box->set_display(state == State::idle ? recompui::Display::None : recompui::Display::Flex);
@@ -572,6 +587,9 @@ namespace {
             for (const conker::lockstep::Seat& seat : room.seats) {
                 summary += "|" + std::to_string(seat.player) + (seat.ready ? "R" : "");
             }
+            for (const conker::lockstep::Spectator& spectator : room.spectators) {
+                summary += "|w" + std::to_string(spectator.number) + ":" + std::to_string(spectator.player);
+            }
             if (summary == shown_waiting) {
                 for (size_t port = 0; port < seat_about.size() && port < room.seats.size(); port++) {
                     const std::string about = seat_text(room.seats[port]);
@@ -599,7 +617,7 @@ namespace {
             std::string rules = "Waiting room: " + std::to_string(room.players) + " players, input delay " +
                 (room.delay < 0 ? std::string("auto") : std::to_string(room.delay)) +
                 (room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : ", no rollback") +
-                (room.own_view ? ", everyone sees only their own view" : "");
+                (room.own_view ? ", everyone sees only their own view" : "") + (room.takes_spectators ? "" : ", no spectators");
             text(waiting_box, rules, Typography::LabelMD);
             seat_about.assign(room.players, nullptr);
             shown_about.assign(room.players, "");
@@ -607,17 +625,37 @@ namespace {
                 const conker::lockstep::Seat& seat = room.seats[port];
                 recompui::Element* line = row(waiting_box);
                 text(line, "Player " + std::to_string(port + 1), Typography::LabelMD);
+                // (Seat changes before the start: done by the host at once.)
+                const auto room_button = [&](const std::string& label, std::function<void()> act) {
+                    recompui::Button* button = context.create_element<recompui::Button>(line, label, recompui::ButtonStyle::Tertiary);
+                    button->set_white_space(recompui::WhiteSpace::Nowrap);
+                    button->add_pressed_callback([this, act]() {
+                        act();
+                        shown_waiting.clear();
+                        refocus = true;
+                        queue_update();
+                    });
+                };
                 if (seat.player == 0) {
                     text(line, "free", Typography::Body, color::TextDim);
+                    if (room.watching) {
+                        room_button("Play as Player " + std::to_string(port + 1), [port]() { conker::lockstep::claim(port); });
+                    }
                     continue;
                 }
                 text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body);
                 shown_about[port] = seat_text(seat);
                 seat_about[port] = text(line, shown_about[port], Typography::Body, seat.ready ? color::Text : color::TextDim);
                 if (seat.mine) {
+                    if (seat.movable && !room.hosting && room.takes_spectators && room.spectators.size() < conker::netplay::max_spectators) {
+                        room_button("Watch instead", []() { conker::lockstep::step_out(); });
+                    }
                     continue;
                 }
                 const uint64_t player = seat.player;
+                if (room.hosting && seat.movable && room.takes_spectators) {
+                    room_button("Make spectator", [port, player]() { conker::lockstep::make_spectator(port, player); });
+                }
                 if (room.hosting) {
                     recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
                     kick->add_pressed_callback([this, port, player]() {
@@ -636,8 +674,22 @@ namespace {
                     queue_update();
                 });
             }
-            const char* label = room.hosting ? (room.ready ? "Don't start yet" : "Start when everyone's ready") : (room.ready ? "Not ready" : "Ready");
+            add_spectator_rows(room);
             recompui::Element* buttons = row(waiting_box);
+            if (room.watching) {
+                // A spectator has nothing to be ready for: it watches once the players start.
+                recompui::Button* leave = context.create_element<recompui::Button>(buttons, "Leave", recompui::ButtonStyle::Tertiary);
+                leave->set_as_primary_focus();
+                leave->add_pressed_callback([this]() { on_cancel("You left the room."); });
+                if (arrived || refocus) {
+                    leave->focus();
+                }
+                refocus = false;
+                text(waiting_box, "You're watching: the match starts once the players are ready. Nobody waits for you, and "
+                    "your controllers play nothing.", Typography::Body, color::TextDim);
+                return;
+            }
+            const char* label = room.hosting ? (room.ready ? "Don't start yet" : "Start when everyone's ready") : (room.ready ? "Not ready" : "Ready");
             recompui::Button* ready = context.create_element<recompui::Button>(buttons, label,
                 room.ready ? recompui::ButtonStyle::Secondary : recompui::ButtonStyle::Primary);
             // Where a controller goes when someone coming or going made the room again under its focus.
@@ -683,6 +735,58 @@ namespace {
                 "removes a player; Block keeps them out of your matches from now on." :
                 "The match starts once every place is taken and every player is ready (the host too). Block keeps a player "
                 "out of your matches from now on (you leave a room they're in).", Typography::Body, color::TextDim);
+        }
+
+        // The waiting room's spectators, a row each (the host can kick them; anyone can block them).
+        void add_spectator_rows(const conker::lockstep::WaitingRoom& room) {
+            using recompui::theme::Typography;
+            using recompui::theme::color;
+            recompui::ContextId context = recompui::get_current_context();
+            for (const conker::lockstep::Spectator& spectator : room.spectators) {
+                recompui::Element* line = row(waiting_box);
+                text(line, "Watching", Typography::LabelMD);
+                text(line, spectator.name + (spectator.mine ? " (you)" : ""), Typography::Body);
+                if (!platform_name(spectator.platform).empty()) {
+                    text(line, platform_name(spectator.platform), Typography::Body, color::TextDim);
+                }
+                if (spectator.mine) {
+                    continue;
+                }
+                const uint64_t player = spectator.player;
+                if (room.hosting) {
+                    recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
+                    kick->add_pressed_callback([this, number = spectator.number, player]() {
+                        conker::lockstep::kick_spectator(number, player);
+                        shown_waiting.clear();
+                        refocus = true;
+                        queue_update();
+                    });
+                    // Into a place: a free one, or a joiner's (whose players watch instead).
+                    for (int port = 1; port < room.players; port++) {
+                        const conker::lockstep::Seat& seat = room.seats[port];
+                        if (seat.player != 0 && !seat.movable) {
+                            continue;
+                        }
+                        recompui::Button* seat_button = context.create_element<recompui::Button>(line,
+                            (seat.player != 0 ? "Swap with Player " : "Seat as Player ") + std::to_string(port + 1), recompui::ButtonStyle::Tertiary);
+                        seat_button->set_white_space(recompui::WhiteSpace::Nowrap);
+                        seat_button->add_pressed_callback([this, port, number = spectator.number, player]() {
+                            conker::lockstep::seat(port, number, player);
+                            shown_waiting.clear();
+                            refocus = true;
+                            queue_update();
+                        });
+                    }
+                }
+                recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
+                block->add_pressed_callback([this, player]() {
+                    block_player(player);
+                    settings.blocked = load_settings().blocked;
+                    shown_waiting.clear();
+                    refocus = true;
+                    queue_update();
+                });
+            }
         }
 
         // Through the server (hosting a room public if `listed`): false (and says why) if none is set.
@@ -823,6 +927,7 @@ namespace {
             text(line, room.name, recompui::theme::Typography::LabelMD);
             std::string about = std::to_string(room.joined) + " of " + std::to_string(room.players) + " players";
             about += room.playing ? ", playing" : "";
+            about += room.watching > 0 ? ", " + std::to_string(room.watching) + " watching" : "";
             about += room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : "";
             about += box == lan_box ? "" : room.direct ? ", direct allowed" : ", relay only";
             if (room.other_build) {
@@ -846,13 +951,25 @@ namespace {
                     on_join();
                 });
             }
+            if (!room.other_build && room.spectators) {
+                recompui::Button* watch_room = context.create_element<recompui::Button>(line, "Watch", recompui::ButtonStyle::Tertiary);
+                watch_room->add_pressed_callback([this, code]() {
+                    if (state != State::idle) {
+                        return;
+                    }
+                    join_text = code;
+                    join_input->set_text(code);
+                    on_join(true);
+                });
+            }
         }
 
         // This network's matches as they are now, made again when that changes.
         void show_lan(const std::vector<conker::lockstep::ListedRoom>& matches) {
             std::string summary;
             for (const conker::lockstep::ListedRoom& room : matches) {
-                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "");
+                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + "w" +
+                    std::to_string(room.watching) + (room.spectators ? "s" : "");
             }
             // Nothing yet for the first 2 s: a host's beacon comes once a second.
             const bool listening = matches.empty() && std::chrono::steady_clock::now() - lan_since < std::chrono::seconds(2);
@@ -883,7 +1000,8 @@ namespace {
             }
             std::string summary = std::to_string(list.others) + " " + std::to_string(list.older);
             for (const conker::lockstep::ListedRoom& room : list.rooms) {
-                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + (room.other_build ? "o" : "");
+                summary += "|" + room.code + " " + std::to_string(room.joined) + (room.playing ? "p" : "") + (room.other_build ? "o" : "") +
+                    "w" + std::to_string(room.watching) + (room.spectators ? "s" : "");
             }
             if (summary == shown_rooms) {
                 return;
@@ -930,16 +1048,17 @@ namespace {
                 return;
             }
             settings.host = HostChoices{ players, public_room, input_delay, rollback, own_view_for_everyone, host_directly,
-                host_directly ? port : settings.host.port, trimmed(address_text), lan_visible, local_players };
+                host_directly ? port : settings.host.port, trimmed(address_text), lan_visible, local_players, spectators };
             save();
-            conker::lockstep::set_host(port, players, own_view_for_everyone, input_delay, local_players, rollback);
+            conker::lockstep::set_host(port, players, own_view_for_everyone, input_delay, local_players, rollback, spectators);
             conker::lockstep::set_lan(host_directly && lan_visible);
             hosting = true;
             begin();
             show_code();
         }
 
-        void on_join() {
+        // `watch`: as a spectator, with nobody playing here.
+        void on_join(bool watch = false) {
             if (join_text.find_first_not_of(' ') == std::string::npos) {
                 set_state(State::idle, "Type the host's room code or join code first.");
                 return;
@@ -954,7 +1073,8 @@ namespace {
             }
             settings.host.local_players = local_players;
             save();
-            conker::lockstep::set_join(join_text, local_players);
+            conker::lockstep::set_join(join_text, watch ? 0 : local_players);
+            watching = watch;
             begin();
         }
 
@@ -966,7 +1086,7 @@ namespace {
             }
             settings.host.local_players = local_players;
             save();
-            conker::lockstep::set_quick(local_players + 1, true, -1, local_players, 0);
+            conker::lockstep::set_quick(local_players + 1, true, -1, local_players, 0, settings.host.spectators);
             quick = true;
             begin();
         }
@@ -979,6 +1099,7 @@ namespace {
             std::string about = input_delay < 0 ? "Input delay auto" : "Input delay " + std::to_string(input_delay);
             about += rollback > 0 ? ", rollback " + std::to_string(rollback) : ", no rollback";
             about += own_view_for_everyone ? ", everyone sees only their own view" : ", players choose their screen";
+            about += spectators ? ", spectators welcome" : ", no spectators";
             about += !host_directly ? ", through the server" : lan_visible ? ", without a server, visible on this network" :
                 ", without a server";
             advanced_summary->set_text(about + ".");
@@ -1038,8 +1159,10 @@ namespace {
                         set_state(State::idle, status);
                         break;
                     case conker::lockstep::Progress::started:
-                        // Joined (not hosted): Rejoin last match, should the game quit or lose the host.
-                        remember_match(conker::lockstep::joined_code(), local_players);
+                        // Joined (not hosted) to play: Rejoin last match, should the game quit or lose the host.
+                        if (!watching) {
+                            remember_match(conker::lockstep::joined_code(), local_players);
+                        }
                         set_state(State::starting, "Starting the game...");
                         conker::harness::begin_menu_match([](const std::string& why) {
                             std::lock_guard lock(over_mutex);
@@ -1114,6 +1237,7 @@ namespace {
             input_delay = choices.input_delay;
             rollback = choices.rollback;
             own_view_for_everyone = choices.own_view;
+            spectators = choices.spectators;
             host_directly = choices.directly;
             port_text = std::to_string(choices.port);
             address_text = choices.address;
@@ -1191,6 +1315,8 @@ namespace {
             });
             join_button = context.create_element<recompui::Button>(join_row, "Join", recompui::ButtonStyle::Secondary);
             join_button->add_pressed_callback([this]() { on_join(); });
+            watch_button = context.create_element<recompui::Button>(join_row, "Watch", recompui::ButtonStyle::Tertiary);
+            watch_button->add_pressed_callback([this]() { on_join(true); });
             clipboard_hint = text(join, "The code on your clipboard: press Join to join it.", Typography::Body, color::TextDim);
             clipboard_hint->set_display(recompui::Display::None);
             recompui::Element* public_row = row(join);
@@ -1277,6 +1403,18 @@ namespace {
                 own_view_for_everyone = index == 0;
                 show_advanced();
             });
+            recompui::Element* spectators_row = row(advanced_box);
+            text(spectators_row, "Spectators", Typography::LabelMD);
+            recompui::Radio* spectators_radio = context.create_element<recompui::Radio>(spectators_row);
+            spectators_radio->add_option("Welcome");
+            spectators_radio->add_option("None");
+            spectators_radio->set_index(spectators ? 0 : 1);
+            spectators_radio->add_index_changed_callback([this](uint32_t index) {
+                spectators = index == 0;
+                show_advanced();
+            });
+            text(advanced_box, "Up to 8 people can watch the match with Watch, from its start or as it's played. They see "
+                "every player's view, and nobody waits for them.", Typography::Body, color::TextDim);
             recompui::Element* through_row = row(advanced_box);
             text(through_row, "Host", Typography::LabelMD);
             recompui::Radio* through_radio = context.create_element<recompui::Radio>(through_row);
@@ -1449,11 +1587,14 @@ namespace {
             add_text(left, std::to_string(room.players) + " players, input delay " + std::to_string(room.delay) +
                 (room.rollback > 0 ? ", rollback " + std::to_string(room.rollback) : "") +
                 (room.own_view ? ", everyone sees only their own view" : ""), Typography::Body);
-            add_text(left, "The match goes on while this menu is open: your player stands still until you close it.",
-                Typography::Body, color::TextDim);
+            add_text(left, room.watching ? "You're watching: nobody waits for you, and your controllers play nothing." :
+                "The match goes on while this menu is open: your player stands still until you close it.", Typography::Body, color::TextDim);
             add_text(left, room.hosting ? "Kick removes a player: their place plays on, idle. Block also keeps them out of your "
-                "matches from now on." : "Block keeps a player out of your matches from now on.", Typography::Body, color::TextDim);
-            recompui::Button* leave = context.create_element<recompui::Button>(left, "Leave match", recompui::ButtonStyle::Danger);
+                "matches from now on. A spectator can take a free place, or one someone left (they can't come back to it), or swap "
+                "with a player, who watches from then on." : room.watching ? "Play as takes a free place: you play it from a moment later." :
+                "Block keeps a player out of your matches from now on.", Typography::Body, color::TextDim);
+            recompui::Button* leave = context.create_element<recompui::Button>(left, room.watching ? "Stop watching" : "Leave match",
+                recompui::ButtonStyle::Danger);
             leave->add_pressed_callback([]() { conker::lockstep::leave_match(); });
             for (int port = 0; port < room.players; port++) {
                 const conker::lockstep::Seat& seat = room.seats[port];
@@ -1465,6 +1606,14 @@ namespace {
                 add_text(line, "Player " + std::to_string(port + 1), Typography::LabelMD);
                 if (seat.player == 0) {
                     add_text(line, seat.open ? "open" : seat.left ? "left" : "not known", Typography::Body, color::TextDim);
+                    if (room.watching && seat.open) {
+                        recompui::Button* play = context.create_element<recompui::Button>(line, "Play as Player " + std::to_string(port + 1),
+                            recompui::ButtonStyle::Secondary);
+                        play->add_pressed_callback([this, port]() {
+                            conker::lockstep::claim(port);
+                            shown.clear();
+                        });
+                    }
                     continue;
                 }
                 add_text(line, seat.name + (seat.mine ? " (you)" : ""), Typography::Body, seat.left ? color::TextDim : color::Text);
@@ -1472,15 +1621,70 @@ namespace {
                 about += !seat.left && seat.round_trip_ms >= 0 ? ", " + std::to_string(seat.round_trip_ms) + " ms" : "";
                 add_text(line, about, Typography::Body, color::TextDim);
                 if (seat.mine) {
+                    // (A joiner's players can stop playing and watch.)
+                    if (seat.movable && !room.hosting && room.takes_spectators && room.spectators.size() < conker::netplay::max_spectators) {
+                        recompui::Button* watch = context.create_element<recompui::Button>(line, "Watch instead", recompui::ButtonStyle::Tertiary);
+                        watch->add_pressed_callback([this]() {
+                            conker::lockstep::step_out();
+                            shown.clear();
+                        });
+                    }
                     continue;
                 }
                 const uint64_t player = seat.player;
+                if (room.hosting && !seat.left && seat.movable && room.takes_spectators) {
+                    recompui::Button* unseat = context.create_element<recompui::Button>(line, "Make spectator", recompui::ButtonStyle::Tertiary);
+                    unseat->add_pressed_callback([this, port, player]() {
+                        conker::lockstep::make_spectator(port, player);
+                        shown.clear();
+                    });
+                }
                 if (room.hosting && !seat.left) {
                     recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
                     kick->add_pressed_callback([this, port, player]() {
                         conker::lockstep::kick(port, player);
                         shown.clear();
                     });
+                }
+                recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
+                block->add_pressed_callback([this, player]() {
+                    block_player(player);
+                    shown.clear();
+                });
+            }
+            for (const conker::lockstep::Spectator& spectator : room.spectators) {
+                recompui::Element* line = context.create_element<recompui::Element>(right);
+                line->set_display(recompui::Display::Flex);
+                line->set_flex_direction(recompui::FlexDirection::Row);
+                line->set_align_items(recompui::AlignItems::Center);
+                line->set_gap(16.0f);
+                add_text(line, "Watching", Typography::LabelMD);
+                add_text(line, spectator.name + (spectator.mine ? " (you)" : ""), Typography::Body);
+                add_text(line, platform_name(spectator.platform), Typography::Body, color::TextDim);
+                if (spectator.mine) {
+                    continue;
+                }
+                const uint64_t player = spectator.player;
+                if (room.hosting) {
+                    recompui::Button* kick = context.create_element<recompui::Button>(line, "Kick", recompui::ButtonStyle::Tertiary);
+                    kick->add_pressed_callback([this, number = spectator.number, player]() {
+                        conker::lockstep::kick_spectator(number, player);
+                        shown.clear();
+                    });
+                    // Into a place: a free one, one someone left, or a joiner's (a swap).
+                    for (int port = 1; port < room.players; port++) {
+                        const conker::lockstep::Seat& seat = room.seats[port];
+                        if (seat.player != 0 && (!seat.movable || seat.left)) {
+                            continue;
+                        }
+                        const std::string label = (seat.player != 0 && !seat.left ? "Swap with " : "Seat as ") + std::string("Player ") +
+                            std::to_string(port + 1);
+                        recompui::Button* seat_button = context.create_element<recompui::Button>(line, label, recompui::ButtonStyle::Tertiary);
+                        seat_button->add_pressed_callback([this, port, number = spectator.number, player]() {
+                            conker::lockstep::seat(port, number, player);
+                            shown.clear();
+                        });
+                    }
                 }
                 recompui::Button* block = context.create_element<recompui::Button>(line, "Block", recompui::ButtonStyle::Tertiary);
                 block->add_pressed_callback([this, player]() {
@@ -1499,8 +1703,12 @@ namespace {
             }
             const conker::lockstep::WaitingRoom room = conker::lockstep::match_room();
             std::string summary = room.in ? "in" : "";
+            summary += room.watching ? "w" : "";
             for (const conker::lockstep::Seat& seat : room.seats) {
-                summary += "|" + std::to_string(seat.player) + (seat.left ? "L" : "") + std::to_string(seat.round_trip_ms / 10);
+                summary += "|" + std::to_string(seat.player) + (seat.left ? "L" : "") + (seat.open ? "O" : "") + std::to_string(seat.round_trip_ms / 10);
+            }
+            for (const conker::lockstep::Spectator& spectator : room.spectators) {
+                summary += "|w" + std::to_string(spectator.number) + ":" + std::to_string(spectator.player);
             }
             if (summary != shown) {
                 shown = summary;

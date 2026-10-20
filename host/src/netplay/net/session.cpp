@@ -29,8 +29,9 @@ namespace conker::netplay {
         // A joiner that hasn't finished the handshake in this long is dropped (an honest Hello takes a
         // round trip).
         constexpr double handshake_seconds = 3.0;
-        // Connections the host takes at once, joined or not: more are turned away unread.
-        constexpr size_t max_connections = 8;
+        // Connections the host takes at once, joined or not: more are turned away unread (the players and
+        // spectators, and a few on their way in).
+        constexpr size_t max_connections = max_players - 1 + max_spectators + 4;
         // What the library buffers from one peer, unread: a message bigger than the largest packet closes
         // the connection before it's buffered, and past these limits more are dropped (and resent, as
         // everything is sent reliably). An honest peer is never more than a few dozen messages ahead.
@@ -388,7 +389,7 @@ namespace conker::netplay {
         // A joiner still finding its way to the host: ended if the host isn't on the server, or the server
         // can't be reached. (Once connected, the signaller doesn't matter to it.)
         const std::vector<uint64_t> gone = signaller->unreachable();
-        if (!is_host && !peers.empty() && own_ports == 0) {
+        if (!is_host && !peers.empty() && !is_welcomed) {
             std::string why;
             if (std::find(gone.begin(), gone.end(), ice_host) != gone.end()) {
                 why = "the host isn't on the signalling server";
@@ -418,6 +419,13 @@ namespace conker::netplay {
             rollback < 0 || rollback > max_rollback) {
             return false;
         }
+        // (The roster as it is now first: a joiner moved this very poll learns where it is before the Start.)
+        if (const Roster now_roster = roster(); !(now_roster == sent_roster)) {
+            for (const Peer& peer : peers) {
+                if (in(peer)) send_to(peer.connection, now_roster);
+            }
+            sent_roster = now_roster;
+        }
         entry_open = false;
         match_started = true;
         next_inputs.fill(0);
@@ -427,11 +435,27 @@ namespace conker::netplay {
         match_rollback = start.rollback;
         match_open = start.open;
         for (const Peer& peer : peers) {
-            if (peer.port >= 0) {
+            if (in(peer)) {
                 send_to(peer.connection, start);
             }
         }
         return true;
+    }
+
+    uint8_t Session::spectators() const {
+        uint8_t out = 0;
+        for (const Peer& peer : peers) {
+            if (peer.spectator >= 0) out |= (uint8_t)(1u << peer.spectator);
+        }
+        return out;
+    }
+
+    int Session::free_spectator() const {
+        const uint8_t taken = spectators();
+        for (int n = 0; n < max_spectators; n++) {
+            if ((taken & (1u << n)) == 0) return n;
+        }
+        return -1;
     }
 
     uint8_t Session::free_ports() const {
@@ -513,11 +537,12 @@ namespace conker::netplay {
     }
 
     int Session::arriving() const {
-        return (int)std::count_if(peers.begin(), peers.end(), [](const Peer& p) { return p.port < 0; });
+        return (int)std::count_if(peers.begin(), peers.end(), [](const Peer& p) { return !in(p); });
     }
 
-    void Session::set_room_settings(bool own_view, int delay, int rollback) {
+    void Session::set_room_settings(bool own_view, int delay, int rollback, bool spectators) {
         settings.own_view = own_view ? 1 : 0;
+        settings.spectators = spectators ? 1 : 0;
         settings.delay = delay < 0 ? auto_delay : (uint8_t)(std::min)(delay, max_delay);
         settings.rollback = (uint8_t)std::clamp(rollback, 0, max_rollback);
     }
@@ -526,19 +551,30 @@ namespace conker::netplay {
         if (is_host) {
             own_ready = ready;
         }
-        else if (own_ports != 0 && !started && !peers.empty()) {
+        else if (is_welcomed && own_ports != 0 && !started && !peers.empty()) {
             send_to(peers[0].connection, Ready{ (uint8_t)(ready ? 1 : 0) });
         }
     }
 
-    bool Session::kick(int port) {
+    bool Session::kick(int port, bool keep_out) {
         if (!is_host || port < 0 || port >= max_players) {
             return false;
         }
         for (Peer& peer : peers) {
             if (peer.port >= 0 && (peer.ports & (1u << port)) != 0) {
-                // (Not back in this match, as a new player either.)
-                if (match_started) kicked.push_back(peer.player);
+                // (Not back in this match, as a new player either.) Not kept out: it leaves as one quitting.
+                if (match_started && keep_out) kicked.push_back(peer.player);
+                drop(peer, keep_out ? Reason::kicked : Reason::quit, &pending_events);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool Session::kick_spectator(int spectator, uint64_t player, bool keep_out) {
+        for (Peer& peer : peers) {
+            if (is_host && spectator >= 0 && peer.spectator == spectator && (player == 0 || peer.player == player)) {
+                if (match_started && keep_out) kicked.push_back(peer.player);
                 drop(peer, Reason::kicked, &pending_events);
                 return true;
             }
@@ -559,6 +595,9 @@ namespace conker::netplay {
         };
         seat(own_ports, { hello.player, hello.platform, (uint8_t)(own_ready ? 1 : 0), 0 });
         for (const Peer& peer : peers) {
+            if (peer.spectator >= 0) {
+                r.watchers[peer.spectator] = { peer.player, peer.platform };
+            }
             if (peer.port < 0) continue;
             SteamNetConnectionRealTimeStatus_t status;
             uint16_t trip = 0xFFFF;
@@ -599,9 +638,9 @@ namespace conker::netplay {
             case k_ESteamNetworkingConnectionState_Connecting:
                 // Someone connecting to the host: taken in, to say Hello (or be refused) within the time.
                 if (is_host && info->m_info.m_hListenSocket == listen_socket) {
-                    // Once the match has started, only a player who left it coming back, or a new one with a port free
-                    // (its Hello says which): else turned away at once, not held until their Hello.
-                    if (!entry_open && (closed || (free_ports() == 0 &&
+                    // Once the match has started, only a player who left it coming back, a new one with a port free, or a
+                    // spectator with room for one (its Hello says which): else turned away at once, not held until their Hello.
+                    if (!entry_open && (closed || (free_ports() == 0 && (!takes_spectators() || free_spectator() < 0) &&
                         std::all_of(left_players.begin(), left_players.end(), [](uint64_t p) { return p == 0; })))) {
                         sockets->CloseConnection(info->m_hConn, k_ESteamNetConnectionEnd_App_Min + (int)Reason::started, "started", false);
                         return;
@@ -645,7 +684,8 @@ namespace conker::netplay {
                 for (const char* c = info->m_info.m_szEndDebug; *c != '\0'; c++) {
                     event.detail += (*c >= 0x20 && *c < 0x7F) ? *c : '?';
                 }
-                if (!is_host || peer->port >= 0) {
+                event.spectator = peer->spectator;
+                if (!is_host || in(*peer)) {
                     pending_events.push_back(std::move(event));
                 }
                 if (is_host) {
@@ -694,7 +734,7 @@ namespace conker::netplay {
             }
             if (!(without_trips == sent_without) || t >= next_roster) {
                 for (const Peer& peer : peers) {
-                    if (peer.port >= 0) send_to(peer.connection, now_roster);
+                    if (in(peer)) send_to(peer.connection, now_roster);
                 }
                 sent_roster = now_roster;
                 next_roster = t + 2.0;
@@ -711,7 +751,7 @@ namespace conker::netplay {
         }
         // Joiners that never said Hello.
         for (size_t i = 0; i < peers.size();) {
-            if (is_host && peers[i].port < 0 && peers[i].up && t - peers[i].connected_at > handshake_seconds) {
+            if (is_host && !in(peers[i]) && peers[i].up && t - peers[i].connected_at > handshake_seconds) {
                 drop(peers[i], Reason::timeout, &events);
             }
             else {
@@ -742,7 +782,7 @@ namespace conker::netplay {
                 return;
             }
         }
-        if (other_version && is_host && peer->port < 0) {
+        if (other_version && is_host && !in(*peer)) {
             // A joiner of another version: refused as any other, so it reads which release this is.
             refuse(*peer, Reason::version);
             return;
@@ -766,7 +806,7 @@ namespace conker::netplay {
 
     void Session::handle(Peer& peer, const Packet& packet, std::vector<Event>& events) {
         if (is_host) {
-            if (peer.port < 0) {
+            if (!in(peer)) {
                 const Hello* theirs = std::get_if<Hello>(&packet);
                 if (theirs == nullptr) {
                     drop(peer, Reason::protocol, &events);
@@ -790,6 +830,34 @@ namespace conker::netplay {
                 else if (std::find(blocked.begin(), blocked.end(), theirs->player) != blocked.end() ||
                     std::find(kicked.begin(), kicked.end(), theirs->player) != kicked.end() || theirs->player == hello.player) {
                     refusal = Reason::kicked;
+                }
+                // A spectator (nobody playing): if the host takes them and has room, whenever the match is (not after it).
+                if (!refusal && theirs->players == 0) {
+                    // (Not as someone in the match: their id is theirs, and a spectator's kick would keep them out. A player
+                    // who left may watch, their place held for them all the same.)
+                    const bool someone = std::any_of(peers.begin(), peers.end(), [&](const Peer& p) { return in(p) && p.player == theirs->player; });
+                    if (someone) {
+                        refuse(peer, Reason::kicked);
+                        return;
+                    }
+                    const int number = free_spectator();
+                    if (!takes_spectators() || closed || number < 0) {
+                        refuse(peer, !takes_spectators() ? Reason::watching : closed ? Reason::started : Reason::full);
+                        return;
+                    }
+                    peer.spectator = number;
+                    peer.player = theirs->player;
+                    peer.platform = theirs->platform;
+                    peer.in_match = entry_open;
+                    peer.late = !entry_open;
+                    send_to(peer.connection, entry_open ? Welcome{ 0, (uint8_t)match_players }
+                        : Welcome{ 0, (uint8_t)match_players, 2, match_own_view, match_pairs, match_rollback });
+                    Event event{ Event::Type::joined };
+                    event.spectator = number;
+                    event.players = match_players;
+                    event.rejoin = event.late = !entry_open;
+                    events.push_back(std::move(event));
+                    return;
                 }
                 // Under way: a player who left it, back to their ports (as many players), not too often; or a new one
                 // (late), on free ports (below).
@@ -903,6 +971,7 @@ namespace conker::netplay {
                 Event event{ Event::Type::left };
                 event.port = peer.port;
                 event.ports = peer.ports;
+                event.spectator = peer.spectator;
                 event.reason = bye->reason;
                 SteamNetworkingSockets()->CloseConnection(peer.connection, 0, nullptr, false);
                 remember(peer, bye->reason);
@@ -910,26 +979,51 @@ namespace conker::netplay {
                 events.push_back(std::move(event));
                 return;
             }
+            // Seat changes, in the match: a spectator would take a port; a player of one port (not coming in) has stepped out.
+            // (Before the start too: the host makes the change at once.)
+            // (One from a machine the host has moved already is late, not wrong: ignored.)
+            else if (const Claim* claim = std::get_if<Claim>(&packet)) {
+                if (claim->port >= match_players) {
+                    drop(peer, Reason::protocol, &events);
+                    return;
+                }
+                if (peer.spectator < 0 || !peer.in_match || closed) {
+                    return;
+                }
+            }
+            else if (const Unseat* unseat = std::get_if<Unseat>(&packet)) {
+                // (Before the start, answered at once, whatever the host makes of it: the roster that follows says where
+                // the machine is, and it knows to go by it, its step-out not crossing the Start unknown.)
+                if (entry_open && !closed) {
+                    send_to(peer.connection, *unseat);
+                }
+                if (peer.port < 0 || peer.ports != unseat->ports || !peer.in_match || closed) {
+                    return;
+                }
+            }
             else if (!std::holds_alternative<Hash>(packet)) {
                 drop(peer, Reason::protocol, &events);
                 return;
             }
             Event event{ Event::Type::packet };
             event.port = peer.port;
+            event.spectator = peer.spectator;
+            event.player = peer.player;
             event.packet = packet;
             events.push_back(std::move(event));
             return;
         }
 
         // A joiner, from the host.
-        if (own_ports == 0) {
+        if (!is_welcomed) {
             const Welcome* welcome = std::get_if<Welcome>(&packet);
             if (welcome != nullptr && std::popcount(welcome->ports) == hello.players) {
                 own_ports = welcome->ports;
+                is_welcomed = true;
                 match_players = welcome->players;
                 rejoining = welcome->rejoin != 0;
                 Event event{ Event::Type::welcomed };
-                event.port = std::countr_zero(own_ports);
+                event.port = own_ports == 0 ? -1 : std::countr_zero(own_ports);
                 event.ports = own_ports;
                 event.players = match_players;
                 event.rejoin = rejoining;
@@ -956,14 +1050,25 @@ namespace conker::netplay {
             return;
         }
         if (const Roster* roster = std::get_if<Roster>(&packet)) {
-            // The waiting room's, before the start, with this machine's ports in it.
-            bool mine = true;
+            // The waiting room's, with this machine's ports in it. Before the start the host may move it (to a place, or
+            // out of its places to watch): the roster says where it is.
+            uint8_t seats = 0;
             for (int port = 0; port < max_players; port++) {
-                mine = mine && ((own_ports & (1u << port)) == 0 || roster->seats[port].player == hello.player);
+                if (roster->seats[port].player == hello.player) seats |= (uint8_t)(1u << port);
             }
-            if (roster->players != match_players || !mine) {
+            const bool watcher = std::any_of(roster->watchers.begin(), roster->watchers.end(),
+                [&](const Watcher& w) { return w.player == hello.player; });
+            const bool moved = !started && !rejoining && seats != own_ports && (seats != 0) != watcher && (seats & 1) == 0;
+            if (roster->players != match_players || ((seats & own_ports) != own_ports && !moved)) {
                 drop(peer, Reason::protocol, &events);
                 return;
+            }
+            if (moved) {
+                own_ports = seats;
+                stepping_out = false;
+                Event event{ Event::Type::moved };
+                event.ports = own_ports;
+                events.push_back(std::move(event));
             }
             host_roster = *roster;
             return;
@@ -986,6 +1091,15 @@ namespace conker::netplay {
             return;
         }
         if (const Start* start = std::get_if<Start>(&packet)) {
+            // (Its step-out crossed the Start: it watches, its places open or the host's to fill, and sends nothing.)
+            if (stepping_out && !started) {
+                stepping_out = false;
+                Event event{ Event::Type::moved };
+                event.late = true;      // (its places go idle in the match: Gone)
+                event.port = own_ports;
+                own_ports = 0;
+                events.push_back(std::move(event));
+            }
             if (started || rejoining || start->players != match_players || (start->open & own_ports) != 0) {
                 drop(peer, Reason::protocol, &events);
                 return;
@@ -1030,6 +1144,26 @@ namespace conker::netplay {
             }
             Event event{ Event::Type::packet };
             event.port = gone->port;
+            event.packet = packet;
+            events.push_back(std::move(event));
+        }
+        else if (const Unseat* unseat = std::get_if<Unseat>(&packet)) {
+            // Before the start: the host's answer to its step-out (its roster says where it is). In the match: asked to
+            // step out. (One for ports it no longer has is late, not wrong: it has stepped out already, or been seated
+            // again since.)
+            if (!started) {
+                stepping_out = false;
+                return;
+            }
+            if (rejoining) {
+                drop(peer, Reason::protocol, &events);
+                return;
+            }
+            if (own_ports != unseat->ports) {
+                return;
+            }
+            Event event{ Event::Type::packet };
+            event.port = 0;
             event.packet = packet;
             events.push_back(std::move(event));
         }
@@ -1117,10 +1251,11 @@ namespace conker::netplay {
         send_to(peer.connection, Bye{ reason });
         SteamNetworkingSockets()->CloseConnection(peer.connection, k_ESteamNetConnectionEnd_App_Min + (int)reason,
             describe(reason), true);
-        if (events != nullptr && (!is_host || peer.port >= 0)) {
+        if (events != nullptr && (!is_host || in(peer))) {
             Event event{ is_host ? Event::Type::left : Event::Type::ended };
             event.port = peer.port;
             event.ports = peer.ports;
+            event.spectator = peer.spectator;
             event.reason = reason;
             events->push_back(std::move(event));
         }
@@ -1166,7 +1301,7 @@ namespace conker::netplay {
     }
 
     void Session::send_inputs(const Peer& peer, const Inputs& inputs) {
-        if (peer.port < 0 || !peer.in_match) {
+        if (!in(peer) || !peer.in_match) {
             return;
         }
         const uint32_t from = peer.inputs_from[inputs.port];
@@ -1199,7 +1334,7 @@ namespace conker::netplay {
 
     void Session::send(const Hash& hash) {
         for (const Peer& peer : peers) {
-            if (peer.port >= 0 && peer.in_match) {
+            if (in(peer) && peer.in_match) {
                 send_to(peer.connection, hash);
             }
         }
@@ -1207,7 +1342,7 @@ namespace conker::netplay {
 
     void Session::send(const Gone& gone) {
         for (const Peer& peer : peers) {
-            if (peer.port >= 0 && peer.in_match) {
+            if (in(peer) && peer.in_match) {
                 send_to(peer.connection, gone);
             }
         }
@@ -1215,28 +1350,108 @@ namespace conker::netplay {
 
     void Session::send(const Resync& resync) {
         for (const Peer& peer : peers) {
-            if (peer.port >= 0 && peer.in_match) {
+            if (in(peer) && peer.in_match) {
                 send_to(peer.connection, resync);
             }
         }
     }
 
-    void Session::back(uint8_t ports, uint32_t read, uint8_t late) {
+    void Session::back(uint8_t ports, uint32_t read, uint8_t late, uint64_t player) {
         for (int p = 0; p < max_players; p++) {
             if ((ports & (1u << p)) != 0) next_inputs[p] = read;
         }
         for (const Peer& peer : peers) {
-            if (peer.port >= 0 && peer.in_match) {
-                send_to(peer.connection, Back{ ports, read, late });
+            if (in(peer) && peer.in_match) {
+                send_to(peer.connection, Back{ ports, read, late, player });
             }
         }
     }
 
-    void Session::welcome_back(uint8_t ports, const Rejoin& rejoin, const std::vector<Inputs>& since,
+    bool Session::seat_spectator(int spectator, int port) {
+        if (!is_host || closed || port < 1 || port >= match_players || ((free_ports() & (1u << port)) == 0 && left_players[port] == 0)) {
+            return false;
+        }
+        for (const Peer& other : peers) {
+            if ((other.ports & (1u << port)) != 0) return false;
+        }
+        for (Peer& peer : peers) {
+            if (peer.spectator == spectator && peer.in_match) {
+                peer.spectator = -1;
+                peer.port = port;
+                peer.ports = (uint8_t)(1u << port);
+                peer.ready = false;
+                // (Its place is its own now: whoever left it can't come back to it; nor can it to any it left.)
+                left_players[port] = 0;
+                for (uint64_t& held : left_players) {
+                    if (held == peer.player) held = 0;
+                }
+                peer.late = false;
+                peer.played = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int Session::unseat(uint8_t ports) {
+        const int number = takes_spectators() ? free_spectator() : -1;
+        for (Peer& peer : peers) {
+            if (number >= 0 && peer.port >= 0 && peer.ports == ports && peer.in_match) {
+                peer.ports = 0;
+                peer.port = -1;
+                peer.spectator = number;
+                peer.ready = false;
+                return number;
+            }
+        }
+        return -1;
+    }
+
+    uint8_t Session::machine_of(int port) const {
+        for (const Peer& peer : peers) {
+            if (port >= 1 && peer.port >= 0 && (peer.ports & (1u << port)) != 0) return peer.ports;
+        }
+        return 0;
+    }
+
+    bool Session::ask_unseat(int port) {
+        for (const Peer& peer : peers) {
+            if (is_host && port >= 1 && peer.port >= 0 && (peer.ports & (1u << port)) != 0 && peer.in_match && takes_spectators() &&
+                free_spectator() >= 0) {
+                send_to(peer.connection, Unseat{ peer.ports });
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Session::claim(int port) {
+        if (!is_host && watching() && !rejoining && !peers.empty()) {
+            send_to(peers[0].connection, Claim{ (uint8_t)port });
+        }
+    }
+
+    void Session::step_out() {
+        if (!is_host && own_ports != 0 && is_welcomed && !rejoining && !peers.empty()) {
+            send_to(peers[0].connection, Unseat{ own_ports });
+            // (Before the start the host moves it, and its roster says so.)
+            if (started) own_ports = 0;
+            else stepping_out = true;
+        }
+    }
+
+    void Session::take_seat(uint8_t ports) {
+        if (!is_host && watching()) {
+            own_ports = ports;
+        }
+    }
+
+    void Session::welcome_back(uint8_t ports, uint8_t spectators, const Rejoin& rejoin, const std::vector<Inputs>& since,
         const std::array<uint32_t, max_players>& inputs_from) {
         for (Peer& peer : peers) {
-            // (Each machine of those coming back.)
-            if (peer.port < 0 || peer.in_match || (peer.ports & ports) == 0) {
+            // (Each machine of those coming back, and each spectator coming in.)
+            const bool watching = peer.spectator >= 0 && (spectators & (1u << peer.spectator)) != 0;
+            if (!in(peer) || peer.in_match || ((peer.ports & ports) == 0 && !watching)) {
                 continue;
             }
             send_to(peer.connection, rejoin);
@@ -1248,9 +1463,10 @@ namespace conker::netplay {
         }
     }
 
-    void Session::send_state(uint8_t ports, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash) {
+    void Session::send_state(uint8_t ports, uint8_t spectators, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash) {
         for (Peer& peer : peers) {
-            if (peer.port < 0 || !peer.in_match || (peer.ports & ports) == 0) {
+            const bool watching = peer.spectator >= 0 && (spectators & (1u << peer.spectator)) != 0;
+            if (!in(peer) || !peer.in_match || ((peer.ports & ports) == 0 && !watching)) {
                 continue;
             }
             set_send_rate(peer.connection, true);
@@ -1263,9 +1479,17 @@ namespace conker::netplay {
         }
     }
 
+    void Session::resync_spectators(uint8_t spectators, uint32_t read) {
+        for (const Peer& peer : peers) {
+            if (peer.spectator >= 0 && peer.in_match && (spectators & (1u << peer.spectator)) != 0) {
+                send_to(peer.connection, Resync{ read, 0 });
+            }
+        }
+    }
+
     void Session::send(const Delay& delay) {
         for (const Peer& peer : peers) {
-            if (peer.port >= 0 && peer.in_match) {
+            if (in(peer) && peer.in_match) {
                 send_to(peer.connection, delay);
             }
         }

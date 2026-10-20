@@ -5,7 +5,7 @@
 //   a moment, and for a few seconds each, what happened: "Player 3 left.", "Player 3 stopped answering (they
 //   may have quit).", "Everyone else has left: the match goes on here."; "Getting the host's game... 40%" while a
 //   desync is set right here (desync recovery)
-// - with General: Netplay Details on, in the bottom-right corner: the input delay, how far ahead of the others
+// - with General: Netplay Details on, in the bottom-right corner: the input delay (a spectator: Watching), how far ahead of the others
 //   this machine is (or behind), and each player's round trip (a joiner knows only the host's: the others'
 //   pads come through it), or that they're on this machine or left.
 //
@@ -182,7 +182,7 @@ namespace {
             where = status.ahead > 0 ? frames_text(status.ahead) + " ahead"
                 : status.ahead < 0 ? frames_text(-status.ahead) + " behind" : "level with the others";
         }
-        lines[0] = "Input delay " + std::to_string(status.input_delay) + " | " + where;
+        lines[0] = (status.watching ? std::string("Watching") : "Input delay " + std::to_string(status.input_delay)) + " | " + where;
         for (int port = 0; port < status.players && port < conker::netplay::max_players; port++) {
             std::string what;
             if ((status.own_ports & (1u << port)) != 0) what = "here";

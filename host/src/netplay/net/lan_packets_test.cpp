@@ -34,12 +34,12 @@ namespace {
 }
 
 int main() {
-    const Beacon beacon{ 0x0102030405060708ull, Platform::windows, 27015, 0x1112131415161718ull, 4, 2, false, 8 };
+    const Beacon beacon{ 0x0102030405060708ull, Platform::windows, 27015, 0x1112131415161718ull, 4, 2, false, 8, 5, true };
     const std::vector<uint8_t> data = bytes_of(beacon);
     CHECK(data.size() == beacon_size && decode(data) && *decode(data) == beacon);
     CHECK(data[0] == 'C' && data[1] == 'L' && data[2] == version && data[3] == 0 && data[4] == 8 && data[12] == 2 &&
-        data[13] == (27015 & 255) && data[14] == (27015 >> 8) && data[15] == 0x18 && data[23] == 4 && data[24] == 2 && data[25] == 0 &&
-        data[26] == 8);
+        data[13] == (27015 & 255) && data[14] == (27015 >> 8) && data[15] == 0x18 && data[23] == 4 && data[24] == 2 && data[25] == 2 &&
+        data[26] == 8 && data[27] == 5);
     const Beacon playing{ 1, Platform::last, 1, 1, (uint8_t)max_players, (uint8_t)max_players, true, max_rollback };
     CHECK(decode(bytes_of(playing)) == playing);
 
@@ -54,6 +54,7 @@ int main() {
     bad = beacon; bad.joined = 0; CHECK(bytes_of(bad).empty());
     bad = beacon; bad.joined = 5; CHECK(bytes_of(bad).empty());
     bad = beacon; bad.rollback = max_rollback + 1; CHECK(bytes_of(bad).empty());
+    bad = beacon; bad.watching = conker::netplay::max_spectators + 1; CHECK(bytes_of(bad).empty());
 
     // Refused: another magic, version or size; every field out of range.
     std::vector<uint8_t> b = data; b[1] = 'S'; CHECK(!decodes(b));
@@ -70,7 +71,8 @@ int main() {
     b = data; b[23] = max_players + 1; CHECK(!decodes(b));
     b = data; b[24] = 0; CHECK(!decodes(b));
     b = data; b[24] = 5; CHECK(!decodes(b));
-    b = data; b[25] = 2; CHECK(!decodes(b));                                  // an unknown flag
+    b = data; b[25] = 4; CHECK(!decodes(b));                                  // an unknown flag
+    b = data; b[27] = conker::netplay::max_spectators + 1; CHECK(!decodes(b));
     b = data; b[26] = max_rollback + 1; CHECK(!decodes(b));
 
     if (failures == 0) {

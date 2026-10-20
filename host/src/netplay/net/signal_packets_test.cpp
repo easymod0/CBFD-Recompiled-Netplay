@@ -216,6 +216,7 @@ int main() {
 
     // Version 6: a room's release (and other_build, in a list), the ROM's hash in Publish and ListRooms, Rooms' older.
     {
+        testing_as = 6;
         ListedRoom r6 = room;
         r6.release = "v0.1.6-netplay.15";
         CHECK(round_trips(Publish{ 1, 2, 3, Platform::windows, r6 }, 30 + 21 + 17));
@@ -260,6 +261,28 @@ int main() {
         CHECK(size == 8 + 2 * 20 && back && std::get<Rooms>(*back).older == 0 && std::get<Rooms>(*back).rooms[1].release.empty() &&
             !std::get<Rooms>(*back).rooms[1].other_build);
         CHECK(encode(Publish{ 1, 2, 3, Platform::windows, r6 }, buffer, 5) == 42);
+        testing_as = version;
+    }
+
+    // Version 7: how many watch a room, and whether it takes spectators (flags' bit 3); dropped going to 6.
+    {
+        ListedRoom r7 = room;
+        r7.release = "v0.1.6-netplay.22";
+        r7.watching = 3;
+        r7.spectators = true;
+        CHECK(round_trips(Publish{ 1, 2, 3, Platform::windows, r7 }, 30 + 22 + 17));
+        const std::vector<uint8_t> p7 = bytes_of(Publish{ 1, 2, 3, Platform::windows, r7 });
+        CHECK((p7[40] & 8) != 0 && p7.back() == 3);
+        CHECK(round_trips(Rooms{ 4, 5, { r7, r7 } }, 10 + 2 * 39));
+        ListedRoom bad7 = r7;
+        bad7.watching = conker::netplay::max_spectators + 1; CHECK(bytes_of(Publish{ 1, 2, 3, Platform::windows, bad7 }).empty());
+        std::vector<uint8_t> bad = p7; bad.back() = conker::netplay::max_spectators + 1; CHECK(!decodes(bad));
+        bad = p7; bad[40] |= 16; CHECK(!decodes(bad));                                             // an unknown flag
+        bad = p7; bad.pop_back(); CHECK(!decodes(bad));
+        uint8_t buffer[max_packet_size];
+        const size_t size = encode(Rooms{ 0, 0, { r7 } }, buffer, 6);
+        const std::optional<Packet> back = decode({ buffer, size }, 6);
+        CHECK(size == 10 + 21 + 17 && back && std::get<Rooms>(*back).rooms[0].watching == 0 && !std::get<Rooms>(*back).rooms[0].spectators);
     }
 
     // Older versions: the same kinds as they were, but none that came later; a version not spoken is refused.
