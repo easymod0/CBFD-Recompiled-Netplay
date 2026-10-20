@@ -10,6 +10,7 @@
 # (the release workflow sets its tag, e.g. v0.1.6-netplay.15), or else "<version>-dev-<short commit>", with
 # "-dirty" if there are changes. It isn't part of the id: a release and a local build of its commit play
 # together.
+# A release build fails if the tree has changes: an id with "-dirty-" wouldn't match another platform's.
 # The file is rewritten only when the id or the name changes, so nothing is rebuilt otherwise.
 #   cmake -DSOURCE_DIR=<repo> -DOUT=<file> -P build_id.cmake
 file(READ "${SOURCE_DIR}/host/src/main.cpp" main_source)
@@ -47,6 +48,13 @@ else()
         string(SUBSTRING "${changes_hash}" 0 16 changes_hash)
         string(APPEND id "-dirty-${changes_hash}")
         string(APPEND release "-dirty")
+        # A release (CONKER_RELEASE set, below) is built from its commit alone: with changes, each
+        # platform's build would have its own id and refuse the others'.
+        if (DEFINED ENV{CONKER_RELEASE})
+            execute_process(COMMAND git status --short --untracked-files=all --ignore-submodules=dirty
+                WORKING_DIRECTORY "${SOURCE_DIR}" OUTPUT_VARIABLE changed ERROR_QUIET)
+            message(FATAL_ERROR "A release's tree has changes, so its build id would be its own:\n${changed}")
+        endif()
     endif()
 endif()
 # Printable, no spaces, 1 to 40 characters (signal_packets.hpp's max_release): anything else isn't used.

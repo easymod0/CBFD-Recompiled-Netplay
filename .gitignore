@@ -28,3 +28,16 @@ __pycache__/
 /.claude/
 /.venv/
 /tools/macos/
+# The fork's release workflow (.github/workflows/netplay-release.yml): its caches, the ROM's clone, the
+# checks' logs and the packages. Untracked files make the netplay build id "dirty" (build_id.cmake), and
+# a cache differs on each platform: a Windows and a Linux release wouldn't play together.
+/.ccache/
+/ccache-bin/
+/vcpkg-cache/
+/rom-src/
+/package/
+/netplay-check/
+/netplay-rollback/
+/netplay-rollback-modes/
+/netplay-spectators/
+/notes.md
