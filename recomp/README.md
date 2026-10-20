@@ -667,6 +667,11 @@ levels, one closer when nearly still) and stores the level at +0x1C8, so he
 flipped between levels 0, 1 and 2 as the camera pulled back and as he started and
 stopped walking; a hook sets the level to 0 for him before it's compared with his
 last. The multiplayer arenas (`D_800BE616`) keep the original's level 1.
+Shadows are smoothed (`shadow_smoothing.cpp`): `func_15184368`
+casts each shadow from a point it moves 0.3 of the way (`D_800A7354`) toward the
+nearest dynamic light (`D_800DCD78`) each time, and a fire's light hops a couple
+of hundred units every few frames, so the shadow snapped from side to side; a
+hook makes the step 0.06, so it sways instead and turns over to the next light.
 `patches/` holds the headers recompui includes for the
 game-side patch code that mods will use. `null_renderer.cpp` is used with
 `--headless`, and in a build configured with `-DCONKER_RT64=OFF` (no window, input

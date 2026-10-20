@@ -99,6 +99,8 @@ yourself instead, read on.
   lights (the bar's lantern, the N64 logo), drawn as on the N64.
 - **Conker's Detail** keeps Conker on his most detailed model, and **Show FPS**
   puts a frame rate counter in the corner.
+- Shadows ease toward the light they're cast from, instead of snapping about with
+  flickering lights.
 - Achievements, the program's own, for reaching the game's scenes.
 - ROM hacks that only change the game's assets, such as the uncensored ROM and the
   Russian, German and Brazilian Portuguese translations, with the launcher switching
