@@ -187,7 +187,16 @@ tries=2
 relay nat-three-lossy 3 --reads 150 --loss 20
 tries=
 # The status page: during a match through the relay (30 s, so coturn's metrics are read at least once), it says
-# how many relays coturn has open; and never an address.
+# how many relays coturn has open, more than before it (the matches before may have left some for a while); and
+# never an address.
+before=-1
+i=0
+while [ $i -lt 100 ] && [ "$before" -lt 0 ]; do
+    before=$(curl -s "http://127.0.0.1:$STATUS_PORT/status.json" | sed -n 's/.*"relay":{"offered":true,"known":true,"open":\([0-9]*\).*/\1/p')
+    [ -n "$before" ] || before=-1
+    [ "$before" -ge 0 ] || sleep 0.2
+    i=$((i + 1))
+done
 "$probe" host room --players 2 $ice --reads 900 > status-match.host.txt 2>&1 &
 pids=$!
 room=$(room_of status-match.host.txt)
@@ -197,7 +206,8 @@ ok=0
 i=0
 while [ $i -lt 150 ]; do
     curl -s "http://127.0.0.1:$STATUS_PORT/status.json" > status-match.json.txt
-    grep -q '"relay":{"offered":true,"known":true,"open":[1-9]' status-match.json.txt && { ok=1; break; }
+    open=$(sed -n 's/.*"relay":{"offered":true,"known":true,"open":\([0-9]*\).*/\1/p' status-match.json.txt)
+    [ -n "$open" ] && [ "$before" -ge 0 ] && [ "$open" -gt "$before" ] && { ok=1; break; }
     sleep 0.2
     i=$((i + 1))
 done
@@ -205,8 +215,8 @@ counted=$ok
 for pid in $pids; do
     wait "$pid" || { ok=0; echo "status: the match through the relay failed"; cat status-match.host.txt status-match.join.txt; }
 done
-[ $counted -eq 1 ] || { echo "status: the relays weren't counted"; cat status-match.json.txt; $compose logs signal | tail -n 5; }
-grep -q -e "$TEST_PUBLIC_IP" -e "$TEST_IP" -e "$room" status-match.json.txt && { ok=0; echo "status: an address or the room code shown"; }
+[ $counted -eq 1 ] || { echo "status: the relays weren't counted ($before before)"; cat status-match.json.txt; $compose logs signal | tail -n 5; }
+grep -q -F -e "$TEST_PUBLIC_IP" -e "$TEST_IP" -e "$room" status-match.json.txt && { ok=0; echo "status: an address or the room code shown"; }
 check nat-status $ok
 # The menu's connection test: the server, and its relay working (through it to itself). Whether direct
 # connections would work isn't checked here: this machine's packets straight to a relay port are dropped.

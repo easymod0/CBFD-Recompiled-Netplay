@@ -117,6 +117,10 @@ int main() {
     CHECK(!parse_turn_metrics("<html>not metrics</html>"));
     CHECK(!parse_turn_metrics(""));
     CHECK(!parse_turn_metrics("turn_total_allocations{type=\"UDP\"} -3\n"));
+    // A timestamp after the value (the format allows one), and labels with spaces in them.
+    const auto stamped = parse_turn_metrics("turn_total_allocations{type=\"UDP\"} 3 1729440000000\n"
+                                            "turn_total_allocations{type=\"a b\"} 2\nturn_total_traffic_sentb 7 1729440000000\n");
+    CHECK(stamped && stamped->allocations == 5 && stamped->bytes == 7);
 
     // Requests.
     const std::string page = respond("GET / HTTP/1.1\r\nHost: nas:27180\r\n", s);
@@ -130,6 +134,7 @@ int main() {
     CHECK(respond("POST / HTTP/1.1\r\n", s).starts_with("HTTP/1.1 405 "));
     CHECK(respond("hello", s).starts_with("HTTP/1.1 400 "));
     CHECK(respond("GET /\r\n", s).starts_with("HTTP/1.1 400 "));
+    CHECK(respond("GET /status.txt HTTP/1.1\nHost: x\n", s).starts_with("HTTP/1.1 200 "));   // lines ending in a bare LF
 
     if (failures == 0) {
         std::printf("server_status_test: passed\n");

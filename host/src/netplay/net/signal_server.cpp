@@ -658,7 +658,9 @@ namespace {
     }
 
     // The status's HTTP listener (--status): each request read, answered (server_status.hpp's respond) and the
-    // connection closed. A few at once, each with a few seconds to say what it wants: it's for one operator.
+    // connection closed. A few at once, each with a few seconds to say what it wants: it's for one operator. It
+    // never keeps the signalling from starting: a port it can't have yet (taken, or an address that isn't up yet,
+    // a VPN's at boot) is tried again every 30 s.
     struct StatusPage {
         static constexpr size_t max_clients = 16;
         static constexpr size_t max_request = 8192;
@@ -673,8 +675,12 @@ namespace {
             double closing_at = 0;  // all sent: what's left of the request is read and dropped for a moment, so
                                     // closing doesn't reset the connection before the answer is read
         };
+        static constexpr double retry_seconds = 30.0;
         Socket listener = no_socket;
         std::vector<Client> clients;
+        std::optional<sockaddr_in> wanted;
+        double retry_at = 0;
+        bool warned = false;
 
         bool open(const sockaddr_in& at) {
             listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -695,8 +701,23 @@ namespace {
         }
 
         void poll(const Server& state) {
-            if (listener == no_socket) return;
             const double t = now();
+            if (listener == no_socket) {
+                if (!wanted || t < retry_at) return;
+                retry_at = t + retry_seconds;
+                const int port = (int)ntohs(wanted->sin_port);
+                if (!open(*wanted)) {
+                    if (!warned) {
+                        std::printf("netplay_server: couldn't serve the status on TCP port %d (taken, or its address isn't up yet): "
+                                    "trying again every %d s\n", port, (int)retry_seconds);
+                        std::fflush(stdout);
+                        warned = true;
+                    }
+                    return;
+                }
+                std::printf("netplay_server: status on TCP port %d (/, /status.json, /status.txt)\n", port);
+                std::fflush(stdout);
+            }
             for (int i = 0; i < 16; i++) {
                 const Socket s = accept(listener, nullptr, nullptr);
                 if (s == no_socket) break;
@@ -717,7 +738,8 @@ namespace {
                         c.since = -1e9;     // gone, or broken: closed below
                         continue;
                     }
-                    const size_t head_end = c.in.find("\r\n\r\n");
+                    size_t head_end = c.in.find("\r\n\r\n");
+                    if (head_end == std::string::npos) head_end = c.in.find("\n\n");     // (a request typed by hand)
                     if (head_end != std::string::npos || c.in.size() >= max_request) {
                         c.out = status::respond(std::string_view(c.in).substr(0, head_end), state.snapshot());
                     }
@@ -854,10 +876,12 @@ int main(int argc, char** argv) {
             continue;
         }
         if (arg == "--status" || arg == "--turn-metrics") {
+            // (Both optional: a mistake in one is said, and the signalling runs without it.)
             const std::optional<sockaddr_in> at = ipv4_endpoint(argv[++i]);
             if (!at) {
-                std::fprintf(stderr, "netplay_server: %s takes an IPv4 address and a port: 0.0.0.0:27180, 127.0.0.1:9641\n", arg.c_str());
-                return 2;
+                std::fprintf(stderr, "netplay_server: %s takes an IPv4 address and a port (0.0.0.0:27180, 127.0.0.1:9641), not \"%s\": "
+                                     "going without it\n", arg.c_str(), argv[i]);
+                continue;
             }
             (arg == "--status" ? status_at : metrics_at) = at;
             continue;
@@ -894,14 +918,12 @@ int main(int argc, char** argv) {
     std::signal(SIGPIPE, SIG_IGN);
 #endif
     if ((status_at || metrics_at) && !start_sockets()) {
-        std::fprintf(stderr, "netplay_server: no sockets\n");
-        return 1;
+        std::fprintf(stderr, "netplay_server: no sockets for the status and coturn's metrics: going without them\n");
+        status_at.reset();
+        metrics_at.reset();
     }
     StatusPage page;
-    if (status_at && !page.open(*status_at)) {
-        std::fprintf(stderr, "netplay_server: couldn't serve the status on TCP port %d\n", (int)ntohs(status_at->sin_port));
-        return 1;
-    }
+    page.wanted = status_at;
     TurnMetricsReader metrics;
     if (metrics_at) {
         metrics.at = *metrics_at;
@@ -932,10 +954,8 @@ int main(int argc, char** argv) {
     std::printf("netplay_server: listening on UDP port %d (signalling versions %u to %u)%s\n", port, (unsigned)signal::oldest_version,
         (unsigned)state.newest_version,
         state.turn.empty() ? ", no TURN relay" : ", offering a TURN relay");
-    if (status_at) {
-        std::printf("netplay_server: status on TCP port %d (/, /status.json, /status.txt)\n", (int)ntohs(status_at->sin_port));
-    }
     std::fflush(stdout);
+    page.poll(state);   // the status's port, at once (said if it's served, or not yet)
 
     double next_report = now() + 600;
     double next_expiry = now();

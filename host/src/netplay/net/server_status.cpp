@@ -253,9 +253,16 @@ namespace conker::netplay::status {
             const size_t name_end = line.find_first_of("{ ");
             if (name_end == std::string_view::npos) continue;
             const std::string_view name = line.substr(0, name_end);
-            const size_t space = line.rfind(' ');
-            if (space == std::string_view::npos || space + 1 >= line.size()) continue;
-            const std::string value(line.substr(space + 1));
+            // The value is the first word after the labels (a timestamp may follow it).
+            size_t value_at = name_end;
+            if (line[name_end] == '{') {
+                value_at = line.find('}', name_end);
+                if (value_at == std::string_view::npos) continue;
+                value_at++;
+            }
+            value_at = line.find_first_not_of(' ', value_at);
+            if (value_at == std::string_view::npos) continue;
+            const std::string value(line.substr(value_at, line.find(' ', value_at) - value_at));
             char* parsed_end = nullptr;
             const double v = std::strtod(value.c_str(), &parsed_end);
             if (parsed_end == value.c_str() || !(v >= 0) || v > 1e18) continue;
@@ -272,7 +279,7 @@ namespace conker::netplay::status {
     }
 
     std::string respond(std::string_view head, const Status& status) {
-        const size_t line_end = head.find("\r\n");
+        const size_t line_end = head.find_first_of("\r\n");
         const std::string_view line = head.substr(0, line_end);
         const size_t first = line.find(' ');
         const size_t second = first == std::string_view::npos ? std::string_view::npos : line.find(' ', first + 1);
