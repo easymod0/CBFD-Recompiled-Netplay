@@ -14,7 +14,9 @@
 //   netplay_probe test [--signal <server:port>] [--lan-port 27016]
 //     --reads <n>        how many reads each peer sends (300: 10 s)
 //     --local <n>        players on this peer, each with a port (1 by default)
-//     --loss <percent>   the library drops this share of the packets sent (they're resent)
+//     --loss <percent>   once its match starts, the library drops this share of the packets this one sends
+//                        (they're resent); not while connecting, where the library's 10 s to connect would
+//                        now and then run out
 //     --build/--rom/--profile/--mods <hex>   the handshake's hashes (all 1 by default), to test refusals
 //     --silent           connect but never say Hello: the host must drop it after its handshake time
 //     --oversize         connect and send a message bigger than any packet: the library must close it
@@ -403,9 +405,6 @@ int main(int argc, char** argv) {
         shutdown();
         return list_result;
     }
-    if (loss > 0) {
-        SteamNetworkingUtils()->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, loss);
-    }
     int result = 1;
     {
         // Through a room on the server: registered there first, then the host makes its room and a joiner
@@ -501,6 +500,7 @@ int main(int argc, char** argv) {
             std::map<int, Received> received;   // by port
             int joined = local;                 // the host counts its own
             bool playing = false;               // started: all the ports are taken
+            bool lossy = false;                 // --loss on (once playing)
             // A public room: listed as it is now (again as that changes; unchanged, nothing is sent).
             const auto list_room = [&] {
                 if (listed && hosting && room != 0) {
@@ -621,6 +621,12 @@ int main(int argc, char** argv) {
                     playing = true;
                     std::printf("started after %.1f s%s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
                         own_view ? " (own view)" : "");
+                }
+                // The library's made-up loss is for every connection of this process (it can't be had for one), and
+                // this process is one peer: so it starts with the match, all connected.
+                if (playing && loss > 0 && !lossy) {
+                    SteamNetworkingUtils()->SetGlobalConfigValueFloat(k_ESteamNetworkingConfig_FakePacketLoss_Send, loss);
+                    lossy = true;
                 }
                 // Every 1/30 s once the match has started: the next read's pad.
                 const auto now = std::chrono::steady_clock::now();

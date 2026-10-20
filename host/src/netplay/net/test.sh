@@ -1,8 +1,9 @@
 #!/bin/sh
 # Tests the netplay transport from a build of this folder (CMakeLists.txt): the packets' and join codes'
 # tests, then matches between copies of netplay_probe over loopback (2 players; 3 with 20% of packets
-# lost, which also tests the host passing inputs on; 3 and 4 with two players on the host or on a joiner,
-# also lossy; a joiner with more players than ports left, which must be refused), joiners with another match's key, another ROM or
+# lost once the match starts, which also tests the host passing inputs on; 3 and 4 with two players on
+# the host or on a joiner, also lossy; a joiner with more players than ports left, which must be
+# refused), joiners with another match's key, another ROM or
 # other mods, which must be refused, a joiner kicked or kept out (the host's block list), the host waiting
 # for everyone to be Ready, joiners sending Inputs early or far ahead or a Hash twice, which
 # must be dropped, as must one sending Inputs for a port that isn't its own; a spectator (all the pads, none of its own: one
@@ -68,8 +69,8 @@ match two 27200 2 --reads 150 --own-view 1
 if grep -q "started (own view)" two.join1.txt; then echo "own view: passed"; else echo "own view: FAILED"; failed=1; fi
 match three-lossy 27201 3 --reads 150 --loss 20
 
-# couch <name> <port> <players> <host's players here> <each joiner's...>: a lossy match with more than one
-# player on some machines (joiners started half a second apart); all must succeed.
+# couch <name> <port> <players> <host's players here> <each joiner's...>: a match with more than one
+# player on some machines, lossy once started (joiners started half a second apart); all must succeed.
 couch() {
     name=$1; port=$2; players=$3; host_local=$4; shift 4
     "$probe" host "$port" --players "$players" --local "$host_local" --reads 150 --loss 20 > "$name.host.txt" 2>&1 &
@@ -95,7 +96,7 @@ couch() {
 couch couch-host 27210 3 2 1
 grep -q "welcomed: ports 4 of 3" couch-host.join1.txt || { echo "couch-host: the joiner isn't on port 2"; failed=1; }
 couch couch-join 27211 4 1 2 1
-# Lowest free ports first, in the order the handshakes finish (with lost packets, either joiner may be first).
+# Lowest free ports first, in the order the handshakes finish (either joiner may be first).
 if ! { grep -q "welcomed: ports 6 of 4" couch-join.join1.txt && grep -q "welcomed: ports 8 of 4" couch-join.join2.txt; } &&
    ! { grep -q "welcomed: ports c of 4" couch-join.join1.txt && grep -q "welcomed: ports 2 of 4" couch-join.join2.txt; }; then
     echo "couch-join: the joiners' ports aren't the lowest free ones"
@@ -247,7 +248,7 @@ elif [ "${LAN_BROADCAST:-0}" = 1 ]; then echo "lan-broadcast: FAILED (the broadc
 else echo "lan-broadcast: not heard (a firewall here may keep broadcasts out; LAN_BROADCAST=1 requires it)"; fi
 kill $lan_host 2>/dev/null
 
-# Through ICE: the server, then a host makes a room and two joiners join by its code, lossy.
+# Through ICE: the server, then a host makes a room and two joiners join by its code, lossy once the match starts.
 # (Every probe connects from the same address: more than the server lets one make in a burst, or have at once.)
 "$bin/netplay_server" --port 27220 --connection-burst 1000 --max-per-address 32 --max-listed-per-address 3 --desync-burst 8 \
     --status 127.0.0.1:27224 > ice.server.txt 2>&1 &
