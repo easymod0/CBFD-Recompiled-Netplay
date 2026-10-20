@@ -1200,12 +1200,25 @@ namespace {
             case Event::Type::packet:
                 if (const Inputs* inputs = std::get_if<Inputs>(&event.packet)) {
                     std::vector<Input>& got = received[inputs->port];
-                    if ((own_ports & (1u << inputs->port)) != 0 || inputs->port >= match_players || inputs->first_read != got.size() ||
+                    // An early copy (sent unreliably, so a lost packet doesn't hold up the inputs after it) may repeat
+                    // reads that came, as the reliable Inputs after it do; one that starts past them, or for a port
+                    // that's idle now, isn't taken (it's late, or the reliable ones fill in).
+                    if (event.copy && (inputs->port >= match_players || (own_ports & (1u << inputs->port)) != 0 ||
+                        inputs->first_read > got.size() || idle_from[inputs->port] != never)) {
+                        break;
+                    }
+                    if ((own_ports & (1u << inputs->port)) != 0 || inputs->port >= match_players || inputs->first_read > got.size() ||
                         (uint64_t)inputs->first_read + inputs->count > horizon()) {
+                        std::printf("[netplay] port %d's inputs from read %u (%d) don't fit: %zu came, up to read %llu can\n", inputs->port + 1,
+                            inputs->first_read, inputs->count, got.size(), (unsigned long long)horizon());
                         end_match(Reason::protocol, "a player's inputs came out of order");
                         return;
                     }
-                    for (int i = 0; i < inputs->count; i++) {
+                    const size_t skip = got.size() - inputs->first_read;
+                    if (skip >= inputs->count) {
+                        break;
+                    }
+                    for (int i = (int)skip; i < inputs->count; i++) {
                         got.push_back({ inputs->pads[i], inputs->motions[i] });
                     }
                     // Their gap to this machine (to its first port: its players are at the same read).
@@ -3949,7 +3962,8 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
     const double waited = done - since;
     if (waits.reads > 0 && done - waits.last_read_at > late_seconds) {
         waits.late++;
-        if (waited > 0.001) late_from_waiting++;
+        // (With rollback, not the boot's: everyone waits for every input there, as the games load.)
+        if (waited > 0.001 && (rollback_option == 0 || read >= rollback_from_read)) late_from_waiting++;
         if (done - waits.last_read_at > waits.latest) {
             waits.latest = done - waits.last_read_at;
             waits.latest_read = read;

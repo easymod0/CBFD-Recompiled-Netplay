@@ -9,11 +9,11 @@
 //              rejoin): u8 own view (0 or 1), u8 pairs, u8 rollback (0 to 12)
 //   3 Refuse   u8 reason, u8 size (0 to 40), the host's release (! to ~), zeros to 40  47 bytes
 //              (the same in every version from 17 on: decode_refusal)
-//   4 Inputs   u8 port (< 4), u32 first read, u8 count (1 to 8), 8 pads of 5 bytes  159 bytes
+//   4 Inputs   u8 port (< 4), u32 first read, u8 count (1 to 8), 8 pads of 5 bytes  161 bytes
 //              (u16 buttons, s8 stick x, s8 stick y, u8 err_no), then 8 motions of 13
 //              (s16 mouse x, y, s16 gyro x, y, s8 wheel, u32 controls: only
 //              valid_controls: a field of view code up to fov_codes, no bit past 16); the unused ones zero, and the last read not past
-//              2^32 - 1; then 4 s8 gaps (time sync: any value)
+//              2^32 - 1; then 4 s8 gaps (time sync: any value), u16 controls (an early copy's: any)
 //   5 Hash     u32 read, u64 hash, 128 u16 region hashes                             273 bytes
 //   6 Bye      u8 reason                                                               6 bytes
 //   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs 11 bytes
@@ -60,7 +60,7 @@ namespace conker::netplay {
                 case hello: return header_size + 50;
                 case welcome: return header_size + 6;
                 case refuse: return header_size + 2 + max_release_name;
-                case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players;
+                case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players + 2;
                 case hash: return header_size + 12 + 2 * memory_regions;
                 case bye: return header_size + 1;
                 case start: return header_size + 6;
@@ -350,6 +350,7 @@ namespace conker::netplay {
                 for (int8_t gap : p.gaps) {
                     w.u8((uint8_t)gap);
                 }
+                w.u16(p.controls);
             }
             else if constexpr (std::is_same_v<T, Hash>) {
                 w.u32(p.read);
@@ -508,6 +509,7 @@ namespace conker::netplay {
                 for (int8_t& gap : p.gaps) {
                     gap = (int8_t)r.u8();
                 }
+                p.controls = r.u16();
                 packet = p;
                 break;
             }

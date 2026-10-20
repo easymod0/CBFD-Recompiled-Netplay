@@ -22,7 +22,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 21;
+    constexpr uint16_t protocol_version = 22;
     // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
     constexpr size_t max_release_name = 40;
     // The game's controller ports.
@@ -159,6 +159,10 @@ namespace conker::netplay {
         std::array<Pad, input_window> pads{};   // the first `count` are used, the rest are zero
         std::array<Motion, input_window> motions{};
         std::array<int8_t, max_players> gaps{};
+        // An early copy (sent unreliably: session.cpp): how many reliable messages but Inputs and Hashes the sender had
+        // sent on this connection before it. It's taken only once those have all arrived, so it never overtakes one
+        // (a Delay, a Gone, a Back...) that the inputs after it go by. (Wraps.)
+        uint16_t controls = 0;
         bool operator==(const Inputs&) const = default;
     };
     // The game's memory in regions of this size for the desync check: a Hash names the regions, so a desync

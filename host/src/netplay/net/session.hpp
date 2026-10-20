@@ -37,6 +37,7 @@
 #pragma once
 
 #include <array>
+#include <deque>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -83,6 +84,9 @@ namespace conker::netplay {
         bool by_signalling = false; // ended: the signalling server's word (the host isn't there, or the
                                     // server's gone), and `detail` says it for the player
         Packet packet;
+        // packet, a joiner's Inputs: an early copy, sent unreliably (Session::send_to), which may repeat reads that came
+        // already, or start past them (one lost on the way: it's for the reliable Inputs to fill in, so it's not taken).
+        bool copy = false;
     };
 
     // The join code (join_code.hpp) for `address` ("1.2.3.4:5000" or "[::1]:5000") and a match's `key`, or
@@ -273,6 +277,9 @@ namespace conker::netplay {
             // Inputs it gets start at (the earlier ones it has, or doesn't need).
             bool in_match = true;
             std::array<uint32_t, max_players> inputs_from{};
+            // The reliable messages but Inputs and Hashes sent to it, and taken from it (Inputs' `controls`).
+            uint16_t controls_sent = 0;
+            uint16_t controls_taken = 0;
             // Host: a new player under way (Welcome's 2), whether it has played (sent an input), and the claims on its
             // ports it replaced (a player who left them, and when), put back should it leave before it played.
             bool late = false;
@@ -293,9 +300,12 @@ namespace conker::netplay {
         void refuse(Peer& peer, Reason reason);
         // Waits until every peer has acknowledged what was sent to it (up to 2 s).
         void flush();
-        void send_to(uint32_t connection, const Packet& packet);
-        // Host: `inputs` to `peer`, but the reads before its inputs_from (none, if it isn't in the match).
+        void send_to(uint32_t connection, const Packet& packet, bool reliable = true);
+        // Host: `inputs` to `peer`, but the reads before its inputs_from (none, if it isn't in the match), with an early
+        // copy of its port's recent reads.
         void send_inputs(const Peer& peer, const Inputs& inputs);
+        // `inputs` (own, or passed on) into its port's recent reads, for the early copies.
+        void remember_sent(const Inputs& inputs);
         // Host: a joiner left the match under way (`reason`): unless it was kicked, it may come back to its ports.
         void remember(const Peer& peer, Reason reason);
         // Whether something sent on `connection` hasn't arrived yet.
@@ -342,6 +352,13 @@ namespace conker::netplay {
         int match_players = 0;
         uint64_t horizon = 64;
         std::array<uint64_t, max_players> next_inputs{};   // host: the read each port's next Inputs start at
+        // Each port's latest input_window reads sent (own, or passed on), from `recent_first`: every Inputs goes with an
+        // unreliable copy of them, so a packet lost on a bad link doesn't hold up the inputs after it until it's resent
+        // (the reliable ones arrive in order). The copy that comes first counts; the rest of what comes is cut to the
+        // reads after it.
+        std::array<std::deque<std::pair<Pad, Motion>>, max_players> recent;
+        std::array<uint64_t, max_players> recent_first{};
+        bool taking_unreliable = false;     // the message being taken came unreliably (an early copy)
         Hello hello;
         std::string release;
         uint32_t listen_socket = 0;
