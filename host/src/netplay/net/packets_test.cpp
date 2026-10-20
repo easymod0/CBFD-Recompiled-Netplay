@@ -131,7 +131,7 @@ int main() {
     CHECK(bytes_of(Start{ 3, 0, 0, 0, 0, 0x08 }).empty());     // an open port past the players
     CHECK(bytes_of(Start{ 4, 0, 0, 0x0C, 0, 0x08 }).empty());  // an open port in a pair
     CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
-    CHECK(bytes_of(Gone{ 1, 30, 2 }).empty());
+    CHECK(bytes_of(Gone{ 1, 30, 3 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
     CHECK(bytes_of(Refuse{ Reason::build, "a release" }).empty());
@@ -185,7 +185,7 @@ int main() {
     data[5] = 4;
     CHECK(!decodes(data));
     data = gone;
-    data[10] = 2;                                   // silent is 0 or 1
+    data[10] = 3;                                   // silent is 0 to 2
     CHECK(!decodes(data));
     data = hello;
     data[45] = 4;
@@ -322,8 +322,16 @@ int main() {
     data = bytes_of(part); data.resize(25 + 61); CHECK(!decodes(data));              // past the state's end
 
     // Rejoining: Back, and Rejoin.
-    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 11));
-    CHECK(round_trips(Back{ 0x06, 5, 0x04 }, 11));
+    CHECK(round_trips(Back{ 0x06, 0x01020304 }, 19));
+    CHECK(round_trips(Back{ 0x06, 5, 0x04 }, 19));
+    CHECK(round_trips(Back{ 0x04, 5, 0x04, 0x0102030405060708ull }, 19));     // a spectator taking port 2
+    CHECK(bytes_of(Back{ 0x06, 5, 0x06, 9 }).empty());              // ...one port only
+    CHECK(bytes_of(Back{ 0x04, 5, 0, 9 }).empty());                 // ...as a new player
+    CHECK(round_trips(Claim{ 3 }, 6));
+    CHECK(round_trips(Unseat{ 1 }, 6));
+    CHECK(bytes_of(Claim{ 0 }).empty());                            // the host's port
+    CHECK(bytes_of(Unseat{ 4 }).empty());
+    CHECK(round_trips(Gone{ 2, 30, 2 }, 11));                       // stepped out to watch
     data = bytes_of(Back{ 0x06, 0x01020304, 0x02 });
     CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1 && data[10] == 0x02);
     CHECK(bytes_of(Back{ 0x06, 5, 0x08 }).empty());                 // a new player not among them

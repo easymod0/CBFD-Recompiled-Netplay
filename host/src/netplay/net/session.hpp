@@ -163,7 +163,8 @@ namespace conker::netplay {
         // Host: this game's release (hello.hpp's release_name), told to each joiner it refuses (not if it
         // isn't 1 to max_release_name printable characters).
         void set_release(const std::string& name);
-        bool kick(int port);
+        // `keep_out` false: dropped as quitting, and may come back.
+        bool kick(int port, bool keep_out = true);
         // Host: drops spectator `spectator` (kicked; with `keep_out`, not back in this match either), if `player` (0: any) is
         // who's there.
         bool kick_spectator(int spectator, uint64_t player, bool keep_out = true);
@@ -208,7 +209,19 @@ namespace conker::netplay {
         // Back to the joiners in the match (their inputs are taken from that read on). Then, once the host's game before it is taken,
         // welcome_back brings each of those joiners in: its Rejoin, the inputs since (`since`), and from then on what every
         // peer gets, but Inputs of reads before `inputs_from` (by port: those it has); its state follows (send_state).
-        void back(uint8_t ports, uint32_t read, uint8_t late = 0);
+        void back(uint8_t ports, uint32_t read, uint8_t late = 0, uint64_t player = 0);
+        // Seat changes in a match (#21). Host: spectator `spectator` is the player on `port` from now on (a free port, or
+        // one held for a player who left: they can't come back to it), as back() with its player id tells everyone (false:
+        // it can't). unseat: the player on `port` (alone on its machine) has stepped out (its Unseat): it's a spectator from
+        // now on, its number returned (-1: none free, or no such player). ask_unseat: asks that player to (false: it can't).
+        // Joiner: claim asks the host for a free port (watching); step_out tells it this machine's player has stepped out
+        // (its inputs end with those sent: one port only), watching from now on; take_seat: the host's Back gave it `ports`.
+        bool seat_spectator(int spectator, int port);
+        int unseat(int port);
+        bool ask_unseat(int port);
+        void claim(int port);
+        void step_out();
+        void take_seat(uint8_t ports);
         // `spectators` (bit n: spectator n) watching likewise: those not yet in the match come in with welcome_back, and get
         // the state with send_state; resync_spectators tells those in it whose game went another way to load it before
         // `read` (Resync to them alone), and send_state sends it to them too.

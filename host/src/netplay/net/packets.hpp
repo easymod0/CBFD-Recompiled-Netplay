@@ -198,7 +198,8 @@ namespace conker::netplay {
     // from read `from_read` their port gets no input (an idle pad: nothing pressed, nothing moved). Sent once
     // every input of theirs the host had is passed on, so it's the read after the last of them for everyone.
     // `silent`: they stopped answering (1: a crash, a lost connection) rather than saying goodbye (0), so the
-    // others can tell the players they may have quit.
+    // others can tell the players they may have quit; or (2) they stepped out of their place to watch (Unseat), which
+    // is open from then on.
     struct Gone {
         uint8_t port = 0;
         uint32_t from_read = 0;
@@ -280,12 +281,25 @@ namespace conker::netplay {
     // `ports` play again from read `read` (their idle pads until then), which none has made yet as it hears (chosen
     // past the furthest any input can reach, so none of theirs has come). Every peer then waits for their inputs from
     // that read, which come once their machine has loaded the host's game as it is before it. `late`: those of them
-    // that are new players (joining the match under way: Welcome's 2), not coming back.
+    // that are new players (joining the match under way: Welcome's 2), not coming back. `player` (not 0): a spectator
+    // with that player id takes the port (one, `late`), its game already the match's: its inputs come from that read.
     struct Back {
         uint8_t ports = 0;
         uint32_t read = 0;
         uint8_t late = 0;
+        uint64_t player = 0;
         bool operator==(const Back&) const = default;
+    };
+    // Seat changes in a match (#21). Spectator to host: it would take `port` (free: open, or its player's hold over).
+    struct Claim {
+        uint8_t port = 0;
+        bool operator==(const Claim&) const = default;
+    };
+    // Host to a player (one port, not the host's): step out of `port` to watch. Player to host: it has (asked or not):
+    // its inputs end with those sent before this, and it watches from then on (the host tells the others, Gone's 2).
+    struct Unseat {
+        uint8_t port = 0;
+        bool operator==(const Unseat&) const = default;
     };
     // Host to the player coming back, before the state (StateParts) it loads: the match as it is at read `read`
     // (theirs from it on), the host being at read `at` (the inputs since `read` it has follow, then every one as it
@@ -308,7 +322,7 @@ namespace conker::netplay {
     };
 
     using Packet = std::variant<Hello, Welcome, Refuse, Inputs, Hash, Bye, Start, Gone, Delay, Roster, Ready, Resync, StatePart,
-        Back, Rejoin>;
+        Back, Rejoin, Claim, Unseat>;
 
     // Writes `packet` into `out` and returns its size, or 0 if the packet isn't valid (the same checks
     // as decode's) or doesn't fit, so nothing invalid is ever sent.
