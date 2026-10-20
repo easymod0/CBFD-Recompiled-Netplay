@@ -325,12 +325,19 @@ namespace {
     int rollback_option = 0;
     // With rollback, falling a few reads behind makes nobody wait (they predict this peer's inputs), and running
     // fast for them is a hitch here (the #24 playtest: dozens of them): time sync slows the others for it
-    // instead. It catches up only from half the window behind, as the others near waiting for it. How far behind
-    // it is comes from the inputs that have come, which are the one-way trip late (`one_way_reads`, from the
-    // round trips at each hash), so that's taken off, or on a slow link the others would wait on it before it
-    // started. (Not in the boot's first reads, nor near a replay's end: everyone waits for every input there.)
-    int64_t one_way_reads = 0;
-    int64_t reads_behind_to_catch_up(uint64_t read);
+    // instead. How far behind the inputs that have come here say it is (`behind`) is short by the one-way trip,
+    // which on a bad link swings, and inputs held then sent in a burst (a mobile link's) make it jump; so it goes
+    // by the others' own word: their gaps to it (time sync's, with their inputs: how far each is past this peer's
+    // latest input it has). It catches up at once when one is 2 reads short of its window and the delay (it waits
+    // past them), or once one has been half the window past it for catch_up_after_reads reads in a row (counted
+    // afresh after each catch-up); and only if `behind` says it's behind at all (a gap that's the link's, not the
+    // time's, isn't). (So on a link whose round trip is longer than the window and the delay, over 400 ms at 12, a
+    // peer behind is left to time sync, as `behind` never gets above 0.) (Not in the boot's first reads, nor near a
+    // replay's end: everyone waits for every input there.)
+    bool rollback_catch_up(uint64_t read);
+    int widest_gap_to_me();
+    constexpr int catch_up_after_reads = 15;
+    int wide_gap_for = 0;
     // Its most (--rollback's), which the horizon and the host's delay changes leave room for.
     constexpr int most_rollback_window = conker::netplay::max_rollback;
     // The boot changes the game's main loop at once (a state from before can't be loaded after): no
@@ -932,10 +939,17 @@ namespace {
 
     void take_resync(const Resync& r);
 
-    int64_t reads_behind_to_catch_up(uint64_t read) {
-        if (watching) return spectator_catch_up;
-        if (rollback_option == 0 || read < rollback_from_read || read + rollback_option >= last_read) return behind_to_catch_up;
-        return std::max<int64_t>(behind_to_catch_up, rollback_option / 2 - one_way_reads);
+    bool rollback_catch_up(uint64_t read) {
+        return rollback_option > 0 && !watching && read >= rollback_from_read && read + rollback_option < last_read;
+    }
+    int widest_gap_to_me() {
+        int widest = INT_MIN;
+        for (int port = 0; port < match_players; port++) {
+            if ((own_ports & (1u << port)) == 0 && idle_from[port] == never && time_sync.heard[port] && !only_idle_since_back(port)) {
+                widest = std::max(widest, time_sync.their_gap[port]);
+            }
+        }
+        return widest;
     }
     void list_room();
     void play_again(uint8_t ports, uint64_t from);
@@ -2559,7 +2573,7 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     rollback_trips_needed.clear();
     rollback_late.clear();
     rollback_calm = 0;
-    one_way_reads = 0;
+    wide_gap_for = 0;
     outage_until = 0;
     if (catching_up) set_catching_up(false);
     initial_sent = false;
@@ -3931,11 +3945,6 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
     }
 
-    if (read % hash_every == 0 && session != nullptr) {
-        const std::vector<int> trips = session->round_trips_ms();
-        const int slowest = trips.empty() ? 0 : *std::max_element(trips.begin(), trips.end());
-        one_way_reads = (int64_t)(slowest / 2 / (1000.0 / 30.0));
-    }
     // How far behind the others this peer is: how many reads ahead of it they are, by how far their inputs reach.
     int64_t behind = INT64_MIN;
     for (int port = 0; port < match_players; port++) {
@@ -3944,7 +3953,21 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
     }
     last_behind = behind;
-    if (!catching_up && behind >= reads_behind_to_catch_up(read)) {
+    bool catch_up = false;
+    if (watching) {
+        catch_up = behind >= spectator_catch_up;
+    }
+    else if (rollback_catch_up(read)) {
+        const int gap = widest_gap_to_me();
+        wide_gap_for = gap >= std::max(2, rollback_option / 2 + delay) ? wide_gap_for + 1 : 0;
+        catch_up = behind >= 1 && (gap >= std::max(2, rollback_option + delay - 2) ||
+            (behind >= behind_to_catch_up && wide_gap_for >= catch_up_after_reads));
+    }
+    else {
+        catch_up = behind >= behind_to_catch_up;
+    }
+    if (!catching_up && catch_up) {
+        wide_gap_for = 0;
         std::printf("[netplay] read %llu: %lld reads behind the others: catching up\n", (unsigned long long)read, (long long)behind);
         set_catching_up(true);
         caught_up_from = read;
@@ -3955,6 +3978,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         std::printf("[netplay] read %llu: caught up (%llu reads in %.0f ms)\n", (unsigned long long)read,
             (unsigned long long)(read - caught_up_from), (now() - catching_up_since) * 1000);
         set_catching_up(false);
+        wide_gap_for = 0;
     }
     sync_time();
 
