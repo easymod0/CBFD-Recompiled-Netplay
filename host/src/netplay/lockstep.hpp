@@ -43,6 +43,10 @@
 //                                can join (trying up to 5), or hosts one, in public, as --netplay-host room
 //                                would with --players and the like. A host still alone that sees an older open
 //                                room leaves its own and joins that, so players who started at once meet
+//   --netplay-watch              (joining) watch the match, with no players on this machine: a spectator, which gets
+//                                every input and sends none, its game a little behind the players' (nobody waits for
+//                                it); joining a match under way, it gets the host's game as a new player does
+//   --netplay-no-spectators      (hosting) take no spectators (by default the match takes up to 8)
 //   --local-players <n>          (hosting or joining) players on this machine, 1 to 3 (1 by default): each
 //                                has a port of their own (the lowest free ones), and plays with this
 //                                machine's controller of the same number (the first has the keyboard, mouse
@@ -87,6 +91,10 @@
 // way the same way, on free ports: those open since the start (--netplay-start-with, the menu's Start now), and
 // those of a player who left over --netplay-seat-hold seconds ago and didn't come back (who then can't).
 //
+// A spectator (--netplay-watch) watches the match from a machine with nobody playing: it gets every input and sends
+// none, nobody waits for it, and its game follows the players' a little behind; joining under way, it gets the host's
+// game as a new player does, and after a desync the host sends it its game alone. It never ends the match.
+//
 // A peer that falls behind the others (a hitch: loading, the system) catches up on its own: it runs the
 // timeline faster than real time until the others' inputs are no further ahead of it than the delay.
 //
@@ -124,7 +132,9 @@ namespace conker::lockstep {
     // `input_delay`: reads, or -1 for auto; `local`: the players on this machine (fewer than `players`).
     // `rollback`: the reads every peer predicts ahead (--rollback's), 0 (off) to 12.
     // `port` 0: through a room on the netplay server (set_server); -1: not hosting.
-    void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
+    // `spectators`: the match takes them (--netplay-no-spectators: not). set_join's `local` 0: a spectator (--netplay-watch).
+    void set_host(int port, int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0,
+        bool spectators = true);
     void set_join(const std::string& where, int local = 1);
     // Hosting on a port: visible on this network (--netplay-lan).
     void set_lan(bool visible);
@@ -132,7 +142,7 @@ namespace conker::lockstep {
     // (the command line's way) or when set_ready says (the menu's waiting room).
     void set_identity(uint64_t player, const std::vector<uint64_t>& blocked, bool ready_by_itself);
     // Quick Match (--netplay-quick): as set_host's, which it hosts with if it finds no room to join.
-    void set_quick(int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0);
+    void set_quick(int players, bool own_view = true, int input_delay = -1, int local = 1, int rollback = 0, bool spectators = true);
     // The netplay server ("host:port") for rooms, whether direct connections are allowed through it, and
     // (hosting) whether the room is in its public list.
     void set_server(const std::string& server, bool allow_direct, bool listed = false);
@@ -209,6 +219,14 @@ namespace conker::lockstep {
         bool left = false;          // in a match: they've left (or were removed)
         bool open = false;          // in a match: nobody has had it (open since the start), free for a new player
     };
+    // A spectator watching: the host's number for it (0 to max_spectators - 1), and who.
+    struct Spectator {
+        int number = 0;
+        uint64_t player = 0;
+        std::string name;
+        int platform = 0;
+        bool mine = false;          // this machine
+    };
     struct WaitingRoom {
         bool in = false;
         bool hosting = false;
@@ -218,6 +236,9 @@ namespace conker::lockstep {
         bool own_view = false;
         int delay = -1;             // -1: auto
         int rollback = 0;
+        bool watching = false;      // this machine is a spectator
+        bool takes_spectators = true;
+        std::vector<Spectator> spectators;
     };
     WaitingRoom waiting_room();
     void set_ready(bool ready);
@@ -226,6 +247,8 @@ namespace conker::lockstep {
     void start_now();
     // `player`: the one shown on `port` (0: whoever's there), so a place that changed hands isn't kicked.
     bool kick(int port, uint64_t player = 0);
+    // The host's: removes spectator `number`, if it's still `player`.
+    bool kick_spectator(int number, uint64_t player);
     void block(uint64_t player);
     // During a match (the Esc menu's Netplay tab): its players as the waiting room last had them, which have
     // left since (`in`: there's a match). kick works then too (the host's: their ports play on idle, as when
@@ -312,6 +335,7 @@ namespace conker::lockstep {
     struct Status {
         bool playing = false;           // a match has started and isn't over
         bool hosting = false;
+        bool watching = false;          // this machine is a spectator (no ports)
         int players = 0;
         uint8_t own_ports = 0;          // bit n: port n
         int input_delay = 0;

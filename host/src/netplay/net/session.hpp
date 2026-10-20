@@ -25,6 +25,12 @@
 // inputs, a second Hello) is dropped. After a desync the host may send a joiner its game's state (Resync,
 // StatePart): the one message bigger than the rest, which a joiner takes from the host only.
 //
+// Spectators: a joiner with no players (Hello's 0) watches, if the host takes spectators (up to max_spectators,
+// besides the players). It gets no ports, a spectator number of the host's instead (Event's `spectator`), and
+// everything the match sends but sends nothing but its hashes; nobody waits for it. Before the start it gets Start
+// as the players do; under way, it's brought in as a new player is (welcome_back, `spectators`), with the host's
+// state. After a desync, the host sends a spectator its state alone (resync_spectators), the players none the wiser.
+//
 // Single-threaded: call poll() often (each controller read, or in a loop) from one thread; it runs the
 // library's callbacks and returns what happened.
 
@@ -46,17 +52,19 @@ namespace conker::netplay {
 namespace conker::netplay {
     struct Event {
         enum class Type {
-            joined,     // host: a joiner passed the handshake, on `ports` (`rejoin`: into a match under way, `late`: new to it)
-            welcomed,   // joiner: accepted, on `ports`, in a match of `players` (`rejoin`: under way, with its rules;
-                        // `late`: as a new player)
+            joined,     // host: a joiner passed the handshake, on `ports` (`rejoin`: into a match under way, `late`: new to it),
+                        // or as spectator `spectator`
+            welcomed,   // joiner: accepted, on `ports` (none: a spectator), in a match of `players` (`rejoin`: under way,
+                        // with its rules; `late`: as a new player, or spectator)
             started,    // joiner: the match starts (`open`: the ports nobody has)
             packet,     // `packet` arrived (Inputs, Hash, or for a joiner the host's Gone or Delay), from `port`'s peer
-                        // (via the host for a joiner; Gone: the port gone)
-            left,       // host: the peer on `ports` left or was dropped, for `reason`
+                        // (via the host for a joiner; Gone: the port gone), or the host's from spectator `spectator`'s (Hash)
+            left,       // host: the peer on `ports` (or spectator `spectator`) left or was dropped, for `reason`
             ended,      // joiner: refused, or the connection to the host ended, for `reason`
         };
         Type type;
         int port = -1;          // the peer's first port (packet: the Inputs' port, for a joiner)
+        int spectator = -1;     // host: joined, left, packet: the peer is that spectator (0 to max_spectators - 1)
         uint8_t ports = 0;      // joined, welcomed, left: the peer's ports (bit n: port n)
         int players = 0;
         bool rejoin = false;    // joined, welcomed: into a match under way (coming back, or `late`: a new player)
@@ -148,14 +156,17 @@ namespace conker::netplay {
         // (their player ids: refused as kicked), and kick, which drops a port's machine (kicked; false if no
         // joiner has it). Joiner: set_ready tells the host. roster(): as the host last sent it (the host's:
         // as it is now; it's sent in the match too); everyone_ready: host, every machine ready, and every port taken
-        // (unless not `full`).
-        void set_room_settings(bool own_view, int delay, int rollback);
+        // (unless not `full`). `spectators`: the host takes them (they're never waited for).
+        void set_room_settings(bool own_view, int delay, int rollback, bool spectators = true);
         void set_ready(bool ready);
         void set_blocked(const std::vector<uint64_t>& players) { blocked = players; }
         // Host: this game's release (hello.hpp's release_name), told to each joiner it refuses (not if it
         // isn't 1 to max_release_name printable characters).
         void set_release(const std::string& name);
         bool kick(int port);
+        // Host: drops spectator `spectator` (kicked; with `keep_out`, not back in this match either), if `player` (0: any) is
+        // who's there.
+        bool kick_spectator(int spectator, uint64_t player, bool keep_out = true);
         Roster roster() const;
         bool everyone_ready(bool full = true) const;
         // Host: how long a player who left the match keeps their ports (to come back to) before a new one can take them.
@@ -198,9 +209,13 @@ namespace conker::netplay {
         // welcome_back brings each of those joiners in: its Rejoin, the inputs since (`since`), and from then on what every
         // peer gets, but Inputs of reads before `inputs_from` (by port: those it has); its state follows (send_state).
         void back(uint8_t ports, uint32_t read, uint8_t late = 0);
-        void welcome_back(uint8_t ports, const Rejoin& rejoin, const std::vector<Inputs>& since,
+        // `spectators` (bit n: spectator n) watching likewise: those not yet in the match come in with welcome_back, and get
+        // the state with send_state; resync_spectators tells those in it whose game went another way to load it before
+        // `read` (Resync to them alone), and send_state sends it to them too.
+        void welcome_back(uint8_t ports, uint8_t spectators, const Rejoin& rejoin, const std::vector<Inputs>& since,
             const std::array<uint32_t, max_players>& inputs_from);
-        void send_state(uint8_t ports, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash);
+        void send_state(uint8_t ports, uint8_t spectators, uint32_t read, const std::vector<uint8_t>& state, uint64_t hash);
+        void resync_spectators(uint8_t spectators, uint32_t read);
         // Says goodbye to every peer and closes the connections, once what was sent has arrived (up to 2 s,
         // for a lossy network). Poll a moment before deleting the session or stopping the library.
         void leave(Reason reason);
@@ -211,6 +226,12 @@ namespace conker::netplay {
 
         bool hosting() const { return is_host; }
         uint8_t ports() const { return own_ports; }
+        // Joiner: the host has welcomed it (on its ports, or as a spectator: watching).
+        bool welcomed() const { return is_welcomed; }
+        bool watching() const { return is_welcomed && own_ports == 0; }
+        // Host: the spectators in (bit n: spectator n), and whether it takes more.
+        uint8_t spectators() const;
+        bool takes_spectators() const { return settings.spectators != 0; }
         // Host: the ports open as the match started (Start's open).
         uint8_t open_at_start() const { return match_open; }
         // Host, in the match: the ports a new player could take now (nobody on them, nor holding them).
@@ -220,7 +241,7 @@ namespace conker::netplay {
     private:
         struct Peer {
             uint32_t connection = 0;
-            int port = -1;          // its first port; -1 until the handshake is done
+            int port = -1;          // its first port; -1 until the handshake is done (and for a spectator)
             uint8_t ports = 0;      // all of them (bit n: port n)
             double connected_at = 0;   // host: when its connection came up (Connected)
             bool up = false;            // host: it has (the handshake time runs from then)
@@ -239,6 +260,7 @@ namespace conker::netplay {
             bool played = false;
             std::array<uint64_t, max_players> replaced_players{};
             std::array<double, max_players> replaced_at{};
+            int spectator = -1;     // host: a spectator's number, from the handshake
         };
 
         void on_status_changed(const void* info);
@@ -262,6 +284,10 @@ namespace conker::netplay {
         // A state's send rate and buffer on `connection` (`state`), or the library's own.
         void set_send_rate(uint32_t connection, bool state);
         Peer* find(uint32_t connection);
+        // Host: through the handshake, a player's or a spectator's.
+        static bool in(const Peer& peer) { return peer.port >= 0 || peer.spectator >= 0; }
+        // The spectator a joiner's Hello (none playing) gets: the lowest number free (-1: none).
+        int free_spectator() const;
         friend void status_changed_callback(void* info);
 
         // Hosting: the key, the poll group and the joiners' ports; listening is the caller's.
@@ -288,10 +314,11 @@ namespace conker::netplay {
         std::array<double, max_players> left_at{};
         std::array<int, max_players> rejoins{};
         double seat_hold = 120.0;
-        std::vector<uint64_t> kicked;   // host: the players kicked from the match under way
+        std::vector<uint64_t> kicked;   // host: the players kicked from the match under way (spectators too)
         bool rejoining = false;     // joiner: welcomed back to a match under way, and Rejoin not here yet
         bool started = false;       // joiner: Start has arrived
-        uint8_t own_ports = 0;      // joiner: 0 until welcomed
+        uint8_t own_ports = 0;      // joiner: 0 until welcomed (and as a spectator)
+        bool is_welcomed = false;
         int match_players = 0;
         uint64_t horizon = 64;
         std::array<uint64_t, max_players> next_inputs{};   // host: the read each port's next Inputs start at

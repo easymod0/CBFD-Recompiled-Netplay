@@ -5,7 +5,8 @@
 # also lossy; a joiner with more players than ports left, which must be refused), joiners with another match's key, another ROM or
 # other mods, which must be refused, a joiner kicked or kept out (the host's block list), the host waiting
 # for everyone to be Ready, joiners sending Inputs early or far ahead or a Hash twice, which
-# must be dropped, as must one sending Inputs for a port that isn't its own, one that never says Hello, which must be dropped too, and one sending a message bigger
+# must be dropped, as must one sending Inputs for a port that isn't its own; a spectator (all the pads, none of its own: one
+# sending Inputs dropped; refused by a host that takes none); one that never says Hello, which must be dropped too, and one sending a message bigger
 # than any packet, which the library must close. A match found on this network (LAN discovery: by build and
 # platform, and the broadcast alone). Desync summaries the server logs, within its limits. Then a
 # match through ICE, by a room on the signalling
@@ -162,6 +163,39 @@ hostile hostile-early 27205 3 early
 hostile hostile-far 27206 2 far
 hostile hostile-hash 27208 2 hash
 hostile hostile-port 27213 2 port
+
+# Spectators: a joiner with nobody playing (--local 0) watches, getting every port's pads; one that sends Inputs (of the
+# host's port) is dropped as broken while the match goes on; a host that takes none refuses one.
+"$probe" host 27222 --players 2 --reads 150 > watch.host.txt 2>&1 &
+pids=$!
+to=$(code_of watch.host.txt)
+# (The spectators in first: the match starts as the player comes, and the probe's host brings none in under way.)
+"$probe" join "$to" --reads 150 --local 0 > watch.spectator.txt 2>&1 &
+pids="$pids $!"
+"$probe" join "$to" --reads 150 --local 0 --hostile port > watch.hostile.txt 2>&1 &
+hostile=$!
+sleep 1
+"$probe" join "$to" --reads 150 > watch.join.txt 2>&1 &
+pids="$pids $!"
+ok=1
+for pid in $pids; do
+    wait "$pid" || ok=0
+done
+wait $hostile
+if [ $ok -eq 1 ] && grep -q "welcomed: ports 0 of 2" watch.spectator.txt && grep -q "^port 0: 150 of 150 reads, 0 wrong" watch.spectator.txt &&
+    grep -q "^port 1: 150 of 150 reads, 0 wrong" watch.spectator.txt && grep -q "ended: an unexpected or broken packet" watch.hostile.txt; then
+    echo "watch: passed"
+else
+    echo "watch: FAILED"
+    cat watch.host.txt watch.spectator.txt watch.hostile.txt
+    failed=1
+fi
+"$probe" host 27223 --reads 30 --spectators 0 > watch-refused.host.txt 2>&1 &
+host=$!
+"$probe" join "$(code_of watch-refused.host.txt)" --reads 30 --local 0 > watch-refused.join.txt 2>&1
+if grep -q "ended: the host takes no spectators" watch-refused.join.txt; then echo "watch-refused: passed"; else
+    echo "watch-refused: FAILED"; cat watch-refused.join.txt; failed=1; fi
+kill $host 2>/dev/null
 
 # A joiner that never says Hello: dropped after the handshake time (3 s). One that sends a message bigger
 # than any packet: closed by the library at once. One of a newer protocol version: refused, told the host's release.

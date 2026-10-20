@@ -109,6 +109,7 @@ namespace {
                              "       netplay_probe host room | join <room code>, with --signal <server:port> [--direct 1]\n"
                              "       [--turn-password <p>] (a test: not the server's)\n"
                              "       [--reads 300] [--loss <percent>] [--build <hex>] [--rom <hex>] [--profile <hex>] [--mods <hex>]\n"
+                             "       [--local 0: joining, a spectator] [--spectators 0: hosting, none taken]\n"
                              "       netplay_probe code <address:port> <key, hex>\n"
                              "       netplay_probe list --signal <server:port> [--build/--rom/--profile/--mods <hex>] [--platform <n>]\n"
                              "       netplay_probe lan [--lan-port 27016] [--build/--rom/--profile/--mods <hex>] [--platform <n>]\n"
@@ -227,6 +228,7 @@ int main(int argc, char** argv) {
     int count = 1;
     std::vector<uint64_t> blocked;
     bool kick = false;
+    bool spectators = true;
     double ready_after = 0;
     uint16_t lan_port = lan::default_port;
     signal::Platform platform = this_platform();
@@ -259,6 +261,7 @@ int main(int argc, char** argv) {
         else if (option == "--block") blocked.push_back(std::strtoull(value, nullptr, 16));
         else if (option == "--release") release = value;
         else if (option == "--kick") kick = std::atoi(value) != 0;
+        else if (option == "--spectators") spectators = std::atoi(value) != 0;
         else if (option == "--ready-after") ready_after = std::strtod(value, nullptr);
         else return usage();
     }
@@ -482,6 +485,7 @@ int main(int argc, char** argv) {
                 session.set_ready(true);
                 session.set_blocked(blocked);
                 session.set_release(release);
+                session.set_room_settings(own_view, -1, 0, spectators);
             }
             if (hosting && signal_server.empty()) {
                 std::printf("join code %s\n", session.join_code("127.0.0.1:" + where).c_str());
@@ -527,6 +531,10 @@ int main(int argc, char** argv) {
                 for (Event& event : session.poll()) {
                     switch (event.type) {
                         case Event::Type::joined:
+                            if (event.spectator >= 0) {
+                                std::printf("spectator %d joined\n", event.spectator + 1);
+                                break;
+                            }
                             joined += std::popcount(event.ports);
                             std::printf("ports %x joined (%d of %d) by %s\n", event.ports, joined, players, session.route(event.port).c_str());
                             if (kick) {
@@ -563,6 +571,10 @@ int main(int argc, char** argv) {
                             }
                             break;
                         case Event::Type::left:
+                            if (event.spectator >= 0) {
+                                std::printf("spectator %d left: %s (%s)\n", event.spectator + 1, describe(event.reason), event.detail.c_str());
+                                break;
+                            }
                             std::printf("port %d left: %s (%s)\n", event.port, describe(event.reason), event.detail.c_str());
                             if (!playing && event.reason != Reason::kicked) {
                                 joined -= std::popcount(event.ports);
