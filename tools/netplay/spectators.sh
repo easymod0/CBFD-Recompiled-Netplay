@@ -75,11 +75,16 @@ match() {
     # shellcheck disable=SC2086
     pads=1.pads start "$m-host" --netplay-host "$m_port" --netplay-address 127.0.0.1 $host_options
     code=$(code_of "$m-host")
+    # ($wait_pattern, $join_options and $watch_first: set before, and cleared after, the one match they're for. A
+    # spectator first comes before the joiner, and is refused or in before the match can start.)
+    if [ -n "${watch_first:-}" ]; then
+        pads=other.pads start "$m-watch" --netplay-join "$code" --netplay-watch "$@"
+        wait_for "$m-watch" "$watch_first"
+    fi
     # shellcheck disable=SC2086
     pads=2.pads start "$m-join" --netplay-join "$code" ${join_options:-}
-    # ($wait_pattern and $join_options: set before, and cleared after, the one match they're for.)
     [ -n "${wait_pattern:-}" ] && wait_for "$m-host" "$wait_pattern"
-    pads=other.pads start "$m-watch" --netplay-join "$code" --netplay-watch "$@"
+    [ -z "${watch_first:-}" ] && pads=other.pads start "$m-watch" --netplay-join "$code" --netplay-watch "$@"
 }
 
 echo "watch, late, desync"
@@ -122,7 +127,9 @@ join_options="--netplay-fake-network lag=40"
 match rollback 27343 --rollback 8
 join_options=
 match leave 27344 -- --stop-after 900
+watch_first="couldn.t join"
 match refused 27345 --netplay-no-spectators
+watch_first=
 if finish "was the last: quitting\|couldn't join" rollback-host rollback-join rollback-watch leave-host leave-join leave-watch \
     refused-host refused-join refused-watch; then
     for copy in rollback-host rollback-join rollback-watch leave-host leave-join refused-host refused-join; do

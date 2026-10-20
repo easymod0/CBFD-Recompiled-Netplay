@@ -274,7 +274,9 @@ predicts, whatever the match's rollback. Watching from the start, it gets Start 
 match under way, it gets the host's game as a new player does, without the Back (nobody waits for its inputs).
 A spectator whose game goes another way is sent the host's game alone (a Resync to no ports, to it only), and
 removed if it goes another way again soon after; it never ends the match. The waiting room and the Esc menu's
-Netplay tab list the spectators, and the host can kick them. Spectators see the whole split screen.
+Netplay tab list the spectators, and the host can kick them. A spectator sees the whole split screen, or one
+player's view across the window, whatever the match's rule for the players: L and R on its first controller (or the
+D-pad's left and right) go from everyone's to each player's in turn (view.cpp, lockstep's `watched_ports`).
 
 **Desync reports.** The hash a peer sends comes with a hash of each 64 KB region of memory (128 of them,
 16 bits each), so a desync names the regions that differ. Each peer whose game differs from another's

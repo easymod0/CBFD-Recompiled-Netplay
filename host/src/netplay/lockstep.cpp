@@ -134,6 +134,13 @@ namespace {
     // A spectator may be well behind the players, so further from the host's Delay changes than they are: one that
     // comes before it has reached the last waits here (from_read order) until it has.
     std::vector<Delay> later_delays;
+    // ...and the view it watches (bit n: port n; 0: the whole split screen, view.cpp), chosen with its first controller's
+    // L and R (or the D-pad's left and right): everyone's, then each player's in turn. The buttons at its last read, for
+    // a press.
+    std::atomic<uint8_t> watched{ 0 };
+    uint16_t watch_buttons = 0;
+    constexpr uint16_t next_view_buttons = 0x0010 | 0x0100;     // R, D-pad right
+    constexpr uint16_t last_view_buttons = 0x0020 | 0x0200;     // L, D-pad left
     // ...and its last change (#18): `before` up to read `from`, `after` from it. With auto, the host changes it
     // as the round trips do (Delay); every peer switches at the same read, which none has reached as it hears.
     // At that read each peer sends its own pads up to the read plus the new delay: a raised one's reads in
@@ -1664,6 +1671,23 @@ namespace {
         std::printf("[netplay] the host's game before read %llu has come (%u bytes)\n", (unsigned long long)recovery.read, recovery.size);
     }
 
+    // A spectator, at a read: its first controller's `buttons` (as the game would have had them) pressed L or R, the
+    // view watched goes back or on.
+    void choose_view(uint16_t buttons) {
+        const uint16_t pressed = (uint16_t)(buttons & ~watch_buttons);
+        watch_buttons = buttons;
+        const int step = (pressed & next_view_buttons) != 0 ? 1 : (pressed & last_view_buttons) != 0 ? -1 : 0;
+        if (step == 0 || match_players < 1) {
+            return;
+        }
+        // 0 everyone's, 1 to players each player's.
+        const int now_view = watched == 0 ? 0 : std::countr_zero(watched.load()) + 1;
+        const int next = (now_view + step + match_players + 1) % (match_players + 1);
+        watched = next == 0 ? 0 : (uint8_t)(1u << (next - 1));
+        std::printf("[netplay] watching %s\n", next == 0 ? "everyone" : ports_text(watched).c_str());
+        tell(next == 0 ? "Watching everyone." : "Watching " + players_text(watched) + ".");
+    }
+
     // The ports whose pad for `read` isn't here yet (and who haven't left), bit n for port n.
     uint8_t missing(uint64_t read) {
         uint8_t ports = 0;
@@ -2158,6 +2182,8 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     match_own_view = false;
     match_pairs = 0;
     watching = false;
+    watched = 0;
+    watch_buttons = 0;
     match_rollback = rollback_option;
     later_delays.clear();
     why_over.clear();
@@ -2491,6 +2517,9 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 own_ports = event.ports;
                 match_players = event.players;
                 watching = own_ports == 0;
+                // (Nobody waits for a spectator, which may be slow to start: the others' inputs may be well ahead of it
+                // before its first read sets the horizon.)
+                if (watching) session->set_horizon(horizon());
                 if (watching && event.rejoin) {
                     std::printf("[netplay] watching, a match of %d under way\n", match_players);
                     joining_late = true;
@@ -3138,6 +3167,14 @@ bool conker::lockstep::own_view_for_everyone() {
     return match_started && match_own_view;
 }
 
+bool conker::lockstep::spectating() {
+    return match_started && watching;
+}
+
+uint8_t conker::lockstep::watched_ports() {
+    return ::watched;
+}
+
 uint8_t conker::lockstep::view_pairs() {
     return match_started ? match_pairs : 0;
 }
@@ -3241,6 +3278,12 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         session->set_horizon(horizon());
         if (!initial_sent) {
             watch_for_quit();
+            if (watching) {
+                tell("Watching: L and R switch between everyone and each player.");
+            }
+        }
+        if (watching) {
+            choose_view(pads[0].button);
         }
         // This machine's players' input for read + delay, and for any read before it not sent yet: at the first read,
         // the reads before it (nobody has played yet), and as the delay goes up, those it skips (the controllers'

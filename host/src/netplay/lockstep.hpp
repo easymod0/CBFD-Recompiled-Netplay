@@ -270,6 +270,10 @@ namespace conker::lockstep {
     // The ports whose views are shown two to a window in "my view only" (bit n: port n; each machine with two
     // players'), the same for every peer (Start), once connected.
     uint8_t view_pairs();
+    // This machine is a spectator, once connected; and the view it watches (bit n: port n; 0: the whole split screen),
+    // which it chooses with its first controller's L and R (or the D-pad's left and right) as it watches.
+    bool spectating();
+    uint8_t watched_ports();
     // This peer's first port, all of them (bit n: port n), how many, and the match's players, once
     // connected.
     int port();
