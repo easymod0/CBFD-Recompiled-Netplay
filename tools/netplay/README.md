@@ -182,7 +182,10 @@ and, at the read where they first differ, the memory itself:
   profile or mods, a full or started match. A joiner has 3 s to say Hello, and the host takes at most 8
   connections at once. A joiner's Hello says how many players are on its machine, and it's given that many
   of the lowest free ports (the host's players have the first). Then each peer sends only its own ports' pads and memory hashes, reliably (lost
-  packets are resent: lockstep needs every input); Inputs and hashes before the start, beyond the reads
+  packets are resent: lockstep needs every input). Each Inputs also goes unreliably with its port's last 8 reads
+  (while the connection's send queue is near empty), so one lost packet doesn't hold up the inputs after it until
+  it's resent: the reads that came already are cut from whatever comes, and a copy is taken only once every other
+  reliable message sent before it (a Delay, a Gone...) has arrived. Inputs and hashes before the start, beyond the reads
   a peer could have reached, or a hash repeated, drop the peer. The library closes a connection that
   sends a message bigger than the largest packet, and buffers little from each peer.
 - **`lan.cpp`, `lan_packets.cpp`**: LAN discovery's beacon (27 bytes: the fit hash, platform, port, key,

@@ -26,6 +26,21 @@
 
 namespace conker::netplay {
     namespace {
+        // `inputs` from read `from` on (within them).
+        Inputs inputs_from_read(const Inputs& inputs, uint64_t from) {
+            const int skip = (int)(from - inputs.first_read);
+            Inputs rest = inputs;
+            rest.first_read = (uint32_t)from;
+            rest.count = (uint8_t)(inputs.count - skip);
+            rest.pads = {};
+            rest.motions = {};
+            for (int i = 0; i < rest.count; i++) {
+                rest.pads[i] = inputs.pads[skip + i];
+                rest.motions[i] = inputs.motions[skip + i];
+            }
+            return rest;
+        }
+
         // A joiner that hasn't finished the handshake in this long is dropped (an honest Hello takes a
         // round trip).
         constexpr double handshake_seconds = 3.0;
@@ -36,6 +51,8 @@ namespace conker::netplay {
         // the connection before it's buffered, and past these limits more are dropped (and resent, as
         // everything is sent reliably). An honest peer is never more than a few dozen messages ahead.
         constexpr int recv_buffer_messages = 512;
+        // Inputs' early copies go only while less than this waits to be sent on the connection.
+        constexpr int copy_most_pending = 8 * (int)max_packet_size;
         constexpr int recv_buffer_bytes = recv_buffer_messages * (int)max_packet_size;
         // A joiner's from the host, which may send it a state after a desync (StatePart, up to max_message_size):
         // a few parts' worth, and the rest is resent as it's read. Its only peer is the host, whose state it loads
@@ -716,7 +733,9 @@ namespace conker::netplay {
                 taken += count;
                 for (int i = 0; i < count; i++) {
                     SteamNetworkingMessage_t* message = messages[i];
+                    taking_unreliable = (message->m_nFlags & k_nSteamNetworkingSend_Reliable) == 0;
                     take(message->m_conn, { (const uint8_t*)message->m_pData, (size_t)message->m_cbSize }, events);
+                    taking_unreliable = false;
                     message->Release();
                 }
             }
@@ -768,6 +787,14 @@ namespace conker::netplay {
         }
         std::optional<Packet> packet = decode(data);
         if (packet) {
+            // (Only Inputs' early copies come unreliably; one is taken once every message it says went before it is in.)
+            if (taking_unreliable && (!std::holds_alternative<Inputs>(*packet) ||
+                (int16_t)(uint16_t)(peer->controls_taken - std::get<Inputs>(*packet).controls) < 0)) {
+                return;
+            }
+            if (!taking_unreliable && !std::holds_alternative<Inputs>(*packet) && !std::holds_alternative<Hash>(*packet)) {
+                peer->controls_taken++;
+            }
             handle(*peer, *packet, events);
             return;
         }
@@ -798,7 +825,9 @@ namespace conker::netplay {
         for (int taken = 0; taken < recv_buffer_messages && find(connection) != nullptr &&
             (count = sockets->ReceiveMessagesOnConnection(connection, messages, 32)) > 0; taken += count) {
             for (int i = 0; i < count; i++) {
+                taking_unreliable = (messages[i]->m_nFlags & k_nSteamNetworkingSend_Reliable) == 0;
                 take(connection, { (const uint8_t*)messages[i]->m_pData, (size_t)messages[i]->m_cbSize }, events);
+                taking_unreliable = false;
                 messages[i]->Release();
             }
         }
@@ -940,6 +969,29 @@ namespace conker::netplay {
             // anything else is a broken or hostile peer, refused before it's passed on.
             const Inputs* inputs = std::get_if<Inputs>(&packet);
             const Hash* hash = std::get_if<Hash>(&packet);
+            // An Inputs' reads that came already (in its early copy, or the copy after it) are cut off, and an early copy
+            // that starts past the next read waits for the reliable Inputs to fill in (it isn't taken).
+            // (A copy that isn't for now, as one sent before a seat change arriving after it, is late, not wrong.)
+            if (taking_unreliable && (inputs == nullptr || entry_open || !peer.in_match || inputs->port >= max_players ||
+                (peer.ports & (1u << inputs->port)) == 0)) {
+                return;
+            }
+            if (inputs != nullptr && !entry_open && peer.in_match && inputs->port < max_players &&
+                (peer.ports & (1u << inputs->port)) != 0) {
+                const uint64_t next = next_inputs[inputs->port];
+                if (taking_unreliable && inputs->first_read > next) {
+                    return;
+                }
+                if (inputs->first_read < next) {
+                    if ((uint64_t)inputs->first_read + inputs->count > next) {
+                        const bool unreliable = taking_unreliable;
+                        taking_unreliable = false;
+                        handle(peer, inputs_from_read(*inputs, next), events);
+                        taking_unreliable = unreliable;
+                    }
+                    return;
+                }
+            }
             // Each port's Inputs go on from the last read of its earlier ones, and a Hash's read is within the
             // horizon too: else the others would end the match on it (lockstep checks the same), where dropping
             // the peer lets them play on without it.
@@ -960,6 +1012,7 @@ namespace conker::netplay {
             if (inputs != nullptr && (peer.ports & (1u << inputs->port)) != 0) {
                 peer.played = true;
                 next_inputs[inputs->port] = inputs->first_read + inputs->count;
+                remember_sent(*inputs);
                 // Passed on to the others, as they only connect to the host.
                 for (const Peer& other : peers) {
                     if (other.connection != peer.connection) {
@@ -1016,6 +1069,10 @@ namespace conker::netplay {
 
         // A joiner, from the host.
         if (!is_welcomed) {
+            // (An early copy can overtake a Welcome lost and resent: it's for after it.)
+            if (taking_unreliable) {
+                return;
+            }
             const Welcome* welcome = std::get_if<Welcome>(&packet);
             if (welcome != nullptr && std::popcount(welcome->ports) == hello.players) {
                 own_ports = welcome->ports;
@@ -1116,12 +1173,14 @@ namespace conker::netplay {
         else if (const Inputs* inputs = std::get_if<Inputs>(&packet); inputs != nullptr) {
             if (!started || (own_ports & (1u << inputs->port)) != 0 || inputs->port >= match_players ||
                 (uint64_t)inputs->first_read + inputs->count > horizon) {
-                drop(peer, Reason::protocol, &events);
+                // (An early copy sent before a change it arrives after, as a seat change, is late, not wrong.)
+                if (!taking_unreliable) drop(peer, Reason::protocol, &events);
                 return;
             }
             Event event{ Event::Type::packet };
             event.port = inputs->port;
             event.packet = packet;
+            event.copy = taking_unreliable;
             events.push_back(std::move(event));
         }
         else if (const Hash* hash = std::get_if<Hash>(&packet); hash != nullptr) {
@@ -1279,8 +1338,8 @@ namespace conker::netplay {
     }
 
     // Everything is sent reliably (resent until it arrives, in order), and at once: lockstep needs every
-    // input, and waits for it anyway.
-    void Session::send_to(uint32_t connection, const Packet& packet) {
+    // input, and waits for it anyway. But Inputs' early copies (`reliable` false): those lost aren't resent.
+    void Session::send_to(uint32_t connection, const Packet& packet, bool reliable) {
         uint8_t buffer[max_packet_size];
         std::vector<uint8_t> large;
         std::span<uint8_t> out = buffer;
@@ -1294,9 +1353,12 @@ namespace conker::netplay {
             return;
         }
         const EResult result = SteamNetworkingSockets()->SendMessageToConnection(connection, out.data(), (uint32)size,
-            k_nSteamNetworkingSend_ReliableNoNagle, nullptr);
+            reliable ? k_nSteamNetworkingSend_ReliableNoNagle : k_nSteamNetworkingSend_UnreliableNoNagle, nullptr);
         if (result != k_EResultOK && result != k_EResultNoConnection && result != k_EResultInvalidParam) {
             std::fprintf(stderr, "[netplay] a message couldn't be sent (%d)\n", (int)result);
+        }
+        if (result == k_EResultOK && reliable && !std::holds_alternative<Inputs>(packet) && !std::holds_alternative<Hash>(packet)) {
+            if (Peer* peer = find(connection)) peer->controls_sent++;
         }
     }
 
@@ -1305,28 +1367,57 @@ namespace conker::netplay {
             return;
         }
         const uint32_t from = peer.inputs_from[inputs.port];
-        if (inputs.first_read >= from) {
-            send_to(peer.connection, inputs);
-            return;
-        }
+        const uint64_t end = (uint64_t)inputs.first_read + inputs.count;
         // Only the reads from `from` on, if any.
-        if ((uint64_t)inputs.first_read + inputs.count <= from) {
+        if (end <= from) {
             return;
         }
-        const int skip = (int)(from - inputs.first_read);
-        Inputs rest = inputs;
-        rest.first_read = from;
-        rest.count = (uint8_t)(inputs.count - skip);
-        rest.pads = {};
-        rest.motions = {};
-        for (int i = 0; i < rest.count; i++) {
-            rest.pads[i] = inputs.pads[skip + i];
-            rest.motions[i] = inputs.motions[skip + i];
+        send_to(peer.connection, inputs.first_read >= from ? inputs : inputs_from_read(inputs, from));
+        // The early copy: the port's recent reads up to these (if they're the latest remembered).
+        const std::deque<std::pair<Pad, Motion>>& r = recent[inputs.port];
+        const uint64_t first = std::max<uint64_t>(recent_first[inputs.port], from);
+        if (r.empty() || recent_first[inputs.port] + r.size() != end || first >= end) {
+            return;
         }
-        send_to(peer.connection, rest);
+        // Only on a link that keeps up: a copy is for a packet lost, not for one queued (as a peer far behind, or a state
+        // going out), and must never take the room of the reliable messages in the send buffer.
+        SteamNetConnectionRealTimeStatus_t status;
+        if (SteamNetworkingSockets()->GetConnectionRealTimeStatus(peer.connection, &status, 0, nullptr) != k_EResultOK ||
+            status.m_cbPendingReliable + status.m_cbPendingUnreliable > copy_most_pending) {
+            return;
+        }
+        Inputs copy;
+        copy.port = inputs.port;
+        copy.first_read = (uint32_t)first;
+        copy.count = (uint8_t)(end - first);
+        for (int i = 0; i < copy.count; i++) {
+            const auto& [pad, motion] = r[(size_t)(first - recent_first[inputs.port]) + i];
+            copy.pads[i] = pad;
+            copy.motions[i] = motion;
+        }
+        copy.gaps = inputs.gaps;
+        copy.controls = peer.controls_sent;
+        send_to(peer.connection, copy, false);
+    }
+
+    void Session::remember_sent(const Inputs& inputs) {
+        if (inputs.port >= max_players) return;
+        std::deque<std::pair<Pad, Motion>>& r = recent[inputs.port];
+        if (r.empty() || recent_first[inputs.port] + r.size() != inputs.first_read) {
+            r.clear();
+            recent_first[inputs.port] = inputs.first_read;
+        }
+        for (int i = 0; i < inputs.count; i++) {
+            r.emplace_back(inputs.pads[i], inputs.motions[i]);
+        }
+        while (r.size() > (size_t)input_window) {
+            r.pop_front();
+            recent_first[inputs.port]++;
+        }
     }
 
     void Session::send(const Inputs& inputs) {
+        remember_sent(inputs);
         for (const Peer& peer : peers) {
             send_inputs(peer, inputs);
         }

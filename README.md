@@ -32,7 +32,8 @@ spectators, or hosting **Without a server** (your address and a forwarded UDP po
 - **Desync recovery**: if one game drifts from the host's, the host sends its game and the match carries on.
 - **Bad connections**: the input delay adapts to the connection, a computer that falls behind catches up,
   and the status on screen shows ping, delay and who you're waiting for.
-- **Rollback** (experimental, the host's choice): hides lag by guessing the others' input and correcting it.
+- **Rollback** (on by default, the host's choice): hides lag by guessing the others' input and correcting it,
+  with a small input delay that stays steady.
 - **Spectators**: up to 8 watch a match, from its start or joining in the middle, seeing everyone's view or one
   player's (**L** and **R** to switch). They don't take a place. A spectator can take a free place or a
   leaver's, and the host can swap players and spectators. The host can turn spectators off.

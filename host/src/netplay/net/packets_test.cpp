@@ -65,7 +65,7 @@ int main() {
     CHECK(round_trips(Refuse{ Reason::rom }, 47));
     CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
     CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
-    CHECK(round_trips(some_inputs(), 159));
+    CHECK(round_trips(some_inputs(), 161));
     CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 273));
     Hash regions{ 30, 1 };
     for (int i = 0; i < memory_regions; i++) regions.regions[i] = (uint16_t)(0x0101 * i + 7);
@@ -100,7 +100,7 @@ int main() {
     CHECK(inputs[51] == 0x00 && inputs[52] == 0x80 && inputs[53] == 0xFF && inputs[54] == 0x7F &&  // motion 0
           inputs[55] == 0x34 && inputs[56] == 0x12 && inputs[57] == 0xFE && inputs[58] == 0xFF && inputs[59] == 0x80 &&
           inputs[60] == 0x05 && inputs[61] == 0x03 && inputs[62] == 0x01 && inputs[63] == 0x00);
-    CHECK(inputs.size() == 159 && inputs[155] == 0x80 && inputs[156] == 3 && inputs[157] == 0 && inputs[158] == 0x7F);  // gaps
+    CHECK(inputs.size() == 161 && inputs[155] == 0x80 && inputs[156] == 3 && inputs[157] == 0 && inputs[158] == 0x7F);  // gaps
     const std::vector<uint8_t> start = bytes_of(Start{ 3, 1, 3, 0x03, 8, 0x04 });
     CHECK(start.size() == 11 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0x03 && start[9] == 8 && start[10] == 0x04);
 

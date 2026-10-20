@@ -595,9 +595,13 @@ int main(int argc, char** argv) {
                         case Event::Type::packet:
                             if (const Inputs* inputs = std::get_if<Inputs>(&event.packet)) {
                                 Received& r = received[inputs->port];
+                                // (An early copy past the reads that came is for the reliable Inputs to fill in, as in the
+                                // game; and the reads any Inputs repeats are taken once.)
+                                if (event.copy && inputs->first_read > r.next) break;
                                 r.packets++;
                                 for (int i = 0; i < inputs->count; i++) {
                                     const uint32_t read = inputs->first_read + i;
+                                    if (read < r.next) continue;
                                     // Out of order, missing or not the pad sent: all wrong.
                                     if (read != r.next || !(inputs->pads[i] == made_up_pad(inputs->port, read))) {
                                         r.wrong++;
