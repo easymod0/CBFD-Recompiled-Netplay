@@ -6,7 +6,7 @@
 #        this machine, translating to and from its LAN address. Matches through a room with
 #        netplay_probe, relay-only with the TURN credentials the server hands out: two players (the
 #        joiner must be told only the relay's address, never the host's own) and three with 20% of
-#        packets lost; and one the status page (STATUS_PORT) counts the relays of, from coturn's metrics.
+#        packets lost once the match starts; and one the status page (STATUS_PORT) counts the relays of, from coturn's metrics.
 #        Then a credential coturn must refuse; the peers coturn denies (private ones, this
 #        machine's LAN address, cloud metadata); net's guard (a relay reaches this machine only on the
 #        relay ports); its translation, for a packet from outside (a container on Docker's bridge) to the
@@ -84,20 +84,8 @@ room_of() {
     done
 }
 
-# relay <name> <players> [probe options...]: a host and players - 1 joiners, relay-only; all must succeed. With
-# $tries set, that many goes (the lossy case: 20% of every packet lost, connecting too, now and then times out a
-# connection; a second failure in a row is one).
+# relay <name> <players> [probe options...]: a host and players - 1 joiners, relay-only; all must succeed.
 relay() {
-    left=${tries:-1}
-    while :; do
-        relay_once "$@"
-        left=$((left - 1))
-        [ $ok -eq 1 ] || [ $left -le 0 ] && break
-        echo "$1: not this time; once more"
-    done
-    check "$1" $ok
-}
-relay_once() {
     name=$1; players=$2; shift 2
     "$probe" host room --players "$players" $ice "$@" > "$name.host.txt" 2>&1 &
     pids=$!
@@ -123,6 +111,7 @@ relay_once() {
         ok=0
     fi
     grep -q "Got remote candidate" "$name.join1.txt" || ok=0
+    check "$name" $ok
 }
 
 # A TURN client of coturn's own (turnutils_uclient) with good credentials, asking to relay to <peer>:<port>.
@@ -183,9 +172,8 @@ ok=0
 $compose logs net 2>&1 | grep -q "behind NAT: public address $TEST_PUBLIC_IP on this machine for the relays, to and from $TEST_IP" && ok=1
 check nat-detected $ok
 relay nat-two 2 --reads 150
-tries=2
+# 20% of the packets lost once the match starts (netplay_probe --loss).
 relay nat-three-lossy 3 --reads 150 --loss 20
-tries=
 # The status page: during a match through the relay (30 s, so coturn's metrics are read at least once), it says
 # how many relays coturn has open, more than before it (the matches before may have left some for a while); and
 # never an address.
