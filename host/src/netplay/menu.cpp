@@ -647,7 +647,7 @@ namespace {
                 shown_about[port] = seat_text(seat);
                 seat_about[port] = text(line, shown_about[port], Typography::Body, seat.ready ? color::Text : color::TextDim);
                 if (seat.mine) {
-                    if (seat.movable && !room.hosting && room.takes_spectators) {
+                    if (seat.movable && !room.hosting && room.takes_spectators && room.spectators.size() < conker::netplay::max_spectators) {
                         room_button("Watch instead", []() { conker::lockstep::step_out(); });
                     }
                     continue;
@@ -1622,7 +1622,7 @@ namespace {
                 add_text(line, about, Typography::Body, color::TextDim);
                 if (seat.mine) {
                     // (A joiner's players can stop playing and watch.)
-                    if (seat.movable && !room.hosting && room.takes_spectators) {
+                    if (seat.movable && !room.hosting && room.takes_spectators && room.spectators.size() < conker::netplay::max_spectators) {
                         recompui::Button* watch = context.create_element<recompui::Button>(line, "Watch instead", recompui::ButtonStyle::Tertiary);
                         watch->add_pressed_callback([this]() {
                             conker::lockstep::step_out();

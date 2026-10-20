@@ -992,6 +992,11 @@ namespace conker::netplay {
                 }
             }
             else if (const Unseat* unseat = std::get_if<Unseat>(&packet)) {
+                // (Before the start, answered at once, whatever the host makes of it: the roster that follows says where
+                // the machine is, and it knows to go by it, its step-out not crossing the Start unknown.)
+                if (entry_open && !closed) {
+                    send_to(peer.connection, *unseat);
+                }
                 if (peer.port < 0 || peer.ports != unseat->ports || !peer.in_match || closed) {
                     return;
                 }
@@ -1089,8 +1094,10 @@ namespace conker::netplay {
             // (Its step-out crossed the Start: it watches, its places open or the host's to fill, and sends nothing.)
             if (stepping_out && !started) {
                 stepping_out = false;
-                own_ports = 0;
                 Event event{ Event::Type::moved };
+                event.late = true;      // (its places go idle in the match: Gone)
+                event.port = own_ports;
+                own_ports = 0;
                 events.push_back(std::move(event));
             }
             if (started || rejoining || start->players != match_players || (start->open & own_ports) != 0) {
@@ -1141,9 +1148,14 @@ namespace conker::netplay {
             events.push_back(std::move(event));
         }
         else if (const Unseat* unseat = std::get_if<Unseat>(&packet)) {
-            // Asked to step out of its port (one only). (One for a port it no longer has alone is late, not wrong: it has
-            // stepped out already, or been seated again since.)
-            if (!started || rejoining) {
+            // Before the start: the host's answer to its step-out (its roster says where it is). In the match: asked to
+            // step out. (One for ports it no longer has is late, not wrong: it has stepped out already, or been seated
+            // again since.)
+            if (!started) {
+                stepping_out = false;
+                return;
+            }
+            if (rejoining) {
                 drop(peer, Reason::protocol, &events);
                 return;
             }

@@ -2817,7 +2817,9 @@ conker::lockstep::Progress conker::lockstep::poll_connect(std::string& status) {
                 }
                 break;
             case Event::Type::moved:
-                // Before the start, the host moved this machine: to `ports`, or out of its places to watch.
+                // Before the start, the host moved this machine: to `ports`, or out of its places to watch (its step-out
+                // crossing the Start: the host's Gone for them follows).
+                if (event.late) stepped_here = (uint8_t)event.port;
                 own_ports = event.ports;
                 watching = own_ports == 0;
                 std::printf("[netplay] the host moved this machine: %s\n", watching ? "watching" : ("on " + ports_text(own_ports)).c_str());

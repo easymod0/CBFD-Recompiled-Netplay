@@ -61,7 +61,8 @@ namespace conker::netplay {
                         // (via the host for a joiner; Gone: the port gone), or the host's from spectator `spectator`'s (Hash)
             left,       // host: the peer on `ports` (or spectator `spectator`) left or was dropped, for `reason`
             ended,      // joiner: refused, or the connection to the host ended, for `reason`
-            moved,      // joiner, before the start: the host moved this machine to `ports` (none: watching), its roster says
+            moved,      // joiner, before the start: the host moved this machine to `ports` (none: watching), its roster says;
+                        // `late`: its step-out crossed the Start (its places were `port`'s bits: the host says they're idle)
         };
         Type type;
         int port = -1;          // the peer's first port (packet: the Inputs' port, for a joiner)

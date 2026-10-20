@@ -31,10 +31,12 @@
 # and before the start (the host makes the change at once):
 #   pre-claim  a spectator asks for port 3 (--netplay-claim-at 0:3) and plays it, the match starting full
 #   pre-out    a joiner steps out (--netplay-step-out-at 0), and two more take ports 2 and 3; it watches the match
+#   pre-kept   a joiner steps out before the start of a match that takes no spectators: the host refuses (says so), and
+#              it plays the match
 # Every copy, players and spectators, must match a solo replay of the recording with the port idle while nobody had it.
 # And through a room on a netplay server (beside the game's build), in public: its list says one is watching.
 # It exits 0 if all is as it should be, 1 if not. The logs are kept in --out; without it they're in a temporary
-# folder, deleted if all passed. It uses UDP ports 27340 to 27354.
+# folder, deleted if all passed. It uses UDP ports 27340 to 27355.
 set -u
 
 cd "$(dirname "$0")/../.."
@@ -294,7 +296,13 @@ wait_for out-pre-gone "the host moved this machine: watching"
 pads=mouse-2.pads start out-pre-join1 --netplay-join "$code"
 wait_for out-pre-join1 "in, on port 2"
 pads=mouse-3.pads start out-pre-join2 --netplay-join "$code"
-if finish "was the last: quitting" couch-host couch-join pre-host pre-join pre-watch out-pre-host out-pre-gone out-pre-join1 out-pre-join2; then
+pads=1.pads start kept-host --netplay-host 27355 --netplay-address 127.0.0.1 --netplay-no-spectators
+code=$(code_of kept-host)
+pads=2.pads start kept-join --netplay-join "$code" --netplay-step-out-at 0
+if finish "was the last: quitting" couch-host couch-join pre-host pre-join pre-watch out-pre-host out-pre-gone out-pre-join1 out-pre-join2 \
+    kept-host kept-join; then
+    same kept-host || failed=1
+    same kept-join || failed=1
     from=$(stepped couch-host 2)
     if [ -z "$from" ] || [ "$from" != "$(stepped couch-host 3)" ]; then
         echo "  the couch didn't step out of ports 2 and 3 (from read '$from')"
