@@ -564,7 +564,8 @@ namespace {
     std::array<double, conker::netplay::max_players> stall_grace{};
     std::array<double, conker::netplay::max_players> long_stall_at{};  // the last time a stall had gone on that long (0: never)
     uint8_t lost_ports = 0;         // let go of, not back yet
-    uint8_t last_state_ports = 0;   // the ports the last state went to (recovery.sent_at)
+    // By port, the read of the last state sent to it (0: none): till an input of its own for that read comes, it's loading.
+    std::array<uint64_t, conker::netplay::max_players> state_read_for{};
     uint64_t lost_count = 0;
     bool lost_here = false;         // a joiner: this machine was let go of, and is coming back
     // What status() and take_news() give the main thread, from the game thread (and the connecting one):
@@ -1071,19 +1072,21 @@ namespace {
 
     // The host, as read `read` waits at `t` for the ports `missing`: how long each machine has held everyone up, and
     // those past their grace let go of.
-    void let_go_of_stalled(uint64_t read, uint8_t missing, double t) {
+    void let_go_of_stalled(uint64_t read, uint8_t missing, double t, const std::array<double, conker::netplay::max_players>& missing_at) {
         if (read < rejoin_boot_reads) {
             return;
         }
         for (int port = 1; port < match_players; port++) {
             const uint8_t bit = (uint8_t)(1u << port);
             const bool getting_state = (recovery.read != never && (recovery.ports & bit) != 0) ||
-                ((last_state_ports & bit) != 0 && t - recovery.sent_at < state_wait_seconds);
+                (state_read_for[port] != 0 && received[port].size() <= state_read_for[port] && t - recovery.sent_at < state_wait_seconds);
             if ((missing & bit) == 0 || (own_ports & bit) != 0 || idle_from[port] != never || only_idle_since_back(port) || getting_state) {
                 continue;
             }
+            // (From when this read began waiting for it: an exemption ending partway through a wait mustn't lose the
+            // time already waited to the wait's own end.)
             if (stall_since[port] == 0) {
-                stall_since[port] = t;
+                stall_since[port] = missing_at[port] != 0 ? missing_at[port] : t;
                 stall_grace[port] = long_stall_at[port] != 0 && t - long_stall_at[port] < repeat_stall_seconds ? long_stall_seconds
                     : first_stall_seconds;
             }
@@ -1394,9 +1397,15 @@ namespace {
                             let_go_ports |= (uint8_t)(1u << port);
                         }
                     }
-                    // (A machine let go of, gone for good now: idle already, it left, as far as this machine shows.)
+                    // (A machine let go of, gone for good now: idle already from the read it was let go of at; everyone is
+                    // told it left, by a Gone of that read again.)
                     const uint8_t was_lost = (uint8_t)(lost_ports & event.ports);
                     if (was_lost != 0) {
+                        for (int port = 0; port < conker::netplay::max_players; port++) {
+                            if ((was_lost & (1u << port)) != 0) {
+                                session->send(Gone{ (uint8_t)port, (uint32_t)idle_from[port], (uint8_t)(event.reason == Reason::timeout) });
+                            }
+                        }
                         lost_ports &= (uint8_t)~was_lost;
                         std::lock_guard lock(status_mutex);
                         shown.lost &= (uint8_t)~was_lost;
@@ -1464,6 +1473,19 @@ namespace {
                         end_match(Reason::quit, "the connection dropped as you stepped out to watch: rejoin to come back");
                         return;
                     }
+                    // A player let go of has left for good: idle already (from that read; for a machine that came in since,
+                    // from the read it came in at, or later).
+                    if (g->silent <= 1 && idle_from[g->port] != never && g->from_read <= idle_from[g->port]) {
+                        std::printf("[netplay] %s left%s\n", ports_text((uint8_t)(1u << g->port)).c_str(), g->silent ? " (stopped answering)" : "");
+                        gone[g->port] = true;
+                        lost_ports &= (uint8_t)~(1u << g->port);
+                        {
+                            std::lock_guard lock(status_mutex);
+                            shown.lost &= (uint8_t)~(1u << g->port);
+                        }
+                        tell_left((uint8_t)(1u << g->port), g->silent != 0);
+                        break;
+                    }
                     // The host's word that a player left: from the read after the last of their inputs it passed on,
                     // all of which came first.
                     if (idle_from[g->port] != never || g->from_read != received[g->port].size()) {
@@ -1503,8 +1525,9 @@ namespace {
                         fits = d->from_read > last;
                         reached = reached && current_read >= delays[port].from;
                     }
-                    // A spectator not yet at the last change: this one waits for it (on_read).
-                    if (fits && watching && (!reached || !later_delays.empty())) {
+                    // A spectator (or one just seated, still behind) not yet at the last change: this one waits for it
+                    // (on_read), as does any after one waiting.
+                    if (fits && (((watching || current_read < seated_from) && !reached) || !later_delays.empty())) {
                         if (later_delays.size() >= 64) {
                             end_match(Reason::protocol, "the host changed the input delay at a read that doesn't fit");
                             return;
@@ -2342,8 +2365,15 @@ namespace {
         recovery.parts.clear();
         recovery.size = 0;
         recovery.ready = false;
+        // (Who's in, as the match is now: coming back mid-match, what was shown before is out of date.)
+        lost_ports = 0;
+        step_out_wanted = false;
+        wide_gap_for = 0;
         {
             std::lock_guard lock(status_mutex);
+            shown.lost = 0;
+            shown.left = 0;
+            shown.left_silently = 0;
             for (int port = 0; port < match_players; port++) {
                 if (r.idle_from[port] != conker::netplay::no_read && (r.open & (1u << port)) == 0) shown.left |= (uint8_t)(1u << port);
             }
@@ -2470,7 +2500,9 @@ namespace {
             welcome_back(read);
         }
         session->send_state(recovery.ports, recovery.spectators, (uint32_t)recovery.read, recovery.state, recovery.hash);
-        last_state_ports = recovery.ports;
+        for (int port = 0; port < conker::netplay::max_players; port++) {
+            if ((recovery.ports & (1u << port)) != 0) state_read_for[port] = recovery.read;
+        }
         std::printf("[netplay] read %llu: this game before read %llu sent to %s%s (%zu bytes)\n", (unsigned long long)read,
             (unsigned long long)recovery.read, recovery.ports != 0 ? ports_text(recovery.ports).c_str() : "",
             recovery.spectators == 0 ? "" : ((recovery.ports != 0 ? " and spectators " : "spectators ") +
@@ -3096,7 +3128,7 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     slowed_for = {};
     time_sync_skipped = 0;
     lost_ports = 0;
-    last_state_ports = 0;
+    state_read_for = {};
     lost_count = 0;
     lost_here = false;
     wide_gap_for = 0;
@@ -4488,7 +4520,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         }
         const double t = now();
         if (session->hosting()) {
-            let_go_of_stalled(read, missing_ports, t);
+            let_go_of_stalled(read, missing_ports, t, missing_at);
         }
         // (While a state is on its way to a player, longer: they wait for it.)
         if (t - since > wait_seconds + (t - recovery.sent_at < state_wait_seconds ? state_wait_seconds : 0)) {

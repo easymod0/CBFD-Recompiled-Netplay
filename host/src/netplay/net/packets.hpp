@@ -212,7 +212,8 @@ namespace conker::netplay {
     // others can tell the players they may have quit; or (2) they stepped out of their place to watch (Unseat), which
     // is open from then on; or (3) their inputs stopped coming for a while, so the others play on without them: their
     // machine (which gets this too) is still connected, and comes back by itself once it can (its Claim of its port),
-    // with the host's game as for a player coming back (Rejoin).
+    // with the host's game as for a player coming back (Rejoin). Should it leave instead, a Gone (0 or 1) of that same
+    // read says so (its port idle already).
     struct Gone {
         uint8_t port = 0;
         uint32_t from_read = 0;

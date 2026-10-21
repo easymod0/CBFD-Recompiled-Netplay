@@ -300,7 +300,9 @@ fi
 echo "leave-crash"
 # The 3-player match again, the second joiner killed at read 1500 (no goodbye): the host lets go of it once it has
 # held everyone up 5 s (#40; the library notices it stopped answering later), and the two play on, as above.
-pads=mouse-1.pads start crash-host --netplay-host 27319 --netplay-address 127.0.0.1 --players 3
+# (The host stops 8 s at read 1700, after it lets go of it, so the library notices it's gone before the match ends: the
+# first joiner must then be told it left.)
+pads=mouse-1.pads start crash-host --netplay-host 27319 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1700:8000
 code=$(code_of crash-host)
 pads=mouse-2.pads start crash-join1 --netplay-join "$code"
 i=0
@@ -320,6 +322,11 @@ if finish "was the last: quitting" crash-host crash-join1; then
         failed=1
     else
         echo "  port 3 stopped answering, let go of; idle from read $from"
+        # Let go of first, then gone for good: the first joiner is told it left, not still "lost connection".
+        if ! grep -q "(on screen) Player 3 stopped answering" "$OUT/crash-join1.out"; then
+            echo "  the first joiner wasn't told port 3 stopped answering, after it was let go of"
+            failed=1
+        fi
         idle_from "$OUT/mouse.pads" "$OUT/crash-solo.pads" 3 "$from" || exit 2
         pads=crash-solo.pads start crash-solo
         if finish "was the last: quitting" crash-solo; then
