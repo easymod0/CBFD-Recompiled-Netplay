@@ -939,3 +939,79 @@ extern "C" void conker_widen_backdrop_sectors(uint8_t* rdram, recomp_context* ct
     }
     ctx->f0.fl = std::max(ctx->f0.fl, std::min(reach, 180.0f));
 }
+
+// The 3D HUD's models at the window's sides (issue #138): the tank's timer, a box on a chain with a pipe running
+// off to the right, after the girl's tank in It's War. func_1508FD38 draws such a model as a perspective
+// projection (G_MTX) and then the model's matrix loaded on its own (its translation in front of the HUD's eye:
+// the timer's was at x 120, y 129, z -303), then the model. RT64 widens the projection for the window, so the
+// model stays where it was in the middle 4:3 of the picture: the timer hung short of the right edge, and its pipe
+// ended in view, where on the N64 it ran off the screen. A model to one side of the middle is moved out by as much
+// as the window is wider than 4:3 at its depth, so it's as near the window's edge as it was the N64 screen's:
+// (ratio - 1) of the half width that the projection shows there (-z over its x scale). Not while a cutscene is
+// shown in 4:3 with bars, where the 4:3 picture is the screen.
+//
+// The matrices are written to the frame's display list memory each frame; one found already moved (the same
+// address holding what was written last) is moved again from the game's value.
+namespace {
+    constexpr float hud_side_threshold = 0.25f; // of the half width from the middle, to count as at a side
+
+    float fixed_matrix(uint8_t* rdram, gpr mtx, int index) {
+        const int32_t value = ((int32_t)MEM_H(index * 2, mtx) << 16) | (int32_t)MEM_HU(0x20 + index * 2, mtx);
+        return (float)value / 65536.0f;
+    }
+
+    void set_fixed_matrix(uint8_t* rdram, gpr mtx, int index, float value) {
+        const int32_t fixed = (int32_t)std::lround(value * 65536.0f);
+        MEM_H(index * 2, mtx) = (int16_t)(fixed >> 16);
+        MEM_HU(0x20 + index * 2, mtx) = (uint16_t)(fixed & 0xFFFF);
+    }
+
+    struct MovedMatrix { gpr address; float written; float original; };
+    MovedMatrix moved_matrices[8] = {};
+    int moved_next = 0;
+}
+
+// func_150198FC at 0x15019B70, just after func_1508FD38: $s0 is where it started writing, $v0 its end.
+extern "C" void conker_hud_models_to_sides(uint8_t* rdram, recomp_context* ctx) {
+    const float ratio = widescreen_ratio();
+    if (ratio <= 1.0f || conker::cutscene_aspect::pillarboxed()) {
+        return;
+    }
+    const gpr start = ctx->r16, end = ctx->r2;
+    if (end <= start || end - start > 0x1000) {
+        return;
+    }
+    float x_scale = 0.0f;
+    for (gpr cmd = start; cmd < end; cmd += 8) {
+        const uint32_t w0 = (uint32_t)MEM_W(0, cmd), w1 = (uint32_t)MEM_W(4, cmd);
+        if ((w0 >> 24) != 0xDA || (w1 >> 28) != 0x8) {
+            continue;
+        }
+        const gpr mtx = (gpr)(int32_t)w1;
+        if (w0 & 0x04) { // G_MTX_PROJECTION
+            x_scale = fixed_matrix(rdram, mtx, 0);
+            continue;
+        }
+        if (!(w0 & 0x02) || x_scale <= 0.0f) { // a model matrix loaded on its own, after a projection
+            continue;
+        }
+        float x = fixed_matrix(rdram, mtx, 12);
+        const float z = fixed_matrix(rdram, mtx, 14);
+        for (const MovedMatrix& moved : moved_matrices) {
+            if (moved.address == mtx && moved.written == x) {
+                x = moved.original;
+            }
+        }
+        if (z >= 0.0f) {
+            continue;
+        }
+        const float half_width = -z / x_scale;
+        if (std::fabs(x) < hud_side_threshold * half_width) {
+            continue;
+        }
+        const float moved_x = x + std::copysign((ratio - 1.0f) * half_width, x);
+        set_fixed_matrix(rdram, mtx, 12, moved_x);
+        moved_matrices[moved_next] = { mtx, fixed_matrix(rdram, mtx, 12), x };
+        moved_next = (moved_next + 1) % 8;
+    }
+}
