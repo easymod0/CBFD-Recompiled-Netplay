@@ -54,7 +54,8 @@ namespace conker::netplay::status {
         int64_t relays = 0;         // relays (allocations) coturn has open
         uint64_t relayed_bytes = 0; // through the relay, in sessions that have ended, since coturn started
         Day today;
-        // Since the server started.
+        // Since counting_since (Unix time): the server's start, or with --state its first start with that file.
+        int64_t counting_since = 0;
         uint64_t signals = 0;
         uint64_t rooms_created = 0;
         uint64_t rooms_found = 0;
@@ -73,6 +74,12 @@ namespace conker::netplay::status {
     std::string text(const Status& status);
     // A page that shows it, refreshing itself every 30 s.
     std::string html(const Status& status);
+
+    // What netplay_server --state keeps across restarts: today's numbers, the counts since counting_since and the
+    // latest desync summaries (no address nor room code, as everywhere here), as text, a line each.
+    std::string saved(const Status& status);
+    // Those fields read back (the rest left as they are); nothing if it isn't such a text.
+    std::optional<Status> load(std::string_view saved);
 
     // The date (UTC) of a Unix time: 2026-10-20.
     std::string date_of(int64_t unix_time);

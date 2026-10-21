@@ -2,6 +2,8 @@
 
 #include "server_status.hpp"
 
+#include <algorithm>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -136,8 +138,8 @@ namespace conker::netplay::status {
         out += ",\"today\":{\"date\":" + json_string(s.today.date) + ",\"players\":" + number(s.today.players) + ",\"peak_players\":" +
             number(s.today.peak_players) + ",\"rooms\":" + number(s.today.rooms) + ",\"matches\":" + number(s.today.matches) +
             ",\"desyncs\":" + number(s.today.desyncs) + "}";
-        out += ",\"since_start\":{\"signals\":" + number(s.signals) + ",\"rooms_created\":" + number(s.rooms_created) +
-            ",\"rooms_found\":" + number(s.rooms_found) + ",\"rooms_missed\":" + number(s.rooms_missed) + ",\"lists\":" + number(s.lists) +
+        out += ",\"since_start\":{\"time\":" + std::to_string(s.counting_since) + ",\"signals\":" + number(s.signals) +
+            ",\"rooms_created\":" + number(s.rooms_created) + ",\"rooms_found\":" + number(s.rooms_found) + ",\"rooms_missed\":" + number(s.rooms_missed) + ",\"lists\":" + number(s.lists) +
             ",\"relay_credentials\":" + number(s.credentials) + ",\"desyncs\":" + number(s.desyncs) + ",\"desyncs_not_logged\":" +
             number(s.desyncs_unlogged) + "}";
         out += ",\"recent_desyncs\":[";
@@ -171,7 +173,7 @@ namespace conker::netplay::status {
         out += "  players: " + number(s.today.players) + " (at most " + number(s.today.peak_players) + " at once)\n";
         out += "  rooms: " + number(s.today.rooms) + " made, " + number(s.today.matches) + " joined\n";
         out += "  desyncs: " + number(s.today.desyncs) + "\n\n";
-        out += "Since the server started\n";
+        out += "Since " + time_of(s.counting_since) + " UTC\n";
         out += "  rooms: " + number(s.rooms_created) + " made, " + number(s.rooms_found) + " found, " + number(s.rooms_missed) +
             " codes not found\n";
         out += "  " + number(s.signals) + " signals passed, " + number(s.lists) + " room lists, " + number(s.credentials) +
@@ -215,7 +217,7 @@ namespace conker::netplay::status {
         out += row("Players", number(s.today.players) + " (at most " + number(s.today.peak_players) + " at once)");
         out += row("Rooms", number(s.today.rooms) + " made, " + number(s.today.matches) + " joined");
         out += row("Desyncs", number(s.today.desyncs));
-        out += "</table>\n<h2>Since the server started</h2>\n<table>\n";
+        out += "</table>\n<h2>Since " + time_of(s.counting_since) + " UTC</h2>\n<table>\n";
         out += row("Rooms", number(s.rooms_created) + " made, " + number(s.rooms_found) + " found, " + number(s.rooms_missed) +
             " codes not found");
         out += row("Signalling", number(s.signals) + " signals passed, " + number(s.lists) + " room lists, " + number(s.credentials) +
@@ -233,6 +235,92 @@ namespace conker::netplay::status {
             out += "</ol>\n";
         }
         return out + "</body></html>\n";
+    }
+
+    namespace {
+        constexpr const char* saved_header = "conker-netplay-server-state 1";
+
+        bool is_date(const std::string& date) {
+            if (date.size() != 10) return false;
+            for (size_t i = 0; i < date.size(); i++) {
+                if (i == 4 || i == 7 ? date[i] != '-' : date[i] < '0' || date[i] > '9') return false;
+            }
+            return true;
+        }
+    }
+
+    std::string saved(const Status& s) {
+        std::string out = std::string(saved_header) + "\n";
+        out += "since " + std::to_string(s.counting_since) + "\n";
+        out += "today " + (is_date(s.today.date) ? s.today.date : date_of(s.now)) + " " + number(s.today.players) + " " +
+            number(s.today.peak_players) + " " + number(s.today.rooms) + " " + number(s.today.matches) + " " + number(s.today.desyncs) + "\n";
+        out += "counts " + number(s.signals) + " " + number(s.rooms_created) + " " + number(s.rooms_found) + " " + number(s.rooms_missed) +
+            " " + number(s.lists) + " " + number(s.credentials) + " " + number(s.desyncs) + " " + number(s.desyncs_unlogged) + "\n";
+        for (const Desync& d : s.recent) {
+            out += "desync " + std::to_string(d.at) + " " + hex16(d.build) + " " + std::to_string(d.platform) + " " +
+                std::to_string(d.players) + " " + std::to_string(d.port) + " " + std::to_string(d.other) + " " + number(d.read) + " " +
+                std::to_string(d.regions) + " " + std::to_string(d.rollback) + " " + std::to_string(d.delay) + "\n";
+        }
+        return out;
+    }
+
+    std::optional<Status> load(std::string_view text) {
+        // A line's words; numbers read whole (no sign on a count, nothing after one).
+        const auto words_of = [](std::string_view line) {
+            std::vector<std::string_view> words;
+            for (size_t at = 0; at < line.size();) {
+                const size_t end = std::min(line.find(' ', at), line.size());
+                if (end > at) words.push_back(line.substr(at, end - at));
+                at = end + 1;
+            }
+            return words;
+        };
+        const auto read = [](std::string_view word, auto& value, int base = 10) {
+            const auto [end, error] = std::from_chars(word.data(), word.data() + word.size(), value, base);
+            return error == std::errc() && end == word.data() + word.size();
+        };
+        Status s;
+        bool header = false, since = false, today = false, counts = false;
+        size_t at = 0;
+        while (at < text.size()) {
+            const size_t end = std::min(text.find('\n', at), text.size());
+            std::string_view line = text.substr(at, end - at);
+            at = end + 1;
+            if (line.ends_with('\r')) line.remove_suffix(1);
+            if (!header) {
+                if (line != saved_header) return std::nullopt;
+                header = true;
+                continue;
+            }
+            const std::vector<std::string_view> w = words_of(line);
+            if (w.empty()) continue;
+            if (w[0] == "since" && w.size() == 2 && !since) {
+                since = read(w[1], s.counting_since);
+            }
+            else if (w[0] == "today" && w.size() == 7 && !today) {
+                Day& d = s.today;
+                d.date = std::string(w[1]);
+                today = is_date(d.date) && read(w[2], d.players) && read(w[3], d.peak_players) && read(w[4], d.rooms) &&
+                    read(w[5], d.matches) && read(w[6], d.desyncs);
+            }
+            else if (w[0] == "counts" && w.size() == 9 && !counts) {
+                counts = read(w[1], s.signals) && read(w[2], s.rooms_created) && read(w[3], s.rooms_found) && read(w[4], s.rooms_missed) &&
+                    read(w[5], s.lists) && read(w[6], s.credentials) && read(w[7], s.desyncs) && read(w[8], s.desyncs_unlogged);
+            }
+            else if (w[0] == "desync" && w.size() == 11) {
+                Desync d;
+                if (!(read(w[1], d.at) && read(w[2], d.build, 16) && read(w[3], d.platform) && read(w[4], d.players) && read(w[5], d.port) &&
+                      read(w[6], d.other) && read(w[7], d.read) && read(w[8], d.regions) && read(w[9], d.rollback) && read(w[10], d.delay))) {
+                    return std::nullopt;
+                }
+                if (s.recent.size() < max_recent) s.recent.push_back(d);
+            }
+            else {
+                return std::nullopt;
+            }
+        }
+        if (!since || !today || !counts) return std::nullopt;
+        return s;
     }
 
     std::optional<TurnMetrics> parse_turn_metrics(std::string_view metrics) {

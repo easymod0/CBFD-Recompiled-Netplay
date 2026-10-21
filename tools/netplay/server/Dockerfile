@@ -16,6 +16,8 @@ FROM debian:bookworm-slim
 # nftables and iproute2 for compose.yaml's net service (as root), which uses this image too.
 RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32 libssl3 nftables iproute2 \
     && rm -rf /var/lib/apt/lists/*
+# Its kept numbers (--state, compose.yaml's data volume), which a new volume takes its owner from.
+RUN mkdir -p /var/lib/conker-netplay && chown nobody:nogroup /var/lib/conker-netplay
 COPY --from=build /build/netplay_server /usr/local/bin/netplay_server
 USER nobody
 EXPOSE 27100/udp
