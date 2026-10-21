@@ -99,6 +99,39 @@ int main() {
     CHECK(has(html(odd), "a??b"));
     CHECK(has(json(odd), "\"a??b\":1"));
 
+    // What --state keeps: read back as it was, and nothing from anything else.
+    Status counted = s;
+    counted.counting_since = 1792400000;
+    counted.recent.push_back({ 1792498000, 0xffffffffffffffffull, 1, 4, 3, 2, 99, 0, 0, 1 });
+    const std::string kept = saved(counted);
+    CHECK(!has(kept, "netplay.23") && !has(kept, "connected"));     // not what's now: those start again
+    const auto back = load(kept);
+    CHECK(back && back->counting_since == 1792400000 && back->today.date == "2026-10-20" && back->today.players == 14 &&
+        back->today.peak_players == 8 && back->today.rooms == 5 && back->today.matches == 4 && back->today.desyncs == 1);
+    CHECK(back && back->signals == 120 && back->rooms_created == 11 && back->rooms_found == 9 && back->rooms_missed == 2 &&
+        back->lists == 40 && back->credentials == 30 && back->desyncs == 3 && back->desyncs_unlogged == 1);
+    CHECK(back && back->recent.size() == 2 && back->recent[0].build == 0x5e6f000011112222ull && back->recent[0].read == 4512 &&
+        back->recent[0].delay == 2 && back->recent[1].build == 0xffffffffffffffffull && back->recent[1].port == 3);
+    CHECK(back && saved(*back) == kept);
+    CHECK(has(text(counted), "Since 2026-10-19 "));
+    CHECK(has(json(counted), "\"since_start\":{\"time\":1792400000,"));
+    CHECK(!load(""));
+    CHECK(!load("since 1\ntoday 2026-10-20 1 1 1 1 1\ncounts 1 1 1 1 1 1 1 1\n"));    // no header
+    CHECK(!load(kept.substr(0, kept.find("counts"))));                                  // cut short
+    CHECK(!load(kept + "desync 1 zz\n"));
+    CHECK(!load(kept + "what 1\n"));
+    CHECK(!load(kept + "since 5\n"));                                                   // twice
+    std::string negative = kept, junk = kept, crlf;
+    negative.replace(negative.find("counts 120"), 10, "counts -120");
+    CHECK(!load(negative));
+    junk.replace(junk.find("counts 120"), 10, "counts 120x");
+    CHECK(!load(junk));
+    for (char c : kept) crlf += c == '\n' ? std::string("\r\n") : std::string(1, c);
+    CHECK(load(crlf) && saved(*load(crlf)) == kept);
+    std::string bad_date = kept;
+    bad_date.replace(bad_date.find("2026-10-20"), 10, "2026/10/20");
+    CHECK(!load(bad_date));
+
     // coturn's metrics.
     const char* metrics =
         "# HELP turn_total_allocations Represents current allocations number\n"

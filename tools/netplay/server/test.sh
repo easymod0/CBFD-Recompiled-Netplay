@@ -7,6 +7,7 @@
 #        netplay_probe, relay-only with the TURN credentials the server hands out: two players (the
 #        joiner must be told only the relay's address, never the host's own) and three with 20% of
 #        packets lost once the match starts; and one the status page (STATUS_PORT) counts the relays of, from coturn's metrics.
+#        Its numbers still counted in a new signalling server's container (the data volume).
 #        Then a credential coturn must refuse; the peers coturn denies (private ones, this
 #        machine's LAN address, cloud metadata); net's guard (a relay reaches this machine only on the
 #        relay ports); its translation, for a packet from outside (a container on Docker's bridge) to the
@@ -206,6 +207,20 @@ done
 [ $counted -eq 1 ] || { echo "status: the relays weren't counted ($before before)"; cat status-match.json.txt; $compose logs signal | tail -n 5; }
 grep -q -F -e "$TEST_PUBLIC_IP" -e "$TEST_IP" -e "$room" status-match.json.txt && { ok=0; echo "status: an address or the room code shown"; }
 check nat-status $ok
+# Its numbers kept (the data volume): in a new container, the rooms made so far still counted.
+made=$(sed -n 's/.*"rooms_created":\([0-9]*\).*/\1/p' status-match.json.txt)
+$compose up -d --force-recreate --no-deps signal > /dev/null 2>&1
+ok=0
+i=0
+while [ $i -lt 50 ]; do
+    after=$(curl -s "http://127.0.0.1:$STATUS_PORT/status.json" | sed -n 's/.*"rooms_created":\([0-9]*\).*/\1/p')
+    [ -n "$after" ] && break
+    sleep 0.2
+    i=$((i + 1))
+done
+[ -n "$made" ] && [ "$made" -gt 0 ] && [ "${after:-0}" -ge "$made" ] && $compose logs signal 2>&1 | grep -q "counts read from" && ok=1
+[ $ok -eq 1 ] || { echo "kept: $made rooms made before the restart, ${after:-none} after"; $compose logs signal | tail -n 5; }
+check nat-kept $ok
 # The menu's connection test: the server, and its relay working (through it to itself). Whether direct
 # connections would work isn't checked here: this machine's packets straight to a relay port are dropped.
 connection_test() {

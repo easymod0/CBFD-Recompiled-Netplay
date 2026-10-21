@@ -43,8 +43,11 @@ docker compose logs -f    # each says "public address <ip>": check it's this ser
 **Updating:** the fixes are in `compose.yaml` as well as the image, and each needs the other as of the
 same commit: download `compose.yaml` again (the same `curl` line), check `.env.example` for new settings,
 then `docker compose pull && docker compose up -d`, and check `docker compose logs net` says `ready`.
+Pull first: an older image with a newer `compose.yaml` may not know an option it now passes (`--state`), and
+the signalling server then stops at once, again and again (`docker compose logs signal` says `usage`).
 
-**Stopping:** `docker compose down -v`. `net`'s guard stays (a firewall rule that only affects coturn's
+**Stopping:** `docker compose down`, which keeps the status's numbers (in the `data` volume); `docker
+compose down -v` deletes them too. `net`'s guard stays (a firewall rule that only affects coturn's
 user); to remove it too, `sudo nft delete table ip conker_netplay_guard`. If `net` was killed rather than
 stopped, also `sudo nft delete table ip conker_netplay_nat` and `sudo ip addr del <public IP>/32 dev lo`.
 
@@ -149,15 +152,24 @@ status on that TCP port, for you to open in a browser: `http://<server>:27180/`.
   public rooms by the release they say, and the relays coturn has open (read from coturn's own metrics,
   every 15 s, which it serves on 127.0.0.1 only, at `TURN_METRICS_PORT`, 9641 by default).
 - **Today** (UTC): players (each time one goes online), the most at once, rooms made and joined, desyncs.
-- **Since it started:** rooms made, found and codes not found, signals, room lists, relay credentials,
-  desyncs (and how many weren't logged).
+- **Since** the date it began counting: rooms made, found and codes not found, signals, room lists, relay
+  credentials, desyncs (and how many weren't logged).
 - **The latest desyncs:** the last 20 summaries logged, as in the log (below).
 
 It never shows an address or a room code, and there's nothing to log in with: it's for your own network.
 It listens on all this machine's addresses (`STATUS_ADDRESS`, `0.0.0.0` by default): at home, behind a router
 that forwards only the UDP ports above, only your network reaches it. **On a VPS**, where the machine's
 address is public, set `STATUS_ADDRESS` to a private one (a VPN's, say), or keep the port closed in its
-firewall. Without `STATUS_PORT` it's off. The 10-minute log line has the same headline numbers either way.
+firewall. Without `STATUS_PORT` it's off.
+
+**Kept across restarts:** today's numbers, the counts and the latest desyncs (no address nor room code) are
+written to `/var/lib/conker-netplay/state` in the signal container every minute they change and as it stops,
+and read as it starts. That's the `data` volume by default; to keep them in a folder of your own instead,
+set `DATA_DIR` in `.env` to it and let the container's user (65534) write there: `sudo mkdir -p /srv/conker
+&& sudo chown 65534:65534 /srv/conker`. (A path needs a `/` in it: `./conker` for a folder beside `compose.yaml`; a bare
+name is taken as a volume's.) If it can't write, it says so in its log and runs on (the numbers then
+start again at a restart). To start counting afresh: `docker compose stop signal`, delete the file
+(`state`), `docker compose start signal`. The 10-minute log line has the same headline numbers either way.
 
 ## What's limited
 

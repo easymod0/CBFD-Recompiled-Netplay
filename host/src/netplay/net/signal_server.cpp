@@ -12,7 +12,7 @@
 //   netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]
 //                  [--max-listed-per-address 2] [--desync-burst 4] [--newest-version <n>]   (a test: speak no newer one)
 //                  [--turn <host:port> [--turn-hours 12] [--turn-metrics <address:port>]]   (with the secret in TURN_SECRET)
-//                  [--status <address:port>]
+//                  [--status <address:port>] [--state <file>]
 //
 // With --turn, each peer is offered that TURN relay as it registers (Turn), with credentials of its own
 // made from the secret it shares with coturn (turn_credentials.hpp), which expire after --turn-hours.
@@ -45,6 +45,11 @@
 // the operator's network only (nothing to log in with). With --turn-metrics, coturn's metrics (its --prometheus,
 // on this machine) are read every 15 s for how many relays it has open.
 //
+// With --state, the status's numbers (today's, the counts and the latest desync summaries; never an address or
+// a room code) are kept in that file, read as it starts and written (a new file, then renamed over it) each
+// minute they changed and as it stops, so they count on across restarts. A file that can't be read is kept
+// beside it as <file>.broken, and counting starts again.
+//
 // It runs until SIGINT or SIGTERM (docker stop).
 
 #include <algorithm>
@@ -56,6 +61,8 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <random>
@@ -262,6 +269,7 @@ namespace {
         // For the status (--status): when it started, relay credentials given, today's numbers (and the rooms
         // joined today, to count each once), the latest desync summaries logged, and coturn's last metrics.
         double started_at = now();
+        int64_t counting_since = (int64_t)std::time(nullptr);
         uint64_t credentials_given = 0;
         status::Day today;
         std::unordered_set<uint64_t> joined_today;
@@ -639,6 +647,7 @@ namespace {
                 s.relayed_bytes = turn_metrics->bytes;
             }
             s.today = today;
+            s.counting_since = counting_since;
             s.signals = signals_passed;
             s.rooms_created = rooms_created;
             s.rooms_found = rooms_found;
@@ -649,6 +658,22 @@ namespace {
             s.desyncs_unlogged = desyncs_unlogged;
             s.recent.assign(recent_desyncs.begin(), recent_desyncs.end());
             return s;
+        }
+
+        // The numbers --state kept (status::load's), counted on from.
+        void restore(const status::Status& s) {
+            counting_since = s.counting_since;
+            today = s.today;
+            signals_passed = s.signals;
+            rooms_created = s.rooms_created;
+            rooms_found = s.rooms_found;
+            rooms_missed = s.rooms_missed;
+            lists_sent = s.lists;
+            credentials_given = s.credentials;
+            desyncs_reported = s.desyncs;
+            desyncs_unlogged = s.desyncs_unlogged;
+            recent_desyncs.assign(s.recent.begin(), s.recent.end());
+            roll_day();
         }
     };
 
@@ -854,11 +879,86 @@ namespace {
         }
     };
 
+    // --state's file: read as the server starts, written each minute the numbers changed and as it stops.
+    struct StateFile {
+        std::string path;
+        std::string written;        // what's in it
+        bool failed = false;        // the last write failed (said once, until one works)
+
+        void read(Server& state) {
+            std::error_code error;
+            const auto type = std::filesystem::status(path, error).type();
+            if (type == std::filesystem::file_type::not_found) {
+                std::printf("netplay_server: no %s yet: counting from now\n", path.c_str());
+                return;
+            }
+            std::ifstream in(path, std::ios::binary);
+            if (type != std::filesystem::file_type::regular || !in) {
+                // (Never written over: it may have the counts in it.)
+                std::printf("netplay_server: couldn't read %s: counting from now, and not keeping the counts\n", path.c_str());
+                path.clear();
+                return;
+            }
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            in.close();
+            const std::optional<status::Status> kept = status::load(text);
+            if (!kept) {
+                std::error_code error;
+                std::filesystem::rename(path, path + ".broken", error);
+                std::printf("netplay_server: %s isn't a state this server wrote: kept as %s.broken, counting from now\n", path.c_str(), path.c_str());
+                return;
+            }
+            state.restore(*kept);
+            written = text;
+            std::printf("netplay_server: counts read from %s (since %lld)\n", path.c_str(), (long long)kept->counting_since);
+        }
+
+        void write(const Server& state) {
+            const std::string text = status::saved(state.snapshot());
+            if (text == written) {
+                return;
+            }
+            const std::string temporary = path + ".new";
+            bool ok = false;
+            int failure = 0;
+            if (std::FILE* out = std::fopen(temporary.c_str(), "wb")) {
+                ok = std::fwrite(text.data(), 1, text.size(), out) == text.size() && std::fflush(out) == 0;
+#if !defined(_WIN32)
+                ok = ok && fsync(fileno(out)) == 0;
+#endif
+                if (!ok) failure = errno;
+                ok = std::fclose(out) == 0 && ok;
+            }
+            if (!ok && failure == 0) failure = errno;
+            std::error_code error;
+            if (ok) {
+                std::filesystem::rename(temporary, path, error);
+                ok = !error;
+            }
+            if (!ok) {
+                if (!failed) {
+                    std::printf("netplay_server: couldn't write %s (%s): the counts start again when it restarts\n", path.c_str(),
+                        error ? error.message().c_str() : std::strerror(failure));
+                    std::fflush(stdout);
+                }
+                failed = true;
+                std::filesystem::remove(temporary, error);
+                return;
+            }
+            if (failed) {
+                std::printf("netplay_server: %s written again\n", path.c_str());
+                std::fflush(stdout);
+            }
+            failed = false;
+            written = text;
+        }
+    };
+
     int usage() {
         std::fprintf(stderr, "usage: netplay_server [--port 27100] [--max-per-address 8] [--max-peers 4096] [--connection-burst 20]\n"
                              "                      [--max-listed-per-address 2] [--desync-burst 4] [--newest-version <n>]\n"
                              "                      [--turn <host:port> [--turn-hours 12] [--turn-metrics <address:port>]]   (the secret in TURN_SECRET)\n"
-                             "                      [--status <address:port>]\n");
+                             "                      [--status <address:port>] [--state <file>]\n");
         return 2;
     }
 }
@@ -866,6 +966,7 @@ namespace {
 int main(int argc, char** argv) {
     int port = 27100;
     Server state;
+    StateFile state_file;
     std::optional<sockaddr_in> status_at;
     std::optional<sockaddr_in> metrics_at;
     for (int i = 1; i < argc; i++) {
@@ -873,6 +974,10 @@ int main(int argc, char** argv) {
         if (i + 1 >= argc) return usage();
         if (arg == "--turn") {
             state.turn = argv[++i];
+            continue;
+        }
+        if (arg == "--state") {
+            state_file.path = argv[++i];
             continue;
         }
         if (arg == "--status" || arg == "--turn-metrics") {
@@ -955,9 +1060,17 @@ int main(int argc, char** argv) {
         (unsigned)state.newest_version,
         state.turn.empty() ? ", no TURN relay" : ", offering a TURN relay");
     std::fflush(stdout);
+    if (!state_file.path.empty()) {
+        state_file.read(state);
+        if (!state_file.path.empty()) {
+            state_file.write(state);    // (whether it can be, said now rather than in a minute)
+        }
+    }
+    std::fflush(stdout);
     page.poll(state);   // the status's port, at once (said if it's served, or not yet)
 
     double next_report = now() + 600;
+    double next_save = now() + 60;
     double next_expiry = now();
     while (!stopping) {
         ISteamNetworkingSockets* sockets = SteamNetworkingSockets();
@@ -991,9 +1104,17 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
             next_report = now() + 600;
         }
+        if (!state_file.path.empty() && now() >= next_save) {
+            state.roll_day();
+            state_file.write(state);
+            next_save = now() + 60;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
+    if (!state_file.path.empty()) {
+        state_file.write(state);
+    }
     std::printf("netplay_server: stopping\n");
     SteamNetworkingSockets()->CloseListenSocket(state.listen);
     server = nullptr;
