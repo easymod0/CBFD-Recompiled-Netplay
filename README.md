@@ -30,8 +30,11 @@ spectators, or hosting **Without a server** (your address and a forwarded UDP po
 - **Late joining**: new players can join a match under way, on an open place or one left empty.
 - **Leaving doesn't end it**: someone who drops out can rejoin their place; the others play on.
 - **Desync recovery**: if one game drifts from the host's, the host sends its game and the match carries on.
-- **Bad connections**: the input delay adapts to the connection, a computer that falls behind catches up,
-  and the status on screen shows ping, delay and who you're waiting for.
+- **Bad connections**: each player gets their own input delay, sized for how their inputs reach the others,
+  so one bad link doesn't raise everyone's. A computer that falls behind catches up. A player whose inputs
+  stop for a few seconds is let go of and the others play on; they come back by themselves when their
+  connection does. The status on screen shows ping, delay and who you're waiting for, and **Netplay
+  Details** (the Esc menu's **Netplay** tab) shows each player's delay.
 - **Rollback** (on by default, the host's choice): hides lag by guessing the others' input and correcting it,
   with a small input delay that stays steady.
 - **Spectators**: up to 8 watch a match, from its start or joining in the middle, seeing everyone's view or one
@@ -48,6 +51,10 @@ spectators, or hosting **Without a server** (your address and a forwarded UDP po
 types is shown to anyone else.
 
 The netplay server's address is under **Settings** (`conker.jesp.ca:27100` by default), with **Test connection**.
+Reporting a problem: each run writes `conker.log` next to the game (in your user folder on macOS, or where the
+game's folder can't be written to), and keeps the run before as `conker.prev.log`. Please attach them; they hold
+the addresses netplay connected to.
+
 How it works and how to test it: [tools/netplay/README.md](tools/netplay/README.md).
 
 # Conker's Bad Fur Day: Recompiled
@@ -130,7 +137,8 @@ The game is playable, and has been played through to the end. Known issues:
 
 If the game crashes on Windows, a report is written to `crash.log` next to the
 executable and shown in a message box. On Linux and macOS, the crash report is printed
-to the terminal. Please include it when reporting a problem.
+to the terminal, or, started from the desktop, to `conker.log` (see Netplay above).
+Please include it when reporting a problem.
 
 ## What you need to build it
 
