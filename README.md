@@ -236,8 +236,9 @@ Run `host/build/ConkerRecomp` (Linux and macOS) or `host\build-win\ConkerRecomp.
 (Windows). The first time, pick **Load ROM** in the launcher and select your ROM
 (the same `baserom.us.z64` works). After that it's remembered, so just choose
 **Start Game**. With **Start Game Directly** on the General tab, the game starts as
-soon as the program opens, without the launcher (turn it off in the settings while
-playing to get the launcher back).
+soon as the program opens, without the launcher. To get to the launcher while
+playing (to install mods or turn them on or off), choose **Return to Launcher** in
+the settings' Quit prompt: the program restarts at the launcher.
 
 - **Settings** (in the launcher, or Esc / the controller's menu button in game)
   has its options by tab: General (deadzone, rumble), Camera (turning, the free

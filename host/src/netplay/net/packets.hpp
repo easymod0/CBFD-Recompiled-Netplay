@@ -2,7 +2,7 @@
 // what arrives from the network. Each kind of packet has a fixed size and a version, and decode()
 // checks every field: anything else is refused whole.
 //
-// Peers send inputs only: each its own port's pads (the host passes them on to the others), the hashes
+// Peers send inputs only: each its own ports' pads (one port per player on that machine) (the host passes them on to the others), the hashes
 // of the game's memory for the desync check, and the handshake. Never files, mods or save states.
 //
 // The layout, little-endian: "CN", u16 version, u8 kind, then the kind's fields (see packets.cpp).
@@ -18,14 +18,14 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 7;
+    constexpr uint16_t protocol_version = 9;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
     // sent reliably, so none is lost: lockstep can't go on without every one.)
     constexpr int input_window = 8;
     // The largest packet, to size buffers.
-    constexpr size_t max_packet_size = 144;
+    constexpr size_t max_packet_size = 160;
     // The most reads a peer's own pads are sent ahead of the game (the input delay).
     constexpr int max_delay = 8;
 
@@ -38,15 +38,17 @@ namespace conker::netplay {
         bool operator==(const Pad&) const = default;
     };
     // A player's settings that change what their mouse, gyro, stick and camera do in the game (motion.cpp,
-    // field_of_view.cpp): each machine applies every player's own. The bits: 0 mouse Direct, 1 gyro Direct,
-    // 2 stick Direct, 3 the mouse doesn't turn the camera, 4-5 mouse invert, 6-7 gyro invert, 8-9 stick
-    // invert (0 None, 1 X, 2 Y, 3 both), 10-15 their camera's field of view: 0 the game's own, 1 to
-    // fov_codes for 35 to 80 degrees (34 + the code); a code past that, and the packet is refused.
-    using Controls = uint16_t;
-    constexpr Controls controls_mask = 0x03FF;  // the bits besides the field of view
+    // field_of_view.cpp, look_aim.cpp): each machine applies every player's own. The bits: 0 mouse Direct, 1 gyro
+    // Direct, 2 stick Direct, 3 the mouse doesn't turn the camera, 4-5 mouse invert, 6-7 gyro invert, 8-9 stick
+    // invert (0 None, 1 X, 2 Y, 3 both), 10-15 their camera's field of view: 0 the game's own, 1 to fov_codes for
+    // 35 to 80 degrees (34 + the code), 16 Aiming: Swap Sticks. A field of view code past fov_codes, or any bit
+    // past 16, and the packet is refused.
+    using Controls = uint32_t;
+    constexpr Controls controls_mask = 0x03FF;  // the bits below the field of view
     constexpr int fov_shift = 10;
     constexpr int fov_codes = 46;
-    constexpr bool valid_controls(Controls c) { return (c >> fov_shift) <= fov_codes; }
+    constexpr Controls swap_sticks_bit = 0x10000;
+    constexpr bool valid_controls(Controls c) { return (c >> 17) == 0 && ((c >> fov_shift) & 0x3F) <= fov_codes; }
     // One controller read's mouse and gyro movement for one player, beside their pad: what moved since their
     // previous read, already scaled by their sensitivity (motion.cpp), in fixed point so every machine
     // gives the game exactly the same. The mouse in 1/8 pixel, gyro in halves of recompinput's unit, the
@@ -94,11 +96,13 @@ namespace conker::netplay {
         uint64_t profile = 0;   // hash of the netplay settings profile
         uint64_t mods = 0;      // hash of the mods on and their settings, texture packs aside (0: none)
         uint64_t key = 0;       // the match's key, from the join code (the host's own: its random key)
+        uint8_t players = 1;    // the players on the joiner's machine, each with a port of their own (1 to 3)
         bool operator==(const Hello&) const = default;
     };
-    // Host to joiner: accepted, on this port, in a match of this many players.
+    // Host to joiner: accepted, on these ports (bit n: port n; one for each of its players, never the
+    // host's port 0), in a match of this many players.
     struct Welcome {
-        uint8_t port = 0;
+        uint8_t ports = 0;
         uint8_t players = 0;
         bool operator==(const Welcome&) const = default;
     };
@@ -124,11 +128,13 @@ namespace conker::netplay {
     };
     // Host to everyone, once every port is taken: the match starts, with this many players, whether every
     // player sees only their own view of the split screen (the host's rule for the match: 1) or each chooses
-    // (0), and the input delay everyone uses (0 to max_delay).
+    // (0), the input delay everyone uses (0 to max_delay), and the ports whose views are shown two to a window
+    // (bit n: port n; the ports of each machine with two players), which the culls go by in "my view only".
     struct Start {
         uint8_t players = 0;
         uint8_t own_view = 0;
         uint8_t delay = 0;
+        uint8_t pairs = 0;
         bool operator==(const Start&) const = default;
     };
     // Leaving, and why.

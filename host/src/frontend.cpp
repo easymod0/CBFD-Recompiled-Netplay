@@ -701,13 +701,16 @@ namespace {
             return false;
         }
         if (!recompinput::game_input_disabled()) {
+            // The player aiming with this controller: while the harness is used, its player's port in a netplay
+            // match (this machine's player of the same number).
+            const int player = conker::netplay_profile::active() ? conker::motion::local_port(port) : port;
             // Port 1 has the keyboard, and its controller once one has pressed a button.
             // In the bank's leaps with Aiming: Swap Sticks, player 1's right stick moves the crosshair: not the
             // free camera's (which doesn't turn in a leap anyway: mouse_camera.cpp), and swapped.
             const bool leap_swap = port == 0 && conker::look_aim::swap_sticks_in_leap();
             read_port(port < count ? controllers[port] : nullptr, port == 0,
                 port == 0 && !leap_swap && conker::mouse_camera::stick_turns_camera(),
-                leap_swap || conker::look_aim::swap_sticks_now(port), conker::look_aim::z_turns_aim(port), buttons, x, y);
+                leap_swap || conker::look_aim::swap_sticks_now(player), conker::look_aim::z_turns_aim(player), buttons, x, y);
         }
         return true;
     }
@@ -750,6 +753,8 @@ void conker::frontend::init(recomp::GameEntry& game) {
     // Versions of the ROM (the original, an uncensored ROM hack...) to switch between.
     recompui::register_launcher_init_callback(init_launcher);
     recompui::register_launcher_update_callback(update_launcher);
+    // While playing, the Quit prompt also offers Return to Launcher (issue #133).
+    recompui::register_return_to_launcher_action(conker::return_to_launcher);
 
     recompui::register_primary_font("InterVariable.ttf", "Inter Variable");
     recompui::register_ui_exports();

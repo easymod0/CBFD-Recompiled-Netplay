@@ -37,6 +37,8 @@ Its options (see `host/src/netplay/harness.cpp`):
 | `--jitter <us>` | sleeps at random, up to `us` microseconds, at the game's OS calls and in the graphics thread: a test that the host's speed doesn't change the game |
 | `--state-test <s>:<l>` | takes a save state after read `s` and loads it at read `l`, so the game goes back and on again: the hash log then holds the reads after the load, which should match a run without it |
 | `--real-time` | runs the game on the time, as normally, instead of the timeline, to compare |
+| `--own-view` | records or hashes as a match whose rule is that every player sees only their own view (it widens the split screen's culls, see `host/src/netplay/view.cpp`); the recording says so, and its replay does the same (a replay can't be given it: it goes by its recording's) |
+| `--view-pairs <ports>` | ...with those ports' views shown two to a window (e.g. `12`), as on a machine with two players; recorded too |
 
 While any of these are used, the game starts from an empty save of its own (`saves/harness/`, emptied
 each run; your own save isn't touched) and sees fixed controllers. Reads are counted from the first,
@@ -81,20 +83,25 @@ same headless or on another machine:
 
 - **Each player's own:** the mouse and gyro (R-Look, the aiming modes, the orbit camera) and the
   settings that change what they and the stick do there: each response (Smooth or Direct), each
-  invert, and Mouse: Turn the Camera (`host/src/netplay/motion.cpp`); and Camera: Field of View, which
+  invert, and Mouse: Turn the Camera (`host/src/netplay/motion.cpp`); Camera: Field of View, which
   widens or narrows that player's camera (`host/src/field_of_view.cpp`: it changes the game's culls and
-  aiming, so every machine applies every player's own). A player's movement is part of
+  aiming, so every machine applies every player's own); and Aiming: Swap Sticks, so a player can move
+  while they aim (`host/src/look_aim.cpp`: it turns their character in game memory, so every machine
+  applies every player's own, and it counts them as aiming for two reads after their camera last aimed,
+  by the game's reads rather than the time between frames). A player's movement is part of
   their input for each controller read, like their pad: every poll's movement (with their sensitivity)
   is added up and taken at the read on the game thread, in fixed point, so every machine gives the game
   the same, and each player's camera takes their own (in a match, every player's camera turns by its
   player's mouse). Their settings (their *Controls*) go with it, every read: one changed in a match
   takes effect at the same read on every machine. The camera code then uses `same_math.hpp`'s trigonometry, as the C libraries'
   differ in the last bit.
-- **Off:** Right Stick: Free Camera, Aiming: Swap Sticks and the mouse in the bank's leaps: single
-  player's, and the first two go by the time between frames.
+- **Off:** Right Stick: Free Camera and the mouse in the bank's leaps: single player's, and the first
+  goes by the time between frames.
 - **At their defaults:** the Camera tab's others (Invert Turning, Turning Speed, Lock-On), Conker's Detail, Cutscene Aspect Ratio (Expand) and the sound volumes (100%).
 - **Widescreen:** the culls and sprites are widened for 16:9 whatever the window (a wider window can
-  lose a little at its sides).
+  lose a little at its sides). While the match's rule is that everyone sees only their own view (below),
+  each split-screen camera's culls are also made as tall and wide as "my view only" draws it, on every
+  machine.
 - **Save states** (F5, F7) are off. **Mods:** none, in netplay matches, recordings and replays: a mod
   is native code the other players would have to trust, and a recording doesn't say which were on.
   Netplay won't host or join with one on, and the handshake still carries a hash of each mod's file
@@ -114,10 +121,13 @@ controls, the sensitivities) is left to the player: those are what's recorded, a
 
 ### Recordings
 
-A recording (version 3) holds the ROM's XXH3-64 and the profile's hash: a replay with another ROM or
+A recording (version 4) holds the ROM's XXH3-64 and the profile's hash: a replay with another ROM or
 another profile is refused before the game starts. `make_inputs.py` writes 0 for both, which isn't
-checked. It holds each player's mouse and gyro movement and Controls beside their pad at each read.
-Version 2 recordings (before the mouse) replay with no movement and the default settings;
+checked. It holds each player's mouse and gyro movement and Controls beside their pad at each read,
+whether the match's rule was that everyone sees only their own view (`--own-view`), and which ports'
+views were shown two to a window (`--view-pairs`), which change the split screen's culls. Version 3
+recordings (16-bit Controls, no rule) replay as split screen;
+version 2 recordings (before the mouse) replay with no movement and the default settings;
 version 1 recordings (before the profile) are replayed unchecked.
 
 ### The determinism check
@@ -158,7 +168,8 @@ and, at the read where they first differ, the memory itself:
   told nothing else, so a stranger who finds the port can't take a place, or learn whether their build
   or ROM would have done. With the right key, the handshake refuses another build, ROM, settings
   profile or mods, a full or started match. A joiner has 3 s to say Hello, and the host takes at most 8
-  connections at once. Then each peer sends only its own port's pads and memory hashes, reliably (lost
+  connections at once. A joiner's Hello says how many players are on its machine, and it's given that many
+  of the lowest free ports (the host's players have the first). Then each peer sends only its own ports' pads and memory hashes, reliably (lost
   packets are resent: lockstep needs every input); Inputs and hashes before the start, beyond the reads
   a peer could have reached, or a hash repeated, drop the peer. The library closes a connection that
   sends a message bigger than the largest packet, and buffers little from each peer.
@@ -192,8 +203,18 @@ Each peer starts from boot with an empty save, on the timeline and with the sett
     ConkerRecomp --netplay-host 27015 --netplay-address 203.0.113.7 --players 2   (prints the join code)
     ConkerRecomp --netplay-join SC07-21V9-GW0J-6HB7-H6NW-VVTT                    (the host's code)
 
-The game waits at its start for every player. Each plays with their first controller, and the host
-has to forward its UDP port if it's behind a router.
+The game waits at its start for every player. The host has to forward its UDP port if it's behind a
+router.
+
+**More than one player on a machine.** `--local-players <n>` (1 to 3, hosting or joining; the menu's
+Players on this computer) puts n players on this machine, each with a port of their own: the lowest free
+ones, the host's from port 1 (so `--players 3 --local-players 2` on the host gives it players 1 and 2,
+and the one who joins is player 3). Each plays with this machine's controller of the same number: the
+frontend numbers the controllers in the order they first press a button, and the first has the keyboard,
+mouse and gyro too. The machine's settings that go with each read (its Controls: responses, inverts,
+field of view, Swap Sticks) are the same for all its players. With two players on a machine, "my view only" (below) shows both of their views,
+one across the top half of the window and one across the bottom, like the game's own 2-player split;
+with three, the whole split screen is shown.
 
 In a window, the launcher's **Netplay** menu (`host/src/netplay/menu.cpp`, #9) does the same: host
 (players, port, input delay, and the host's own address, from which it shows the join code to send once hosting) or
@@ -202,25 +223,38 @@ machine once all are in. When a match started there ends (a desync, a player gon
 instead of the game quitting.
 
 **Screens.** Every machine draws the whole split screen (that keeps the games the same), but a window can
-show only its player's view, drawn across the whole window ("my view only", `host/src/netplay/view.cpp`).
+show only its player's view, drawn across the whole window ("my view only", `host/src/netplay/view.cpp`),
+or its two players' views, across the top and bottom halves (in a 3- or 4-player match the game draws them as
+quarters: each is drawn anew in its half, its projection scaled so it isn't stretched, and its HUD moved with
+it; the timer and scores the views share stay on the line between them). Replaying a recording,
+`--my-view-only --my-view-ports 12` shows it as a machine with players 1 and 2 would (for `shot.sh`).
 The host sets the match's rule: by default everyone sees only their own view, so no one can look at the
 others' (the Netplay menu's Screens, or `--split-screen` to let each player choose with their menu's Your
 screen or `--my-view-only`). The rule reaches every peer with Start. It can't be enforced against a
 modified build, which could still show every view: it keeps honest players on the same footing.
+A view drawn this way shows more of the world than the game culled it for: a 2-player half across the
+window, about 1.6 times as tall (a 232 by 108 view across 292 by 216); a quarter across half the
+window, about 1.4 times as wide. So while the rule is on, every machine makes every camera's culls as much taller or wider (`own_view_scale` in
+`host/src/widescreen.cpp`). It changes the game's memory, so it goes by what every machine has: the
+match's rule, and the ports shown two to a window (each machine with two players'), which the host
+sends with Start. Never by a player's own choice: a player who chooses "my view only" in a split-screen
+match can still see the world cut off at the edges of their view, as can a replay shown with
+`--my-view-ports` whose recording doesn't have those view pairs.
 
 With `--replay`, a peer's own pads come from its port in the recording instead: `lockstep.sh` plays two
 copies against each other on this machine (`--data` gives each its own folder) and checks that each
 gets exactly the game a replay alone does (each copy's recording has the other's port scrambled, so it
 only does if the pads came over the network), with input delay 0 and `--jitter` on one side too; a
 3-player Deathmatch where everyone moves their mouse and aims, at the automatic delay (through the
-host's relay); and that a desync (`--netplay-desync-at <read>`) is caught. About 40 s.
+host's relay); the same match with two players on one copy (the host's, then a joiner's); and that a
+desync (`--netplay-desync-at <read>`) is caught. About 50 s.
 
 ## The scripts
 
 | Script | |
 |---|---|
 | `check.sh` | the determinism check: replays a made-up recording headless twice, with `--jitter` and with `--state-test`, and fails unless all four give the same hashes (about 30 s; the CI runs it, `.github/workflows/netplay.yml`) |
-| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, and 3 with the mouse), and a desync is caught (about 40 s) |
+| `lockstep.sh` | the lockstep check: copies in a match over loopback give the same game as a replay alone (2 players, 3 with the mouse, and 3 with two on one copy), and a desync is caught (about 50 s) |
 | `compare_hashes.py` | the first read two hash logs differ at (it exits 1 if they differ); with dumps, the ranges that differ, by data symbol |
 | `make_match.py` | a recording that plays from boot into a multiplayer match (`--mode`, `--players`, `--variant`, `--pause`; `--mouse` has everyone move, aim and use their mouse and gyro), the same every time: for looking at multiplayer (split screen, "my view only") without the menus |
 | `shot.sh` | replays a recording in a window as fast as it goes and saves a screenshot of its end (X11; `SDL_VIDEODRIVER=x11` under Wayland), e.g. `make_match.py heist.pads --mode heist && shot.sh heist.pads heist.png --my-view-only` |

@@ -10,7 +10,8 @@
 # skipped rather than failed. It has no pull request trigger, so the ROM token is never exposed
 # to code from forks.
 #
-# Like the other workflows, it uses no third-party actions: git only.
+# Like the other workflows, it uses no third-party actions: git and GitHub's own actions/cache
+# (for ccache, set up as in build.yml).
 name: netplay
 
 on:
@@ -35,6 +36,13 @@ concurrency:
 
 env:
   GIT_TERMINAL_PROMPT: '0'
+  # ccache, as in build.yml: every run restores the newest cache saved by a push to the default
+  # branch, and only those pushes save one.
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1G
+  CCACHE_CMAKE_ARGS: >-
+    -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
 
 jobs:
   rom:
@@ -74,13 +82,31 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git python3 cmake ninja-build clang lld pkg-config libsdl2-dev libdbus-1-dev libfreetype-dev libprotobuf-dev protobuf-compiler libssl-dev
+          sudo apt-get install -y git python3 cmake ninja-build clang lld pkg-config libsdl2-dev libdbus-1-dev libfreetype-dev libprotobuf-dev protobuf-compiler libssl-dev ccache
+
+      - name: Restore ccache's cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .ccache
+          key: ccache-netplay-linux-${{ github.run_id }}
+          restore-keys: ccache-netplay-linux-
 
       # The game as players build it, with the harness: the check runs it with --headless.
       - name: Build
         env:
-          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON
-        run: ./build.sh rom-src/baserom.us.z64 < /dev/null
+          CONKER_CMAKE_ARGS: -DCONKER_NETPLAY=ON ${{ env.CCACHE_CMAKE_ARGS }}
+        run: |
+          ccache -z
+          ./build.sh rom-src/baserom.us.z64 < /dev/null
+          ccache -s
+
+      # Right after the build, so a later step failing doesn't throw it away.
+      - name: Save ccache's cache
+        if: always() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ccache-netplay-linux-${{ github.run_id }}
 
       # Judged by what the runs print (check.sh stops each once its last read is logged).
       # check.sh prints where the runs first differ if they do.
