@@ -37,6 +37,8 @@ namespace conker {
         void update(uint8_t* rdram);
         // conker_config.cpp: whether the setting is 4:3.
         bool in_4x3();
+        // Whether this frame is a cutscene drawn with the 4:3 bars (set by update).
+        bool pillarboxed();
         // For save states (host_state.cpp): where the ring of its display lists is.
         uint32_t dl_ring();
         void set_dl_ring(uint32_t slot);
@@ -293,6 +295,9 @@ namespace conker {
         void leap_frame(uint8_t* rdram);
         bool leaping_now();
         void leap_stick(float& x, float& y);
+        // Aiming: Swap Sticks in a leap (issue #138): player 1's sticks swapped, the right stick moving the
+        // crosshair (the game's stick) and the left the camera (the C-buttons), as when aiming elsewhere.
+        bool swap_sticks_in_leap();
         // Camera: Invert Turning, for the free camera's stick: turning (x) and tilting (y).
         void free_camera_invert(bool& x, bool& y);
         // Camera: Turning Speed, 1 at 100%.

@@ -319,6 +319,15 @@ to the right, so the game doesn't clamp it, and moved back as an extended
 rectangle. They write no sync to hold the enable, so it's put early in the
 frame, in place of the pipe sync each camera's pass starts with.
 
+The 3D HUD's models (issue #138: the tank's timer in It's War, a box on a chain
+with a pipe running off to the right) are drawn by `func_1508FD38` with a
+perspective projection and the model's matrix loaded on its own. RT64 widens the
+projection, so the model stayed in the middle 4:3 and the timer's pipe ended in
+view. Just after it (`func_150198FC` at 0x15019B70) a model to one side is moved
+out by (ratio - 1) of the half width the projection shows at its depth, so it's
+as near the window's edge as it was the N64 screen's; not while a cutscene is
+shown in 4:3 with bars (`widescreen.cpp`, `conker_hud_models_to_sides`).
+
 `func_15095D34` also draws the tickly bees of Windy's pollination quest (issue
 #101). Whether a piece is drawn at all is decided first by `func_15095B08`, which
 works out its rectangle on screen and flags it visible only where that overlaps
@@ -667,6 +676,11 @@ levels, one closer when nearly still) and stores the level at +0x1C8, so he
 flipped between levels 0, 1 and 2 as the camera pulled back and as he started and
 stopped walking; a hook sets the level to 0 for him before it's compared with his
 last. The multiplayer arenas (`D_800BE616`) keep the original's level 1.
+Shadows are smoothed (`shadow_smoothing.cpp`): `func_15184368`
+casts each shadow from a point it moves 0.3 of the way (`D_800A7354`) toward the
+nearest dynamic light (`D_800DCD78`) each time, and a fire's light hops a couple
+of hundred units every few frames, so the shadow snapped from side to side; a
+hook makes the step 0.06, so it sways instead and turns over to the next light.
 `patches/` holds the headers recompui includes for the
 game-side patch code that mods will use. `null_renderer.cpp` is used with
 `--headless`, and in a build configured with `-DCONKER_RT64=OFF` (no window, input
