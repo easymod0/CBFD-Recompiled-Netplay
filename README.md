@@ -15,7 +15,8 @@ Pick **Netplay** in the launcher. Every player sees the match on their own scree
 - **Quick Match** puts you in the first open public room, or opens one.
 - **Open matches** lists the public rooms, with how many play and watch.
 - **Room code**: paste a code a friend sent you.
-- **On this network**: matches hosted on your home or LAN-party network show up by themselves.
+- **On this network**: pick **Look** to list the matches hosted on your home or LAN-party network (Windows may
+  ask to let the game through its firewall when you do).
 - **Rejoin last match**: dropped out? Go straight back to your place.
 
 **Hosting** (the **Host** tab): choose how many play and who can join (**Private**, with the code, or

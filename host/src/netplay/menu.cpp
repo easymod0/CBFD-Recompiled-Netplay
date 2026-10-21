@@ -27,7 +27,8 @@
 // block one (kept in netplay.json: a host refuses them, a joiner leaves a room they're in).
 //
 // A match hosted directly can be visible on this network: games there list it on their Play tab (heard
-// from its beacon: lan.hpp) and join it with no code and no server.
+// from its beacon: lan.hpp) and join it with no code and no server. The Play tab only listens for them once
+// the player picks Look (kept): listening is what makes Windows ask about its firewall.
 //
 // Or directly: the host's join code is made, once hosting, from the address the host gives and the match's
 // random key: the game can't know its public address without a server to ask, so the host looks it up (or
@@ -111,11 +112,14 @@ namespace {
     constexpr int64_t last_match_seconds = 2 * 60 * 60;
 
     // The server settings, kept in netplay.json in the config folder, with this player's id (random, made the
-    // first time: others see a name made from it), their block list (player ids), the Host tab's choices and
-    // the match joined last.
+    // first time: others see a name made from it), their block list (player ids), the Host tab's choices, the
+    // match joined last, and whether the Play tab looks for matches on this network.
     struct ServerSettings {
         std::string server = default_server;
         bool allow_direct = false;
+        // Off until asked for: listening for this network's matches takes UDP from anyone, so Windows asks to let
+        // the game through its firewall, which shouldn't come with just opening the menu.
+        bool lan_look = false;
         uint64_t player = 0;
         std::vector<uint64_t> blocked;
         HostChoices host;
@@ -154,6 +158,7 @@ namespace {
         if (json.is_object()) {
             if (json.contains("server") && json["server"].is_string()) settings.server = json["server"].get<std::string>();
             if (json.contains("allow_direct") && json["allow_direct"].is_boolean()) settings.allow_direct = json["allow_direct"].get<bool>();
+            if (json.contains("lan_look") && json["lan_look"].is_boolean()) settings.lan_look = json["lan_look"].get<bool>();
             if (json.contains("player") && json["player"].is_string()) settings.player = std::strtoull(json["player"].get<std::string>().c_str(), nullptr, 16);
             if (json.contains("blocked") && json["blocked"].is_array()) {
                 for (const auto& id : json["blocked"]) {
@@ -207,7 +212,7 @@ namespace {
             nlohmann::json blocked = nlohmann::json::array();
             for (const uint64_t player : settings.blocked) blocked.push_back(hex_id(player));
             const HostChoices& choices = settings.host;
-            nlohmann::json json{ { "server", settings.server }, { "allow_direct", settings.allow_direct },
+            nlohmann::json json{ { "server", settings.server }, { "allow_direct", settings.allow_direct }, { "lan_look", settings.lan_look },
                 { "player", hex_id(settings.player) }, { "blocked", blocked },
                 { "host", { { "players", choices.players }, { "public", choices.public_room }, { "input_delay", choices.input_delay },
                     { "rollback", choices.rollback }, { "own_view", choices.own_view }, { "directly", choices.directly },
@@ -408,7 +413,7 @@ namespace {
             shown_code = code;
             copy_button->set_display(code.empty() ? recompui::Display::None : recompui::Display::Flex);
             code_box->set_display(hosting ? recompui::Display::Flex : recompui::Display::None);
-            const std::string lan = lan_visible ? " Players on this network also find the match on their Play tab." : "";
+            const std::string lan = lan_visible ? " Players on this network also find the match on their Play tab (On this network: Look)." : "";
             if (!host_directly) {
                 code_title->set_text("Room code");
                 code_label->set_text(code.empty() ? "Making a room..." : code);
@@ -419,7 +424,7 @@ namespace {
                 // Only with the match visible on this network (on_host asks for an address otherwise).
                 code_title->set_text("On this network");
                 code_label->set_text("Visible");
-                code_hint->set_text("Players on this network find the match on their Play tab. Give your address (Host "
+                code_hint->set_text("Players on this network find the match on their Play tab (On this network: Look). Give your address (Host "
                     "tab, More options) for a join code too.");
             }
             else if (code.empty()) {
@@ -817,23 +822,8 @@ namespace {
             if (!browse_hello && my_hello(hello)) {
                 browse_hello = hello;
             }
+            start_lan();
             std::string error;
-            // This network's matches need no server.
-            stop_lan();
-            shown_lan.clear();
-            lan_box->clear_children();
-            if (!browse_hello) {
-                lan_label->set_text("");
-            }
-            else if (!conker::lockstep::lan_browse(*browse_hello, error)) {
-                lan_label->set_text("Can't look for matches on this network: " + error + ".");
-            }
-            else {
-                lan_label->set_text("Listening for matches on this network...");
-                lan_listening = true;
-                lan_since = std::chrono::steady_clock::now();
-                lan_shown = false;
-            }
             if (settings.server.empty()) {
                 rooms_label->set_text("Set a netplay server (Settings tab) to see its public rooms.");
             }
@@ -912,6 +902,30 @@ namespace {
             if (lan_listening) {
                 conker::lockstep::stop_lan();
                 lan_listening = false;
+            }
+        }
+
+        // This network's matches (they need no server), if the player asked for them.
+        void start_lan() {
+            stop_lan();
+            shown_lan.clear();
+            lan_box->clear_children();
+            std::string error;
+            if (!settings.lan_look) {
+                lan_label->set_text("Look finds matches hosted on this network without a server. Windows may ask to let the "
+                    "game through its firewall.");
+            }
+            else if (!browse_hello) {
+                lan_label->set_text("");
+            }
+            else if (!conker::lockstep::lan_browse(*browse_hello, error)) {
+                lan_label->set_text("Can't look for matches on this network: " + error + ".");
+            }
+            else {
+                lan_label->set_text("Listening for matches on this network...");
+                lan_listening = true;
+                lan_since = std::chrono::steady_clock::now();
+                lan_shown = false;
             }
         }
 
@@ -1332,7 +1346,20 @@ namespace {
             });
             rooms_label = text(join, "", Typography::Body, color::TextDim);
             rooms_box = column(join, 8.0f);
-            text(join, "On this network", Typography::LabelMD);
+            recompui::Element* look_row = row(join);
+            text(look_row, "On this network", Typography::LabelMD);
+            recompui::Radio* look_radio = context.create_element<recompui::Radio>(look_row);
+            look_radio->add_option("Don't look");
+            look_radio->add_option("Look");
+            look_radio->set_index(settings.lan_look ? 1 : 0);
+            look_radio->add_index_changed_callback([this](uint32_t index) {
+                settings.lan_look = index == 1;
+                save();
+                if (state == State::idle && join_tab && !closing && !testing) {
+                    start_lan();
+                    queue_update();
+                }
+            });
             lan_label = text(join, "", Typography::Body, color::TextDim);
             lan_box = column(join, 8.0f);
 
@@ -1450,8 +1477,8 @@ namespace {
                 show_code();
                 queue_update();
             });
-            text(direct_rows, "Visible: anyone on this network (at home, at a LAN party) sees the match on their Play tab and "
-                "can join it with no code. Leave the address blank for that alone.", Typography::Body, color::TextDim);
+            text(direct_rows, "Visible: anyone on this network (at home, at a LAN party) sees the match on their Play tab (if "
+                "they pick Look there) and can join it with no code. Leave the address blank for that alone.", Typography::Body, color::TextDim);
             text(direct_rows, "For players outside your network, forward the UDP port on your router and give your public "
                 "address (any \"what is my IP\" site). The join code contains it: share it only with people you trust.",
                 Typography::Body, color::TextDim);
