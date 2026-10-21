@@ -657,7 +657,9 @@ third-person shooter:
   (`D_8009917C`) but masks them to C-Left and C-Right (0x1504DD18): strafing only.
   With Swap Sticks on, scoped, all four go through (`conker_scope_walk`), and the
   zoom goes by D-pad Up and Down instead (`conker_scope_zoom`, at 0x15127054).
-  Both read only the game's buttons. D-pad Up and Down default to I and K, and
+  Both read only the game's buttons, and in a netplay match each player's own
+  Swap Sticks (their Controls, by their character's object index, the first four
+  objects being the players). D-pad Up and Down default to I and K, and
   to the mouse wheel: RecompFrontend binds the wheel as two more mouse inputs
   (Wheel Up, Wheel Down, ids 33 and 34), each notch held 100 ms with a gap.
 

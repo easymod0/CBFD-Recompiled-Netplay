@@ -562,26 +562,40 @@ bool conker::look_aim::swap_sticks_now(int player) {
 // so he could strafe but not walk forward or back (logged: the store at 0x1504DE5C setting his moving angle to his
 // facing plus 0x4000 or 0xC000). The left stick (or W, A, S, D) is the C-buttons with Swap Sticks, so with it on,
 // scoped, all four go through, and the zoom takes D-pad Up and Down instead (D-pad Up in), which Controls can bind to
-// anything (the mouse wheel by default). Both read only the game's own buttons, so every machine does the same.
+// anything (the mouse wheel by default). Both read only the game's own buttons and, in a netplay match, each player's
+// own Swap Sticks from their Controls, so every machine does the same.
 namespace {
     constexpr uint8_t scoped_state = 0x80;
     constexpr uint32_t c_buttons = 0x000F;
     constexpr uint32_t c_up = 0x0008, c_down = 0x0004, d_up = 0x0800, d_down = 0x0400;
     constexpr uint32_t game_objects = 0x800CC2D0, object_size = 0x32C;
 
+    // A player's character: one of the first four objects, the player's port its index (-1 for any other).
+    int character_player(gpr character) {
+        const uint32_t object = (uint32_t)character;
+        if (object < game_objects || object >= game_objects + 4 * object_size || (object - game_objects) % object_size != 0) {
+            return -1;
+        }
+        return (int)((object - game_objects) / object_size);
+    }
+
+    // In a netplay match each player's own Swap Sticks, from their Controls (the same on every machine); otherwise
+    // the setting, in single player.
     bool scope_walks(uint8_t* rdram, gpr character) {
-        return ((uint32_t)character & 0xFF000000u) == 0x80000000u && MEM_BU(0x4, character) == scoped_state &&
-            option<Toggle>(options::aim_swap_sticks) == Toggle::On && recompinput::players::is_single_player_mode();
+        const int player = character_player(character);
+        if (player < 0 || MEM_BU(0x4, character) != scoped_state) {
+            return false;
+        }
+        if (per_player()) {
+            return conker::motion::swap_sticks(conker::motion::controls(player));
+        }
+        return option<Toggle>(options::aim_swap_sticks) == Toggle::On && recompinput::players::is_single_player_mode();
     }
 }
 
 // func_1504CB98 at 0x1504DD1C: $a0 is the held buttons ($a1) through the mask ($v0), about to pick the way he walks;
 // $s0 is his object. A player's character (the first four objects) that's scoped takes all four C-buttons.
 extern "C" void conker_scope_walk(uint8_t* rdram, recomp_context* ctx) {
-    const uint32_t object = (uint32_t)ctx->r16;
-    if (object < game_objects || object >= game_objects + 4 * object_size || (object - game_objects) % object_size != 0) {
-        return;
-    }
     if (scope_walks(rdram, ctx->r16)) {
         ctx->r4 = ctx->r5 & c_buttons;
     }
