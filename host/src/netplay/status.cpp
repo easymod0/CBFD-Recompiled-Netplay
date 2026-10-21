@@ -3,7 +3,8 @@
 // - at the top, in the middle: "Waiting for Player 2... 4 s" once a read has waited a moment for the others
 //   (a read waits a few ms most of the time, which isn't worth a word), "Catching up..." once that has gone on
 //   a moment, and for a few seconds each, what happened: "Player 3 left.", "Player 3 stopped answering (they
-//   may have quit).", "Everyone else has left: the match goes on here."; "Getting the host's game... 40%" while a
+//   may have quit).", "Player 3 lost connection: the others play on.", "Everyone else has left: the match goes on
+//   here."; "Getting the host's game... 40%" while a
 //   desync is set right here (desync recovery)
 // - with General: Netplay Details on, in the bottom-right corner: the input delay (a spectator: Watching), how far ahead of the others
 //   this machine is (or behind), and each player's round trip (a joiner knows only the host's: the others'
@@ -187,12 +188,13 @@ namespace {
             std::string what;
             if ((status.own_ports & (1u << port)) != 0) what = "here";
             else if ((status.open & (1u << port)) != 0) what = "open";
+            else if ((status.lost & (1u << port)) != 0) what = "lost connection";
             else if ((status.left_silently & (1u << port)) != 0) what = "stopped answering";
             else if ((status.left & (1u << port)) != 0) what = "left";
             else if (status.round_trip_ms[port] >= 0) what = std::to_string(status.round_trip_ms[port]) + " ms";
             else what = status.hosting ? "..." : "through the host";
             // (Each player's input delay is their own: one with a bad link has a higher one.)
-            if ((status.own_ports & (1u << port)) == 0 && (status.open & (1u << port)) == 0 && (status.left & (1u << port)) == 0) {
+            if (((status.own_ports | status.open | status.left | status.lost) & (1u << port)) == 0) {
                 what += ", delay " + std::to_string(status.delays[port]);
             }
             lines[1 + port] = "Player " + std::to_string(port + 1) + (port == 0 && !status.hosting ? " (host)" : "") + ": " + what;

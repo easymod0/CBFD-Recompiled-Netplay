@@ -87,6 +87,9 @@ namespace conker::netplay {
         // packet, a joiner's Inputs: an early copy, sent unreliably (Session::send_to), which may repeat reads that came
         // already, or start past them (one lost on the way: it's for the reliable Inputs to fill in, so it's not taken).
         bool copy = false;
+        // joined (host): a machine whose ports the host let go of as their inputs stopped coming (let_go_of) is here
+        // again on the same connection (its Claim), for the host's game (as `rejoin`).
+        bool returned = false;
         // packet, Inputs: when the library got it (seconds, on the steady clock: lockstep::now's), which may be well
         // before it's polled.
         double arrived = 0;
@@ -236,6 +239,12 @@ namespace conker::netplay {
         void claim(int port);
         void step_out();
         void take_seat(uint8_t ports);
+        // A machine's inputs that stopped coming for a while (#40). Host: let_go_of the machine on `ports` (after the Gone
+        // that tells everyone, it too): it's out of the match (nothing goes to it, what it sends is let be) but still
+        // connected, till it says it's here again (a joined event, `returned`) and welcome_back brings it in. Joiner:
+        // come_back, once the host's Gone for its own ports came (Gone's 3), asks for the host's game.
+        void let_go_of(uint8_t ports);
+        void come_back();
         // `spectators` (bit n: spectator n) watching likewise: those not yet in the match come in with welcome_back, and get
         // the state with send_state; resync_spectators tells those in it whose game went another way to load it before
         // `read` (Resync to them alone), and send_state sends it to them too.
@@ -291,6 +300,9 @@ namespace conker::netplay {
             std::array<uint64_t, max_players> replaced_players{};
             std::array<double, max_players> replaced_at{};
             int spectator = -1;     // host: a spectator's number, from the handshake
+            // Host: let go of as its inputs stopped coming (let_go_of), and whether it has asked to come back since.
+            bool let_go = false;
+            bool returning = false;
         };
 
         void on_status_changed(const void* info);
