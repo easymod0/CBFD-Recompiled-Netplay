@@ -361,6 +361,7 @@ namespace conker::lockstep {
         int players = 0;
         uint8_t own_ports = 0;          // bit n: port n
         int input_delay = 0;
+        std::array<int, netplay::max_players> delays{};    // each port's input delay (#40: a player's own)
         // How many reads ahead of the furthest of the others this machine is (behind: below 0); none while
         // nobody else plays.
         int64_t ahead = 0;

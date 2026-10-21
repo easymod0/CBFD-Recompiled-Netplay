@@ -426,14 +426,14 @@ namespace conker::netplay {
         }
     }
 
-    bool Session::start(bool own_view, int delay, int rollback, bool open_seats) {
+    bool Session::start(bool own_view, const std::array<uint8_t, max_players>& delays, int rollback, bool open_seats) {
         uint8_t taken = own_ports;
         for (const Peer& peer : peers) {
             taken |= peer.ports;
         }
         const uint8_t open = (uint8_t)(((1u << match_players) - 1) & ~taken);
-        if (!is_host || !entry_open || (open != 0 && !open_seats) || delay < 0 || delay > max_delay ||
-            rollback < 0 || rollback > max_rollback) {
+        if (!is_host || !entry_open || (open != 0 && !open_seats) ||
+            std::any_of(delays.begin(), delays.end(), [](uint8_t d) { return d > max_delay; }) || rollback < 0 || rollback > max_rollback) {
             return false;
         }
         // (The roster as it is now first: a joiner moved this very poll learns where it is before the Start.)
@@ -446,7 +446,7 @@ namespace conker::netplay {
         entry_open = false;
         match_started = true;
         next_inputs.fill(0);
-        const Start start{ (uint8_t)match_players, (uint8_t)(own_view ? 1 : 0), (uint8_t)delay, pairs(), (uint8_t)rollback, open };
+        const Start start{ (uint8_t)match_players, (uint8_t)(own_view ? 1 : 0), delays, pairs(), (uint8_t)rollback, open };
         match_own_view = start.own_view;
         match_pairs = start.pairs;
         match_rollback = start.rollback;
@@ -729,11 +729,15 @@ namespace conker::netplay {
             SteamNetworkingMessage_t* messages[32];
             int count;
             int taken = 0;
+            // (The library's clock, to tell when each message came on the steady one.)
+            const SteamNetworkingMicroseconds library_now = SteamNetworkingUtils()->GetLocalTimestamp();
+            const double steady_now = now();
             while (taken < max_messages_per_poll && (count = sockets->ReceiveMessagesOnPollGroup(poll_group, messages, 32)) > 0) {
                 taken += count;
                 for (int i = 0; i < count; i++) {
                     SteamNetworkingMessage_t* message = messages[i];
                     taking_unreliable = (message->m_nFlags & k_nSteamNetworkingSend_Reliable) == 0;
+                    taking_arrived = steady_now - (double)(library_now - message->m_usecTimeReceived) / 1e6;
                     take(message->m_conn, { (const uint8_t*)message->m_pData, (size_t)message->m_cbSize }, events);
                     taking_unreliable = false;
                     message->Release();
@@ -826,6 +830,7 @@ namespace conker::netplay {
             (count = sockets->ReceiveMessagesOnConnection(connection, messages, 32)) > 0; taken += count) {
             for (int i = 0; i < count; i++) {
                 taking_unreliable = (messages[i]->m_nFlags & k_nSteamNetworkingSend_Reliable) == 0;
+                taking_arrived = now() - (double)(SteamNetworkingUtils()->GetLocalTimestamp() - messages[i]->m_usecTimeReceived) / 1e6;
                 take(connection, { (const uint8_t*)messages[i]->m_pData, (size_t)messages[i]->m_cbSize }, events);
                 taking_unreliable = false;
                 messages[i]->Release();
@@ -1063,6 +1068,7 @@ namespace conker::netplay {
             event.spectator = peer.spectator;
             event.player = peer.player;
             event.packet = packet;
+            event.arrived = taking_arrived;
             events.push_back(std::move(event));
             return;
         }
@@ -1164,7 +1170,7 @@ namespace conker::netplay {
             started = true;
             Event event{ Event::Type::started };
             event.own_view = start->own_view != 0;
-            event.delay = start->delay;
+            event.delays = start->delays;
             event.pairs = start->pairs;
             event.rollback = start->rollback;
             event.open = start->open;
@@ -1181,6 +1187,7 @@ namespace conker::netplay {
             event.port = inputs->port;
             event.packet = packet;
             event.copy = taking_unreliable;
+            event.arrived = taking_arrived;
             events.push_back(std::move(event));
         }
         else if (const Hash* hash = std::get_if<Hash>(&packet); hash != nullptr) {

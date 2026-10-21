@@ -75,7 +75,7 @@ namespace conker::netplay {
         bool late = false;
         uint8_t open = 0;       // started: the ports nobody has (idle from read 0)
         bool own_view = false;  // started (and welcomed back): the host's rule that every player sees only their own view
-        int delay = 0;          // started: the match's input delay
+        std::array<uint8_t, max_players> delays{};  // started: each port's input delay
         uint8_t pairs = 0;      // started (and welcomed back): the ports shown two to a window (each machine with two players')
         int rollback = 0;       // started (and welcomed back): the reads every peer predicts ahead (0: off)
         Reason reason = Reason::quit;
@@ -87,6 +87,9 @@ namespace conker::netplay {
         // packet, a joiner's Inputs: an early copy, sent unreliably (Session::send_to), which may repeat reads that came
         // already, or start past them (one lost on the way: it's for the reliable Inputs to fill in, so it's not taken).
         bool copy = false;
+        // packet, Inputs: when the library got it (seconds, on the steady clock: lockstep::now's), which may be well
+        // before it's polled.
+        double arrived = 0;
     };
 
     // The join code (join_code.hpp) for `address` ("1.2.3.4:5000" or "[::1]:5000") and a match's `key`, or
@@ -155,9 +158,10 @@ namespace conker::netplay {
         uint64_t key() const { return is_host ? hello.key : 0; }
         // Host: once every port is taken (false until then; or at once with `open_seats`, the free ports open), starts
         // the match: tells the joiners, and takes new players only on free ports from then on. `own_view`: every player
-        // sees only their own view (the match's rule); `delay`: the input delay everyone uses; `rollback`: the reads
+        // sees only their own view (the match's rule); `delays`: each port's input delay; `rollback`: the reads
         // every peer predicts ahead (0: off).
-        bool start(bool own_view = false, int delay = 2, int rollback = 0, bool open_seats = false);
+        bool start(bool own_view = false, const std::array<uint8_t, max_players>& delays = { 2, 2, 2, 2 }, int rollback = 0,
+            bool open_seats = false);
         // The waiting room, before the start (packets.hpp's Roster and Ready). Host: the match's settings it
         // shows (`delay` -1: auto), whether its own players are ready (its Start), the players it keeps out
         // (their player ids: refused as kicked), and kick, which drops a port's machine (kicked; false if no
@@ -359,6 +363,7 @@ namespace conker::netplay {
         std::array<std::deque<std::pair<Pad, Motion>>, max_players> recent;
         std::array<uint64_t, max_players> recent_first{};
         bool taking_unreliable = false;     // the message being taken came unreliably (an early copy)
+        double taking_arrived = 0;          // ...and when the library got it (Event's arrived)
         Hello hello;
         std::string release;
         uint32_t listen_socket = 0;

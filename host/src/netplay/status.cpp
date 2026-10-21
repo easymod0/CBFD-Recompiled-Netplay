@@ -7,7 +7,7 @@
 //   desync is set right here (desync recovery)
 // - with General: Netplay Details on, in the bottom-right corner: the input delay (a spectator: Watching), how far ahead of the others
 //   this machine is (or behind), and each player's round trip (a joiner knows only the host's: the others'
-//   pads come through it), or that they're on this machine or left.
+//   pads come through it) and input delay, or that they're on this machine or left.
 //
 // It's drawn by recompui, as notices.cpp's lines and the FPS counter are: a context of its own that takes no
 // input and no mouse, nothing in the game's memory. It waits for the game to start and for the launcher's init
@@ -191,6 +191,10 @@ namespace {
             else if ((status.left & (1u << port)) != 0) what = "left";
             else if (status.round_trip_ms[port] >= 0) what = std::to_string(status.round_trip_ms[port]) + " ms";
             else what = status.hosting ? "..." : "through the host";
+            // (Each player's input delay is their own: one with a bad link has a higher one.)
+            if ((status.own_ports & (1u << port)) == 0 && (status.open & (1u << port)) == 0 && (status.left & (1u << port)) == 0) {
+                what += ", delay " + std::to_string(status.delays[port]);
+            }
             lines[1 + port] = "Player " + std::to_string(port + 1) + (port == 0 && !status.hosting ? " (host)" : "") + ": " + what;
         }
         return lines;

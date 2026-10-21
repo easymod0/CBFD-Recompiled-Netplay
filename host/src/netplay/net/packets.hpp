@@ -22,7 +22,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 22;
+    constexpr uint16_t protocol_version = 23;
     // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
     constexpr size_t max_release_name = 40;
     // The game's controller ports.
@@ -170,16 +170,23 @@ namespace conker::netplay {
     constexpr uint32_t memory_region_size = 64 * 1024;
     constexpr int memory_regions = 128;
     // The XXH3-64 of the game's memory as the sender made read `read`, and each region's, cut to its low 16
-    // bits (enough to tell which differ, once the whole hash says something does).
+    // bits (enough to tell which differ, once the whole hash says something does). With it, for the host's
+    // input delays (lockstep.cpp): how each port's inputs reach the sender, by port. `spread`: how unevenly they
+    // arrive, in 2 ms (how much later than their usual time the latest tenth of them came; no_spread: not known,
+    // as the sender's own ports'); `waited`: the reads the sender's game has waited for that port's inputs in all
+    // (it wraps).
+    constexpr uint8_t no_spread = 255;
     struct Hash {
         uint32_t read = 0;
         uint64_t hash = 0;
         std::array<uint16_t, memory_regions> regions{};
+        std::array<uint8_t, max_players> spread{ no_spread, no_spread, no_spread, no_spread };
+        std::array<uint8_t, max_players> waited{};
         bool operator==(const Hash&) const = default;
     };
     // Host to everyone, once every port is taken: the match starts, with this many players, whether every
     // player sees only their own view of the split screen (the host's rule for the match: 1) or each chooses
-    // (0), the input delay everyone uses (0 to max_delay), and the ports whose views are shown two to a window
+    // (0), each port's input delay (0 to max_delay: how many reads ahead its pads are sent), and the ports whose views are shown two to a window
     // (bit n: port n; the ports of each machine with two players), which the culls go by in "my view only", and
     // how many reads every peer predicts the others' inputs ahead (rollback: 0, off, to max_rollback). The host
     // may start before every port is taken: `open` (bit n: port n; never the host's port 0, nor a pair's) are
@@ -187,7 +194,7 @@ namespace conker::netplay {
     struct Start {
         uint8_t players = 0;
         uint8_t own_view = 0;
-        uint8_t delay = 0;
+        std::array<uint8_t, max_players> delays{};
         uint8_t pairs = 0;
         uint8_t rollback = 0;
         uint8_t open = 0;
@@ -203,7 +210,9 @@ namespace conker::netplay {
     // every input of theirs the host had is passed on, so it's the read after the last of them for everyone.
     // `silent`: they stopped answering (1: a crash, a lost connection) rather than saying goodbye (0), so the
     // others can tell the players they may have quit; or (2) they stepped out of their place to watch (Unseat), which
-    // is open from then on.
+    // is open from then on; or (3) their inputs stopped coming for a while, so the others play on without them: their
+    // machine (which gets this too) is still connected, and comes back by itself once it can (its Claim of its port),
+    // with the host's game as for a player coming back (Rejoin).
     struct Gone {
         uint8_t port = 0;
         uint32_t from_read = 0;
@@ -211,11 +220,12 @@ namespace conker::netplay {
         bool operator==(const Gone&) const = default;
     };
 
-    // Host to the joiners: the input delay becomes `delay` (0 to max_delay) from read `from_read`, as the
-    // connection changes. Every peer switches at that read, which is past any a joiner can be at as it
-    // arrives; the reads a raised delay skips get each player's last pad again, and a lowered one's live
+    // Host to the joiners: the input delay of `ports` (bit n: port n; some) becomes `delay` (0 to max_delay) from
+    // read `from_read`, as their connection changes. Every peer switches at that read, which is past any a joiner can
+    // be at as it arrives; the reads a raised delay skips get each player's last pad again, and a lowered one's live
     // pads for the reads already sent aren't sent (lockstep.cpp).
     struct Delay {
+        uint8_t ports = 0;
         uint8_t delay = 0;
         uint32_t from_read = 0;
         bool operator==(const Delay&) const = default;
@@ -295,7 +305,8 @@ namespace conker::netplay {
         bool operator==(const Back&) const = default;
     };
     // Seat changes (#21), before the match or in it. Spectator to host: it would take `port` (free: open, or its player's
-    // hold over).
+    // hold over). A player's machine whose ports the host let go of as their inputs stopped coming (Gone's 3), to the
+    // host: it's here again, for the host's game, `port` its first.
     struct Claim {
         uint8_t port = 0;
         bool operator==(const Claim&) const = default;
@@ -309,17 +320,17 @@ namespace conker::netplay {
     };
     // Host to the player coming back, before the state (StateParts) it loads: the match as it is at read `read`
     // (theirs from it on), the host being at read `at` (the inputs since `read` it has follow, then every one as it
-    // comes). The input delay's last change (from read `delay_from`, `delay_before` until it, `delay_after` from
-    // it), and each port's input at the read before `read` (what's predicted from, and an idle port's last
+    // comes). Each port's input delay's last change (from read `delay_from`, `delay_before` until it, `delay_after`
+    // from it), and each port's input at the read before `read` (what's predicted from, and an idle port's last
     // settings), and the read it plays no more from (no_read: it plays on; else `read` or later); and of the idle
     // ports, those nobody has (`open`: bit n port n, never the host's 0), rather than a player who left.
     constexpr uint32_t no_read = UINT32_MAX;
     struct Rejoin {
         uint32_t read = 0;
         uint32_t at = 0;
-        uint32_t delay_from = 0;
-        uint8_t delay_before = 0;
-        uint8_t delay_after = 0;
+        std::array<uint32_t, max_players> delay_from{};
+        std::array<uint8_t, max_players> delay_before{};
+        std::array<uint8_t, max_players> delay_after{};
         std::array<uint32_t, max_players> idle_from{ no_read, no_read, no_read, no_read };
         std::array<Pad, max_players> pads{};
         std::array<Motion, max_players> motions{};

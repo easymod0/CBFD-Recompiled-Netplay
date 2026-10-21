@@ -48,6 +48,18 @@ namespace {
         inputs.gaps = { -128, 3, 0, 127 };
         return inputs;
     }
+
+    // A Start whose ports all have input delay `delay`.
+    Start start_of(int players, int own_view, int delay = 0, int pairs = 0, int rollback = 0, int open = 0) {
+        Start start;
+        start.players = (uint8_t)players;
+        start.own_view = (uint8_t)own_view;
+        start.delays.fill((uint8_t)delay);
+        start.pairs = (uint8_t)pairs;
+        start.rollback = (uint8_t)rollback;
+        start.open = (uint8_t)open;
+        return start;
+    }
 }
 
 int main() {
@@ -66,25 +78,33 @@ int main() {
     CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
     CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
     CHECK(round_trips(some_inputs(), 161));
-    CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 273));
+    CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 281));
     Hash regions{ 30, 1 };
     for (int i = 0; i < memory_regions; i++) regions.regions[i] = (uint16_t)(0x0101 * i + 7);
-    CHECK(round_trips(regions, 273));
+    regions.spread = { no_spread, 0, 17, 254 };
+    regions.waited = { 0, 255, 3, 1 };
+    CHECK(round_trips(regions, 281));
     const std::vector<uint8_t> hash = bytes_of(regions);
     CHECK(hash[17] == 7 && hash[18] == 0 && hash[19] == 8 && hash[20] == 1 && hash[271] == 0x86 && hash[272] == 0x7F);
+    CHECK(hash[273] == no_spread && hash[274] == 0 && hash[275] == 17 && hash[276] == 254);       // spreads
+    CHECK(hash[277] == 0 && hash[278] == 255 && hash[279] == 3 && hash[280] == 1);                // reads waited
     CHECK(round_trips(Bye{ Reason::desync }, 6));
-    CHECK(round_trips(Start{ 3, 0 }, 11));
-    CHECK(round_trips(Start{ 4, 1, max_delay }, 11));
-    CHECK(round_trips(Start{ 4, 1, 2, 0x0C }, 11));
-    CHECK(round_trips(Start{ 2, 0, 1, 0, max_rollback }, 11));
-    CHECK(round_trips(Start{ 4, 1, 2, 0x06, 0, 0x08 }, 11));       // an open seat
+    CHECK(round_trips(start_of(3, 0), 14));
+    CHECK(round_trips(start_of(4, 1, max_delay), 14));
+    CHECK(round_trips(start_of(4, 1, 2, 0x0C), 14));
+    CHECK(round_trips(start_of(2, 0, 1, 0, max_rollback), 14));
+    CHECK(round_trips(start_of(4, 1, 2, 0x06, 0, 0x08), 14));       // an open seat
+    Start delays = start_of(4, 0);
+    delays.delays = { 0, 3, max_delay, 1 };                        // each port's own
+    CHECK(round_trips(delays, 14));
     CHECK(round_trips(Gone{ 3, 4000000000u }, 11));
     CHECK(round_trips(Gone{ 1, 5, 1 }, 11));
     const std::vector<uint8_t> gone = bytes_of(Gone{ 2, 0x01020304, 1 });
     CHECK(gone[4] == 8 && gone[5] == 2 && gone[6] == 4 && gone[9] == 1 && gone[10] == 1);
-    CHECK(round_trips(Delay{ max_delay, 4000000000u }, 10));
-    const std::vector<uint8_t> delay = bytes_of(Delay{ 5, 0x01020304 });
-    CHECK(delay[4] == 9 && delay[5] == 5 && delay[6] == 4 && delay[9] == 1);
+    CHECK(round_trips(Delay{ 0x01, max_delay, 4000000000u }, 11));
+    CHECK(round_trips(Delay{ 0x0E, 0, 30 }, 11));                    // a machine of three players
+    const std::vector<uint8_t> delay = bytes_of(Delay{ 0x06, 5, 0x01020304 });
+    CHECK(delay[4] == 9 && delay[5] == 0x06 && delay[6] == 5 && delay[7] == 4 && delay[10] == 1);
 
     // The layout: header, then little-endian fields.
     const std::vector<uint8_t> hello = bytes_of(Hello{ 0x0807060504030201ull, 0, 0, 0x1112131415161718ull, 0x2122232425262728ull, 2,
@@ -101,8 +121,11 @@ int main() {
           inputs[55] == 0x34 && inputs[56] == 0x12 && inputs[57] == 0xFE && inputs[58] == 0xFF && inputs[59] == 0x80 &&
           inputs[60] == 0x05 && inputs[61] == 0x03 && inputs[62] == 0x01 && inputs[63] == 0x00);
     CHECK(inputs.size() == 161 && inputs[155] == 0x80 && inputs[156] == 3 && inputs[157] == 0 && inputs[158] == 0x7F);  // gaps
-    const std::vector<uint8_t> start = bytes_of(Start{ 3, 1, 3, 0x03, 8, 0x04 });
-    CHECK(start.size() == 11 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0x03 && start[9] == 8 && start[10] == 0x04);
+    Start laid_out = start_of(3, 1, 0, 0x03, 8, 0x04);
+    laid_out.delays = { 3, 0, 1, 2 };
+    const std::vector<uint8_t> start = bytes_of(laid_out);
+    CHECK(start.size() == 14 && start[5] == 3 && start[6] == 1 && start[7] == 3 && start[8] == 0 && start[9] == 1 && start[10] == 2 &&
+        start[11] == 0x03 && start[12] == 8 && start[13] == 0x04);
 
     // Out-of-range fields are neither sent nor accepted.
     CHECK(bytes_of(Welcome{ 0x04, 2 }).empty());    // a port not below players
@@ -120,18 +143,23 @@ int main() {
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 0, 1 }).empty());  // no player id
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 1, 0 }).empty());  // no platform
     CHECK(bytes_of(Hello{ 1, 2, 3, 4, 5, 1, 1, 4 }).empty());
-    CHECK(bytes_of(Start{ 1 }).empty());
-    CHECK(bytes_of(Start{ 5 }).empty());
-    CHECK(bytes_of(Start{ 2, 2 }).empty());          // own view is 0 or 1
-    CHECK(bytes_of(Start{ 2, 0, max_delay + 1 }).empty());
-    CHECK(bytes_of(Start{ 3, 1, 0, 0x08 }).empty()); // a pair past the players
-    CHECK(bytes_of(Start{ 4, 1, 0, 0x07 }).empty()); // an odd number of ports in pairs
-    CHECK(bytes_of(Start{ 2, 0, 0, 0, max_rollback + 1 }).empty());
-    CHECK(bytes_of(Start{ 3, 0, 0, 0, 0, 0x01 }).empty());     // the host's port open
-    CHECK(bytes_of(Start{ 3, 0, 0, 0, 0, 0x08 }).empty());     // an open port past the players
-    CHECK(bytes_of(Start{ 4, 0, 0, 0x0C, 0, 0x08 }).empty());  // an open port in a pair
-    CHECK(bytes_of(Delay{ max_delay + 1, 30 }).empty());
-    CHECK(bytes_of(Gone{ 1, 30, 3 }).empty());
+    CHECK(bytes_of(start_of(1, 0)).empty());
+    CHECK(bytes_of(start_of(5, 0)).empty());
+    CHECK(bytes_of(start_of(2, 2)).empty());          // own view is 0 or 1
+    CHECK(bytes_of(start_of(2, 0, max_delay + 1)).empty());
+    Start one_delay = start_of(2, 0);
+    one_delay.delays[3] = max_delay + 1;
+    CHECK(bytes_of(one_delay).empty());               // any port's
+    CHECK(bytes_of(start_of(3, 1, 0, 0x08)).empty()); // a pair past the players
+    CHECK(bytes_of(start_of(4, 1, 0, 0x07)).empty()); // an odd number of ports in pairs
+    CHECK(bytes_of(start_of(2, 0, 0, 0, max_rollback + 1)).empty());
+    CHECK(bytes_of(start_of(3, 0, 0, 0, 0, 0x01)).empty());     // the host's port open
+    CHECK(bytes_of(start_of(3, 0, 0, 0, 0, 0x08)).empty());     // an open port past the players
+    CHECK(bytes_of(start_of(4, 0, 0, 0x0C, 0, 0x08)).empty());  // an open port in a pair
+    CHECK(bytes_of(Delay{ 0x01, max_delay + 1, 30 }).empty());
+    CHECK(bytes_of(Delay{ 0, 1, 30 }).empty());                 // no port
+    CHECK(bytes_of(Delay{ 0x10, 1, 30 }).empty());              // past the ports
+    CHECK(bytes_of(Gone{ 1, 30, 4 }).empty());
 
     CHECK(bytes_of(Refuse{ (Reason)0 }).empty());
     CHECK(bytes_of(Refuse{ Reason::build, "a release" }).empty());
@@ -185,7 +213,7 @@ int main() {
     data[5] = 4;
     CHECK(!decodes(data));
     data = gone;
-    data[10] = 3;                                   // silent is 0 to 2
+    data[10] = 4;                                   // silent is 0 to 3
     CHECK(!decodes(data));
     data = hello;
     data[45] = 4;
@@ -334,6 +362,7 @@ int main() {
     CHECK(bytes_of(Claim{ 0 }).empty());                            // the host's port
     CHECK(bytes_of(Unseat{ 0x10 }).empty());
     CHECK(round_trips(Gone{ 2, 30, 2 }, 11));                       // stepped out to watch
+    CHECK(round_trips(Gone{ 2, 30, 3 }, 11));                       // let go of, for now
     data = bytes_of(Back{ 0x06, 0x01020304, 0x02 });
     CHECK(data[4] == 14 && data[5] == 0x06 && data[6] == 4 && data[9] == 1 && data[10] == 0x02);
     CHECK(bytes_of(Back{ 0x06, 5, 0x08 }).empty());                 // a new player not among them
@@ -343,22 +372,23 @@ int main() {
     Rejoin rejoin;
     rejoin.read = 1000;
     rejoin.at = 1004;
-    rejoin.delay_from = 600;
-    rejoin.delay_before = 2;
-    rejoin.delay_after = max_delay;
+    rejoin.delay_from = { 600, 0, 0, 700 };
+    rejoin.delay_before = { 2, 0, 0, 1 };
+    rejoin.delay_after = { max_delay, 0, 0, 0 };
     rejoin.idle_from = { no_read, 1000, no_read, 1003 };
     rejoin.pads[1] = { 0x8001, -5, 7, 0 };
     rejoin.pads[3] = { 0, 0, 0, err_no_controller };
     rejoin.motions[1] = { -300, 200, 1, -1, -3, 0x2C05 };
     rejoin.motions[2].controls = swap_sticks_bit;
     rejoin.open = 0x08;
-    CHECK(round_trips(rejoin, 108));
+    CHECK(round_trips(rejoin, 126));
     data = bytes_of(rejoin);
     CHECK(data[4] == 15 && data[5] == 0xE8 && data[6] == 3 && data[9] == 0xEC && data[13] == 0x58 && data[17] == 2 &&
-        data[18] == max_delay && data[19] == 0xFF && data[41] == 0xE8 && data[45] == 1 && data[46] == 0x80);
+        data[18] == max_delay && data[31] == 0xBC && data[35] == 1 && data[36] == 0 && data[37] == 0xFF && data[59] == 0xE8 &&
+        data[63] == 1 && data[64] == 0x80);
     Rejoin bad_rejoin = rejoin; bad_rejoin.at = 999; CHECK(bytes_of(bad_rejoin).empty());                   // the host before it
-    bad_rejoin = rejoin; bad_rejoin.delay_after = max_delay + 1; CHECK(bytes_of(bad_rejoin).empty());
-    bad_rejoin = rejoin; bad_rejoin.delay_before = max_delay + 1; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.delay_after[2] = max_delay + 1; CHECK(bytes_of(bad_rejoin).empty());
+    bad_rejoin = rejoin; bad_rejoin.delay_before[1] = max_delay + 1; CHECK(bytes_of(bad_rejoin).empty());
     bad_rejoin = rejoin; bad_rejoin.idle_from[1] = 999; CHECK(bytes_of(bad_rejoin).empty());          // idle before it
     bad_rejoin = rejoin; bad_rejoin.pads[0].buttons = reserved_buttons; CHECK(bytes_of(bad_rejoin).empty());
     bad_rejoin = rejoin; bad_rejoin.pads[0].err_no = 1; CHECK(bytes_of(bad_rejoin).empty());
