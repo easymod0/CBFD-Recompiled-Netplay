@@ -755,6 +755,8 @@ void conker::frontend::init(recomp::GameEntry& game) {
     // Versions of the ROM (the original, an uncensored ROM hack...) to switch between.
     recompui::register_launcher_init_callback(init_launcher);
     recompui::register_launcher_update_callback(update_launcher);
+    // While playing, the Quit prompt also offers Return to Launcher (issue #133).
+    recompui::register_return_to_launcher_action(conker::return_to_launcher);
 
     recompui::register_primary_font("InterVariable.ttf", "Inter Variable");
     recompui::register_ui_exports();

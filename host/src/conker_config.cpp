@@ -188,8 +188,9 @@ void conker::init_config() {
         };
         general_config.add_enum_option(start_directly_option, "Start Game Directly",
             "Starts the game as soon as the program opens, without the launcher, once a ROM has been picked. Takes "
-            "effect the next time it's opened. To get the launcher back, turn it <recomp-color primary>Off</recomp-color> "
-            "in the settings while playing (Esc or the controller's menu button).",
+            "effect the next time it's opened. To get to the launcher while playing (to install mods or turn them on or "
+            "off), choose <b>Return to Launcher</b> in the Quit prompt (the settings' top right): the program restarts "
+            "at the launcher.",
             choices, StartDirectly::Off);
     }
     conker::look_aim::add_camera_options(recompui::config::create_config_tab("Camera", camera_tab_id, false));
