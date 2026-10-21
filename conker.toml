@@ -868,3 +868,10 @@ text = "{ extern int32_t conker_stream_volume(uint8_t*, int32_t); ctx->r14 = con
 func = "n_alAudioFrame"
 before_vram = 0x10019498
 text = "{ extern void conker_audio_frame(uint8_t*, recomp_context*); conker_audio_frame(rdram, ctx); }"
+
+# The 3D HUD's models at the window's sides (issue #138, the tank's timer): func_1508FD38 has just drawn them ($s0
+# where it started, $v0 its end), and one to a side is moved out to the window's edge (host/src/widescreen.cpp).
+[[patches.hook]]
+func = "func_150198FC"
+before_vram = 0x15019B70
+text = "{ extern void conker_hud_models_to_sides(uint8_t*, recomp_context*); conker_hud_models_to_sides(rdram, ctx); }"

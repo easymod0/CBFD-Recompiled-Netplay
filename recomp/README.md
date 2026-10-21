@@ -319,6 +319,15 @@ to the right, so the game doesn't clamp it, and moved back as an extended
 rectangle. They write no sync to hold the enable, so it's put early in the
 frame, in place of the pipe sync each camera's pass starts with.
 
+The 3D HUD's models (issue #138: the tank's timer in It's War, a box on a chain
+with a pipe running off to the right) are drawn by `func_1508FD38` with a
+perspective projection and the model's matrix loaded on its own. RT64 widens the
+projection, so the model stayed in the middle 4:3 and the timer's pipe ended in
+view. Just after it (`func_150198FC` at 0x15019B70) a model to one side is moved
+out by (ratio - 1) of the half width the projection shows at its depth, so it's
+as near the window's edge as it was the N64 screen's; not while a cutscene is
+shown in 4:3 with bars (`widescreen.cpp`, `conker_hud_models_to_sides`).
+
 `func_15095D34` also draws the tickly bees of Windy's pollination quest (issue
 #101). Whether a piece is drawn at all is decided first by `func_15095B08`, which
 works out its rectangle on screen and flags it visible only where that overlaps

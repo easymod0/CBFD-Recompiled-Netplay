@@ -37,6 +37,8 @@ namespace conker {
         void update(uint8_t* rdram);
         // conker_config.cpp: whether the setting is 4:3.
         bool in_4x3();
+        // Whether this frame is a cutscene drawn with the 4:3 bars (set by update).
+        bool pillarboxed();
         // For save states (host_state.cpp): where the ring of its display lists is.
         uint32_t dl_ring();
         void set_dl_ring(uint32_t slot);
