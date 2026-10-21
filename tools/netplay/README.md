@@ -468,8 +468,8 @@ always (`audio_output.cpp`), and nothing else needs to change: the game is the s
 overlay like the notices, never in game memory): at the top, "Waiting for Player 2... 4 s" once a read has
 waited a second for the others, "Catching up..." once that's gone on half a second, and for a few seconds
 each, a player leaving ("Player 3 left.", or "stopped answering (they may have quit)", or "lost connection:
-the others play on"), coming back, and the host playing on when everyone else has left. With General: Netplay
-Details on, a corner shows the input delay, how many frames this machine is ahead of the others (or behind),
+the others play on"), coming back, and the host playing on when everyone else has left. With Netplay Details
+on (the in-game menu's Netplay tab), a corner shows the input delay, how many frames this machine is ahead of the others (or behind),
 and each player's round trip (a joiner knows only the host's: the others' inputs come through it) and input
 delay. Lockstep keeps what's shown (`lockstep::status`, `take_news`)
 under a lock of its own, so the overlay reads it while the game thread waits at a read. While the game waits,

@@ -1618,6 +1618,19 @@ namespace {
             left->set_flex_direction(recompui::FlexDirection::Column);
             left->set_gap(16.0f);
             add_text(left, "Netplay", Typography::Header3);
+            // Netplay Details (status.cpp's corner), in or out of a match.
+            recompui::Element* details_row = context.create_element<recompui::Element>(left);
+            details_row->set_display(recompui::Display::Flex);
+            details_row->set_flex_direction(recompui::FlexDirection::Row);
+            details_row->set_align_items(recompui::AlignItems::Center);
+            details_row->set_gap(24.0f);
+            add_text(details_row, "Netplay Details", Typography::LabelMD);
+            recompui::Radio* details_radio = context.create_element<recompui::Radio>(details_row);
+            details_radio->add_option("Off");
+            details_radio->add_option("On");
+            details_radio->set_index(conker::netplay_status::details_wanted() ? 1 : 0);
+            details_radio->add_index_changed_callback([](uint32_t index) { conker::netplay_status::set_details_wanted(index == 1); });
+            add_text(left, conker::netplay_status::details_description, Typography::Body, color::TextDim);
             recompui::Element* right = body->get_right();
             right->clear_children();
             right->set_display(recompui::Display::Flex);

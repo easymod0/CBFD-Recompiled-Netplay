@@ -398,10 +398,14 @@ namespace conker {
     }
 
     // netplay/status.cpp: the match's status on screen: waiting for a player, a player leaving, and with
-    // General: Netplay Details, the input delay and each player's round trip in a corner.
+    // the Netplay tab's Netplay Details, the input delay and each player's round trip in a corner.
     namespace netplay_status {
-        // On the General tab (conker_config.cpp): Netplay Details.
+        // Netplay Details, kept with the General tab's options (conker_config.cpp) but not shown there: the Netplay tab
+        // (menu.cpp) sets it, beside the match, with details_wanted() and set_details_wanted() (saved at once), with details_description.
         void add_options(recomp::config::Config& config);
+        bool details_wanted();
+        void set_details_wanted(bool on);
+        extern const char* const details_description;
         // From the launcher's init (frontend.cpp): recompui's UI exists now.
         void on_ui_ready();
         // On the main thread (update_gfx).

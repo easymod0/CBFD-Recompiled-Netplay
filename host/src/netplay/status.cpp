@@ -6,7 +6,7 @@
 //   may have quit).", "Player 3 lost connection: the others play on.", "Everyone else has left: the match goes on
 //   here."; "Getting the host's game... 40%" while a
 //   desync is set right here (desync recovery)
-// - with General: Netplay Details on, in the bottom-right corner: the input delay (a spectator: Watching), how far ahead of the others
+// - with Netplay Details on (the in-game menu's Netplay tab), in the bottom-right corner: the input delay (a spectator: Watching), how far ahead of the others
 //   this machine is (or behind), and each player's round trip (a joiner knows only the host's: the others'
 //   pads come through it) and input delay, or that they're on this machine or left.
 //
@@ -42,7 +42,7 @@ namespace {
     // How often the corner's numbers change.
     constexpr double details_every = 0.25;
 
-    // General: Netplay Details, Off or On.
+    // Netplay Details, Off or On (kept with General's options, shown on the Netplay tab).
     const std::string details_option = "netplay_details";
     enum class Details : uint32_t { Off, On };
 
@@ -203,16 +203,31 @@ namespace {
     }
 }
 
+const char* const conker::netplay_status::details_description =
+    "In a netplay match, shows in the bottom-right corner the input delay, how far ahead of the others (or "
+    "behind) this computer is, and each player's round trip and input delay. Waiting for a player, and a player "
+    "leaving, are shown at the top whatever this is set to.";
+
 void conker::netplay_status::add_options(recomp::config::Config& config) {
     static const std::vector<recomp::config::ConfigOptionEnumOption> choices = {
         {Details::Off, "Off", "Off"},
         {Details::On, "On", "On"},
     };
-    config.add_enum_option(details_option, "Netplay Details",
-        "In a netplay match, shows in the bottom-right corner the input delay, how far ahead of the others (or "
-        "behind) this computer is, and each player's round trip in milliseconds. Waiting for a player, and a player "
-        "leaving, are shown at the top whatever this is set to.",
-        choices, Details::Off);
+    // (Hidden: the Netplay tab shows it.)
+    config.add_enum_option(details_option, "Netplay Details", details_description, choices, Details::Off, true);
+}
+
+bool conker::netplay_status::details_wanted() {
+    return details_on();
+}
+
+void conker::netplay_status::set_details_wanted(bool on) {
+    recomp::config::Config* config = recompui::config::find_option_config(details_option);
+    if (config == nullptr) {
+        return;
+    }
+    config->set_option_value(details_option, (uint32_t)(on ? Details::On : Details::Off));
+    config->save_config();
 }
 
 void conker::netplay_status::on_ui_ready() {
