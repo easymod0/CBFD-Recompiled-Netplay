@@ -138,15 +138,15 @@ if finish "was the last: quitting" both-host both-join delay-host delay-join sta
         same "$name" mouse-solo "$MOUSE_READS" || failed=1
         predicted "$name" || failed=1
     done
-    # The delay changes, as the host made them and the joiner heard them ("becomes <d> from read <r>").
+    # The delay changes, as the host made them and the joiner heard them ("<ports> becomes <d> from read <r>").
     # (Not `made`: lib.sh's list of the data folders to delete.)
-    host_made=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/delay-host.out")
-    heard=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay becomes \([0-9]*\) from read \([0-9]*\) .*/\1 \2/p' "$OUT/delay-join.out")
+    host_made=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay of \(.*\) becomes \([0-9]*\) from read \([0-9]*\) .*/\1: \2 \3/p' "$OUT/delay-host.out")
+    heard=$(sed -n 's/^\[netplay\] read [0-9]*: the input delay of \(.*\) becomes \([0-9]*\) from read \([0-9]*\) .*/\1: \2 \3/p' "$OUT/delay-join.out")
     if [ -z "$host_made" ] || [ "$host_made" != "$heard" ]; then
         echo "  delay: the delay changes differ or there are none: host: ${host_made:-none}; joiner: ${heard:-none}"
         failed=1
     else
-        echo "  delay: the input delay became $(echo "$host_made" | sed 's/\(.*\) \(.*\)/\1 from read \2/' | paste -sd, - | sed 's/,/, /g'), the same on both"
+        echo "  delay: the input delay became $(echo "$host_made" | sed 's/\(.*\) \([0-9]*\)$/\1 from read \2/' | paste -sd, - | sed 's/,/, /g'), the same on both"
     fi
     # Port 3 leaving: both say the same read, and the game is the solo replay's with port 3 idle from there.
     from=$(left_at leave-host 3)

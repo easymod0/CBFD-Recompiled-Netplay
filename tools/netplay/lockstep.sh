@@ -34,8 +34,8 @@
 #   leave      the mouse match, the second joiner quitting at read 1500: the host and the first joiner play on,
 #              port 3 idle from the read the host says (both must say the same), and must match a solo replay
 #              of the recording with port 3 idle from there
-#   leave-crash the same with the second joiner killed at about read 1500 (no goodbye): the host notices it stopped
-#              answering, and the two play on as above
+#   leave-crash the same with the second joiner killed at about read 1500 (no goodbye): the host lets go of it after
+#              5 s of holding everyone up, and the two play on as above
 #   leave-couch the couch match with ports 2 and 3 on a joiner that quits at read 1500: the host plays on, both
 #              ports idle from the same read, and must match a solo replay so
 #   kick       the host kicks the joiner during the match: the joiner is told, the host plays to the end
@@ -298,9 +298,11 @@ else
 fi
 
 echo "leave-crash"
-# The 3-player match again, the second joiner killed at read 1500 (no goodbye): the host notices it stopped answering
-# (in about 10 s), and the two play on, as above.
-pads=mouse-1.pads start crash-host --netplay-host 27319 --netplay-address 127.0.0.1 --players 3
+# The 3-player match again, the second joiner killed at read 1500 (no goodbye): the host lets go of it once it has
+# held everyone up 5 s (#40; the library notices it stopped answering later), and the two play on, as above.
+# (The host stops 8 s at read 1700, after it lets go of it, so the library notices it's gone before the match ends: the
+# first joiner must then be told it left.)
+pads=mouse-1.pads start crash-host --netplay-host 27319 --netplay-address 127.0.0.1 --players 3 --netplay-stall-at 1700:8000
 code=$(code_of crash-host)
 pads=mouse-2.pads start crash-join1 --netplay-join "$code"
 i=0
@@ -319,7 +321,12 @@ if finish "was the last: quitting" crash-host crash-join1; then
         echo "  the host and the first joiner don't say the same read for port 3 ('$from', '$(left_at crash-join1 3)')"
         failed=1
     else
-        echo "  port 3 stopped answering; idle from read $from"
+        echo "  port 3 stopped answering, let go of; idle from read $from"
+        # Let go of first, then gone for good: the first joiner is told it left, not still "lost connection".
+        if ! grep -q "(on screen) Player 3 stopped answering" "$OUT/crash-join1.out"; then
+            echo "  the first joiner wasn't told port 3 stopped answering, after it was let go of"
+            failed=1
+        fi
         idle_from "$OUT/mouse.pads" "$OUT/crash-solo.pads" 3 "$from" || exit 2
         pads=crash-solo.pads start crash-solo
         if finish "was the last: quitting" crash-solo; then

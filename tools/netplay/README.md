@@ -417,20 +417,44 @@ Controls. Several players on the leaving machine leave together. The host leavin
 the hub). `Gone` says whether they said goodbye or stopped answering, so every machine can say which on
 screen; the log says who left and from when.
 
-**The delay follows the connection.** With `auto`, the host checks every 30 reads, and changes the delay
-when the round trips want another, or when 3 or more of its reads came late from waiting for the others
-since the last check (a lossy network: the inputs sent again come late, which the round trips don't show;
-then one read more, up to 2 more than the round trips need: a peer that can't keep up makes reads late
-whatever the delay). It raises it after 2 checks in a row, and lowers it only after 5 with 12 ms to spare and
-no read late from waiting (a read at a time while it's above what the round trips need for waiting), and not
-within 90 reads of the last change, so it doesn't go back and forth. It
-tells the joiners `Delay`: the delay becomes D from read R, where R is past any read a joiner can have sent
-its pads at before it hears (a joiner is at most the delay ahead of the host, and the Delay comes after the
-host's pads for those reads). Every peer switches at R: from there it sends its pads up to R + D. Raised,
-the reads in between get the pad its controllers give then too (held; the mouse and gyro movement goes with
-the first); lowered, its pads for the reads up to R - 1 + the old delay are already sent, and the live
-ones for those reads aren't sent (a button pressed and let go within them is lost). The pads are sent either way, so every machine gives the game the same.
-A fixed `--input-delay` stays.
+**Each player's own delay, following their connection** (#18, #40). Each port has its own input delay (a
+machine's ports share one): every peer sends its own pads its own delay ahead, and reads each other port's
+by that port's. With `auto` the host chooses each machine's, so one player's bad link doesn't raise everyone's.
+Each machine times every input that comes against when it made the read the input was sent at (by the
+library's receive time: the game thread only polls at its reads), against a rolling one-second median (a trip
+that changes for good isn't unevenness): how much later the latest tenth came is that port's spread, sent to
+the host with its hashes, beside how many reads it waited for each port. The host goes by the receiver that
+has a port the most evenly and waited for it the least (a receiver with a bad link gets everyone's late). It
+checks every 30 reads. Without rollback every pad must arrive in time along the slowest way one goes, so the
+round trips' delay is everyone's, plus what the machine's spread needs past a read; it raises a machine's
+after 2 checks in a row wanting more (or 3 reads waiting for it since the last check: then one read more, up
+to 2 more than the trips need), and lowers it only after 10 with 12 ms to spare and none waiting for it.
+With rollback, a machine's delay is for its one-way trip to the host (the host's own: to the nearest
+joiner), less the 3 reads predicting covers (at least 1 unless a LAN's trip needs none), plus what its spread
+needs past a read: the others' predicting covers the rest. It's chosen at the start from the round trips,
+then follows the median of the last 30 checks a read at a time, at most every 300 reads: up as that wants,
+or for reads waiting for it, and down only after 90 checks in a row with nothing waiting for it. A LAN's is 0
+from start to end. Not within 90 (300) reads of a machine's last change either, so it doesn't go back and
+forth. The host tells the joiners `Delay`: the delay of these ports becomes D from read R, where R is past
+any read a joiner can have sent its pads at before it hears (a joiner is at most the delay ahead of the host,
+and the Delay comes after the host's pads for those reads). Every peer switches at R: from there that machine
+sends its pads up to R + D. Raised, the reads in between get the pad its controllers give then too (held;
+the mouse and gyro movement goes with the first); lowered, its pads for the reads up to R - 1 + the old delay
+are already sent, and the live ones for those reads aren't sent (a button pressed and let go within them is
+lost). The pads are sent either way, so every machine gives the game the same. A fixed `--input-delay` is
+everyone's, and stays.
+
+**A player whose inputs stop** (#40). A player whose inputs stop coming (a dropout) holds the others up only
+for a while. Once the host has waited for a machine's inputs 5 s (reads waiting for it a quarter second or
+more, one after another), it lets go of it: `Gone` (its 3) tells everyone, the machine too, that its ports are
+idle from the read after the last of its inputs, as for a player who left, and the others play on ("Player 2
+lost connection: the others play on."). A stall that ends sooner lets go of nobody. A machine that had a stall
+of 2.5 s or more within the last 3 minutes is let go of after 2.5 s (its connection keeps failing); short
+waits, often, are for its delay to cover instead. The machine stays connected: once the `Gone` reaches it, it
+asks for the host's game (`Claim` of its first port) and comes back with it as a player coming back does
+(`Rejoin` and the state): the host brings it in from a read past any input sent ("Player 2 is back"). Ports
+getting a state, or whose first inputs since coming back haven't come, are waited for as ever. If its
+connection doesn't come back, the library drops it after about 10 s, and it's a player who left.
 
 **Catching up.** A peer that falls behind (a hitch: loading, the system) lets the others run on until they
 need its input, up to the input delay ahead; from then on they'd wait on it at every read, the delay used
@@ -443,10 +467,11 @@ always (`audio_output.cpp`), and nothing else needs to change: the game is the s
 **On screen.** What the match is doing is shown over the game (`host/src/netplay/status.cpp`, a recompui
 overlay like the notices, never in game memory): at the top, "Waiting for Player 2... 4 s" once a read has
 waited a second for the others, "Catching up..." once that's gone on half a second, and for a few seconds
-each, a player leaving ("Player 3 left.", or "stopped answering (they may have quit)") and the host playing
-on when everyone else has left. With General: Netplay Details on, a corner shows the input delay, how many
-frames this machine is ahead of the others (or behind), and each player's round trip (a joiner knows only the
-host's: the others' inputs come through it). Lockstep keeps what's shown (`lockstep::status`, `take_news`)
+each, a player leaving ("Player 3 left.", or "stopped answering (they may have quit)", or "lost connection:
+the others play on"), coming back, and the host playing on when everyone else has left. With Netplay Details
+on (the in-game menu's Netplay tab), a corner shows the input delay, how many frames this machine is ahead of the others (or behind),
+and each player's round trip (a joiner knows only the host's: the others' inputs come through it) and input
+delay. Lockstep keeps what's shown (`lockstep::status`, `take_news`)
 under a lock of its own, so the overlay reads it while the game thread waits at a read. While the game waits,
 the timeline gives no VI, and RT64 only presents a frame when the game makes one, so nothing drawn over the
 game (the overlay, the menus) would change: once no VI has come for 100 ms, the runtime's VI thread asks the
@@ -474,7 +499,9 @@ measured once a read's inputs are in); half the difference between two machines'
 far one is ahead, the latency cancelling. Averaged over about a second, the machine more than a tenth of a
 read ahead is paced up to 2 ms later a read (`timeline::pace_later`) till they're level: else the one a
 little ahead predicts nearly every read and the other none (the inputs come with only a few milliseconds to
-spare). `--rollback-test <every>:<back>` and `--rollback-late <late>[:<seed>]` measure and test going back
+spare). One player can't drag everyone down (#40): the host goes by a port no more once it has paced
+everyone later for it over 300 ms in about the last half minute (about 1%), till that's half again; a player
+kept behind for good (a slow computer) catches up on its own. `--rollback-test <every>:<back>` and `--rollback-late <late>[:<seed>]` measure and test going back
 alone (harness.cpp). `rollback.sh` plays rollback matches over a bad network, and `lockstep.sh
 --host-options "--rollback 8" --match-options "--netplay-fake-network lag=40"` plays every lockstep match
 so.
@@ -489,8 +516,9 @@ so.
 | `spectators.sh` | the spectators check: a spectator watching from the start, joining a match under way, set right after a desync, in a rollback match and leaving partway sees the players' game (the same as a replay alone) and never holds them up, a host that takes none refuses one, spectators and players change places (taking an open place, a swap, a place someone left, a player or two on one computer stepping out, before the start too), and the server's room list says how many watch (about 2 minutes) |
 | `rollback.sh` | the rollback check: matches where the copies predict the others' inputs (the host's `--rollback`), over a bad network, with a change of delay, a stall and a player leaving, give the same game as a replay alone; then a match on real time must keep to time, with time sync keeping both copies predicting (about 90 s) |
 | `rollback-modes.sh` | rollback across the game's own changes: every multiplayer mode (4 players, a pause, a Race's match end) replayed going back every 3 reads, 12 deep, and with other machines' inputs up to 8 reads late, must give the plain replay's game; `--recording` adds a real one (about 90 s) |
+| `bad-link.sh` | the bad link check (#40), on real time with rollback 12: a LAN keeps every delay 0, a joiner whose inputs arrive unevenly gets a higher delay than the host, a 3 s outage lets go of nobody, an 8 s one is let go of after 5 s and comes back by itself, a second long stall is let go of after 2.5 s, time sync stops slowing everyone for a slow joiner, and in a 3-player match the bad one's delay is the highest, the others wait at most 5 s and play on; each giving the same game as a replay alone (with the port idle while it was out) (about 5 minutes) |
 | `try-network.sh` | netplay over a faked bad network on this one computer, in two windows: `watch` (a made-up 2-player Deathmatch, each window one player's, with `--net`, `--rollback`, `--delay`) or `play` (both at the launcher: host, join, play with the keyboard); prints each side's rollback, time sync and waits |
-| `lib.sh` | what `lockstep.sh`, `network.sh`, `rollback.sh` and `spectators.sh` share: starting copies, waiting for them, comparing their hash logs, a recording with players idle from a read |
+| `lib.sh` | what `lockstep.sh`, `network.sh`, `rollback.sh`, `spectators.sh` and `bad-link.sh` share: starting copies, waiting for them, comparing their hash logs, a recording with players idle from a read |
 | `compare_hashes.py` | the first read two hash logs differ at (it exits 1 if they differ); with dumps, the ranges that differ, by data symbol |
 | `compare_desyncs.py` | two peers' desync reports: whether they're comparable, the regions and (with their memory) the ranges that differ, by data symbol |
 | `make_match.py` | a recording that plays from boot into a multiplayer match (`--mode`, `--players`, `--variant`, `--pause`; `--mouse` has everyone move, aim and use their mouse and gyro), the same every time: for looking at multiplayer (split screen, "my view only") without the menus |

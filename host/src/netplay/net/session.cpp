@@ -426,14 +426,14 @@ namespace conker::netplay {
         }
     }
 
-    bool Session::start(bool own_view, int delay, int rollback, bool open_seats) {
+    bool Session::start(bool own_view, const std::array<uint8_t, max_players>& delays, int rollback, bool open_seats) {
         uint8_t taken = own_ports;
         for (const Peer& peer : peers) {
             taken |= peer.ports;
         }
         const uint8_t open = (uint8_t)(((1u << match_players) - 1) & ~taken);
-        if (!is_host || !entry_open || (open != 0 && !open_seats) || delay < 0 || delay > max_delay ||
-            rollback < 0 || rollback > max_rollback) {
+        if (!is_host || !entry_open || (open != 0 && !open_seats) ||
+            std::any_of(delays.begin(), delays.end(), [](uint8_t d) { return d > max_delay; }) || rollback < 0 || rollback > max_rollback) {
             return false;
         }
         // (The roster as it is now first: a joiner moved this very poll learns where it is before the Start.)
@@ -446,7 +446,7 @@ namespace conker::netplay {
         entry_open = false;
         match_started = true;
         next_inputs.fill(0);
-        const Start start{ (uint8_t)match_players, (uint8_t)(own_view ? 1 : 0), (uint8_t)delay, pairs(), (uint8_t)rollback, open };
+        const Start start{ (uint8_t)match_players, (uint8_t)(own_view ? 1 : 0), delays, pairs(), (uint8_t)rollback, open };
         match_own_view = start.own_view;
         match_pairs = start.pairs;
         match_rollback = start.rollback;
@@ -729,11 +729,15 @@ namespace conker::netplay {
             SteamNetworkingMessage_t* messages[32];
             int count;
             int taken = 0;
+            // (The library's clock, to tell when each message came on the steady one.)
+            const SteamNetworkingMicroseconds library_now = SteamNetworkingUtils()->GetLocalTimestamp();
+            const double steady_now = now();
             while (taken < max_messages_per_poll && (count = sockets->ReceiveMessagesOnPollGroup(poll_group, messages, 32)) > 0) {
                 taken += count;
                 for (int i = 0; i < count; i++) {
                     SteamNetworkingMessage_t* message = messages[i];
                     taking_unreliable = (message->m_nFlags & k_nSteamNetworkingSend_Reliable) == 0;
+                    taking_arrived = steady_now - (double)(library_now - message->m_usecTimeReceived) / 1e6;
                     take(message->m_conn, { (const uint8_t*)message->m_pData, (size_t)message->m_cbSize }, events);
                     taking_unreliable = false;
                     message->Release();
@@ -826,6 +830,7 @@ namespace conker::netplay {
             (count = sockets->ReceiveMessagesOnConnection(connection, messages, 32)) > 0; taken += count) {
             for (int i = 0; i < count; i++) {
                 taking_unreliable = (messages[i]->m_nFlags & k_nSteamNetworkingSend_Reliable) == 0;
+                taking_arrived = now() - (double)(SteamNetworkingUtils()->GetLocalTimestamp() - messages[i]->m_usecTimeReceived) / 1e6;
                 take(connection, { (const uint8_t*)messages[i]->m_pData, (size_t)messages[i]->m_cbSize }, events);
                 taking_unreliable = false;
                 messages[i]->Release();
@@ -969,6 +974,10 @@ namespace conker::netplay {
             // anything else is a broken or hostile peer, refused before it's passed on.
             const Inputs* inputs = std::get_if<Inputs>(&packet);
             const Hash* hash = std::get_if<Hash>(&packet);
+            // (A machine let go of: what it sent before it heard is late, not wrong; nor what it sends till it's back.)
+            if (peer.let_go && (inputs != nullptr || hash != nullptr || std::holds_alternative<Unseat>(packet))) {
+                return;
+            }
             // An Inputs' reads that came already (in its early copy, or the copy after it) are cut off, and an early copy
             // that starts past the next read waits for the reliable Inputs to fill in (it isn't taken).
             // (A copy that isn't for now, as one sent before a seat change arriving after it, is late, not wrong.)
@@ -1040,6 +1049,21 @@ namespace conker::netplay {
                     drop(peer, Reason::protocol, &events);
                     return;
                 }
+                // A machine let go of, here again: it comes back for the host's game (once).
+                if (peer.let_go) {
+                    if (claim->port != peer.port || peer.returning || closed) {
+                        return;
+                    }
+                    peer.returning = true;
+                    Event event{ Event::Type::joined };
+                    event.port = peer.port;
+                    event.ports = peer.ports;
+                    event.players = match_players;
+                    event.rejoin = true;
+                    event.returned = true;
+                    events.push_back(std::move(event));
+                    return;
+                }
                 if (peer.spectator < 0 || !peer.in_match || closed) {
                     return;
                 }
@@ -1063,6 +1087,7 @@ namespace conker::netplay {
             event.spectator = peer.spectator;
             event.player = peer.player;
             event.packet = packet;
+            event.arrived = taking_arrived;
             events.push_back(std::move(event));
             return;
         }
@@ -1164,7 +1189,7 @@ namespace conker::netplay {
             started = true;
             Event event{ Event::Type::started };
             event.own_view = start->own_view != 0;
-            event.delay = start->delay;
+            event.delays = start->delays;
             event.pairs = start->pairs;
             event.rollback = start->rollback;
             event.open = start->open;
@@ -1181,6 +1206,7 @@ namespace conker::netplay {
             event.port = inputs->port;
             event.packet = packet;
             event.copy = taking_unreliable;
+            event.arrived = taking_arrived;
             events.push_back(std::move(event));
         }
         else if (const Hash* hash = std::get_if<Hash>(&packet); hash != nullptr) {
@@ -1196,11 +1222,14 @@ namespace conker::netplay {
             events.push_back(std::move(event));
         }
         else if (const Gone* gone = std::get_if<Gone>(&packet); gone != nullptr) {
-            // Once started, about another machine's player.
-            if (!started || (own_ports & (1u << gone->port)) != 0 || gone->port >= match_players) {
+            // Once started, about another machine's player; or this machine let go of, its inputs having stopped coming
+            // for a while (one for each of its ports: it comes back with the host's game, Rejoin).
+            const bool mine = (own_ports & (1u << gone->port)) != 0;
+            if (!started || gone->port >= match_players || (mine && gone->silent != 3)) {
                 drop(peer, Reason::protocol, &events);
                 return;
             }
+            if (mine) rejoining = true;
             Event event{ Event::Type::packet };
             event.port = gone->port;
             event.packet = packet;
@@ -1531,6 +1560,22 @@ namespace conker::netplay {
         }
     }
 
+    void Session::let_go_of(uint8_t ports) {
+        for (Peer& peer : peers) {
+            if (is_host && peer.port >= 0 && peer.ports == ports && peer.in_match) {
+                peer.in_match = false;
+                peer.let_go = true;
+                peer.returning = false;
+            }
+        }
+    }
+
+    void Session::come_back() {
+        if (!is_host && rejoining && own_ports != 0 && !peers.empty()) {
+            send_to(peers[0].connection, Claim{ (uint8_t)std::countr_zero(own_ports) });
+        }
+    }
+
     void Session::take_seat(uint8_t ports) {
         if (!is_host && watching()) {
             own_ports = ports;
@@ -1551,6 +1596,8 @@ namespace conker::netplay {
             }
             peer.in_match = true;
             peer.inputs_from = inputs_from;
+            peer.let_go = false;
+            peer.returning = false;
         }
     }
 

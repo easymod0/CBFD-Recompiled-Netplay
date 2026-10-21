@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shared by lockstep.sh, network.sh, rollback.sh and spectators.sh (sourced, from the repo's root): running copies of the game against
+# Shared by lockstep.sh, network.sh, rollback.sh, spectators.sh and bad-link.sh (sourced, from the repo's root): running copies of the game against
 # each other on this machine, each with its own data folder, and comparing their hash logs. They set EXE, ROM,
 # OUT, READS and TIMEOUT first.
 

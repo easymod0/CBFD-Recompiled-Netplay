@@ -58,9 +58,10 @@
 //                                and gyro). "My view only" (view.cpp) shows two players' views across
 //                                the top and bottom halves of the window; three see the whole split screen
 //   --input-delay <reads|auto>   (hosting) how many reads ahead each peer's own pads are sent, 0 to 8, or
-//                                auto (the default): chosen from the round trips to the players as the
-//                                match starts, and changed as they change. The host tells everyone (Start,
-//                                then Delay: every peer switches at the same read)
+//                                auto (the default): each player's own, chosen for how their inputs reach
+//                                the others (the round trips as the match starts, then how evenly the
+//                                inputs come too), and changed as that changes. The host tells everyone
+//                                (Start, then Delay: every peer switches at the same read)
 //   --netplay-desync-at <read>   (a test) changes a byte of game memory at that read (in region 64,
 //                                0x80400003), which the next hash comparison must catch (again for more)
 //   --netplay-no-recovery        (hosting) a desync ends the match, rather than the host sending its game to
@@ -102,7 +103,9 @@
 // game as a new player does, and after a desync the host sends it its game alone. It never ends the match.
 //
 // A peer that falls behind the others (a hitch: loading, the system) catches up on its own: it runs the
-// timeline faster than real time until the others' inputs are no further ahead of it than the delay.
+// timeline faster than real time until the others' inputs are no further ahead of it than the delay. One whose
+// inputs stop coming holds the others up only a while (5 s, or 2.5 s for one that did lately): the host lets go of
+// it, the others play on, and it comes back with the host's game once it can, still connected.
 //
 // What the match is doing (waiting for a player, catching up, a player leaving, the delay and round trips) is
 // kept for the screen (status, take_news: netplay/status.cpp draws it).
@@ -300,7 +303,7 @@ namespace conker::lockstep {
     // The port of this machine's player `local` (0 is the first), once connected; -1 if there's none.
     int port_of_local(int local);
     int players();
-    // The match's input delay, once connected.
+    // This machine's players' input delay (each player has their own), once connected.
     int input_delay();
 
     // A player's input for one read: their pad, and their mouse and gyro movement with their Controls.
@@ -361,6 +364,7 @@ namespace conker::lockstep {
         int players = 0;
         uint8_t own_ports = 0;          // bit n: port n
         int input_delay = 0;
+        std::array<int, netplay::max_players> delays{};    // each port's input delay (#40: a player's own)
         // How many reads ahead of the furthest of the others this machine is (behind: below 0); none while
         // nobody else plays.
         int64_t ahead = 0;
@@ -376,6 +380,7 @@ namespace conker::lockstep {
         std::array<int, netplay::max_players> round_trip_ms{ -1, -1, -1, -1 };
         uint8_t left = 0;
         uint8_t left_silently = 0;
+        uint8_t lost = 0;               // the ports let go of as their inputs stopped coming (#40), till they're back
         uint8_t open = 0;               // the ports nobody has (open since the start: free for a new player)
         // Desync recovery, or coming back: this machine is getting the host's game (how much of it has come, 0 to 1).
         bool getting_state = false;
