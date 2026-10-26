@@ -125,8 +125,7 @@ namespace conker::netplay {
                                : p.own_view <= 1 && valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback);
         }
         bool valid_release(const std::string& release) {
-            return release.size() <= max_release_name &&
-                std::all_of(release.begin(), release.end(), [](char c) { return c > ' ' && c <= '~'; });
+            return release.size() <= max_release_name && printable_word(release);
         }
         bool valid_fields(const Refuse& p) {
             return valid_reason(p.reason) && valid_release(p.release);

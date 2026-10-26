@@ -24,10 +24,6 @@
 #include "lan_packets.hpp"
 
 namespace conker::netplay {
-    // Whether games on these platforms play together, as the netplay server decides for its room list:
-    // Linux and Windows have; macOS hasn't been tried with them.
-    bool platforms_mix(signal::Platform a, signal::Platform b);
-
     // A host's broadcasts.
     class LanBeacon {
     public:

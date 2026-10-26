@@ -25,7 +25,6 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -535,8 +534,9 @@ namespace {
     bool joining_late = false;      // ...as a new player
     double rejoining_since = 0;
     constexpr uint64_t rejoin_boot_reads = 30;
-    // The most reads a match coming back to can be at: a day's (the inputs before are kept, as in any match).
-    constexpr uint64_t most_rejoin_read = 30ull * 60 * 60 * 24;
+    // The most reads a match coming back to can be at: six hours' (the inputs before are kept, as in any match: a
+    // Rejoin from a broken or hostile host saying more would have this machine hold that many for each port at once).
+    constexpr uint64_t most_rejoin_read = 30ull * 60 * 60 * 6;
 
     std::array<std::vector<Input>, conker::netplay::max_players> received;
     std::array<bool, conker::netplay::max_players> gone{};
@@ -3073,8 +3073,10 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     cancel();
     if (player_option == 0) {
         // Neither the menu's nor --netplay-player: one for this process.
-        std::random_device random;
-        while (player_option == 0) player_option = (uint64_t)random() << 32 | random();
+        if (!netplay::random_key(player_option)) {
+            error = "couldn't make a player id (no random source)";
+            return false;
+        }
     }
     netplay::Hello mine = me;
     mine.players = (uint8_t)local_option;
