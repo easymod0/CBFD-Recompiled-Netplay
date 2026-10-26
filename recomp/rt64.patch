@@ -875,10 +875,50 @@ index 60b0fa4..6c80bb6 100644
  };
 \ No newline at end of file
 diff --git a/src/hle/rt64_game_frame.cpp b/src/hle/rt64_game_frame.cpp
-index 87392d0..1f5e54a 100644
+index 87392d0..58560a3 100644
 --- a/src/hle/rt64_game_frame.cpp
 +++ b/src/hle/rt64_game_frame.cpp
-@@ -296,7 +296,11 @@ namespace RT64 {
+@@ -10,6 +10,28 @@
+ #include "xxHash/xxh3.h"
+ 
+ namespace RT64 {
++    // Whether two projections are drawn in parts of the frame apart from each other: a split screen's views, each
++    // player's own. Their cameras can be alike (the same projection, the view in the model matrices), and paired with
++    // each other they were drawn from between two players' cameras for a frame, the level culled for one of them.
++    static bool areScissorsApart(const FixedRect &first, const FixedRect &second) {
++        if (first.isNull() || second.isNull()) {
++            return false;
++        }
++
++        return first.intersection(second).isEmpty();
++    }
++
++    // Whether two scenes are drawn in different places, for pairing them with last frame's: apart (above), or one of
++    // them with no scissor at all (a scene that drew nothing scissored) and the other with one. Such a scene was
++    // paired with player 2's last frame before player 2's own was, and player 2's camera jittered between frames.
++    static bool areScenesPlacedApart(const FixedRect &first, const FixedRect &second) {
++        if (first.isNull() != second.isNull()) {
++            return true;
++        }
++
++        return areScissorsApart(first, second);
++    }
++
+     // GameFrame
+     
+     bool GameFrame::areFramebufferPairsCompatible(const WorkloadQueue &workloadQueue, const GameIndices::FramebufferPair &first, const GameIndices::FramebufferPair &second) {
+@@ -55,6 +77,10 @@ namespace RT64 {
+         const Workload &cmpWorkload = workloadQueue.workloads[firstProj.workloadIndex];
+         const FramebufferPair &cmpFbPair = cmpWorkload.fbPairs[firstProj.fbPairIndex];
+         const Projection &cmpProj = cmpFbPair.projections[firstProj.projectionIndex];
++        if (areScissorsApart(cmpProj.scissorRect, fbProj.scissorRect)) {
++            return false;
++        }
++
+         const interop::float4x4 &cmpViewMatrix = cmpWorkload.drawData.viewTransforms[cmpProj.transformsIndex];
+         const interop::float4x4 &fbViewMatrix = workload.drawData.viewTransforms[fbProj.transformsIndex];
+         const float viewMatrixDiff = matrixDifference(cmpViewMatrix, fbViewMatrix);
+@@ -296,7 +322,11 @@ namespace RT64 {
                  prevWorkloadMap = &prevFrame.frameMap.workloads[workloadMap.prevWorkloadIndex];
              }
  
@@ -891,7 +931,7 @@ index 87392d0..1f5e54a 100644
              ModifiedBuffers modifiedBuffers;
              auto curIt = curWorkload.transformIdMap.begin();
              auto prevIt = prevWorkload.transformIdMap.begin();
-@@ -309,9 +313,31 @@ namespace RT64 {
+@@ -309,9 +339,31 @@ namespace RT64 {
                      prevIt++;
                  }
                  else {
@@ -926,7 +966,18 @@ index 87392d0..1f5e54a 100644
                  }
              }
  
-@@ -486,6 +512,17 @@ namespace RT64 {
+@@ -348,7 +400,9 @@ namespace RT64 {
+                     const Projection &prevProj = prevFbPair.projections[prevFirstProj.projectionIndex];
+                     const hlslpp::float4x4 &prevViewTransform = prevWorkload.drawData.viewTransforms[prevProj.transformsIndex];
+                     const hlslpp::float4x4 &prevProjTransform = prevWorkload.drawData.projTransforms[prevProj.transformsIndex];
+-                    matchCandidates.emplace_back(i, j, matrixDifference(curViewTransform, prevViewTransform) + matrixDifference(curProjTransform, prevProjTransform));
++                    // A scene is paired with one drawn in the same part of the frame before any other (split screen).
++                    const float apartPenalty = areScenesPlacedApart(curProj.scissorRect, prevProj.scissorRect) ? 1e20f : 0.0f;
++                    matchCandidates.emplace_back(i, j, matrixDifference(curViewTransform, prevViewTransform) + matrixDifference(curProjTransform, prevProjTransform) + apartPenalty);
+                 }
+             }
+ 
+@@ -486,6 +540,17 @@ namespace RT64 {
                          viewProjMap.rigidBody = prevViewProjMap.rigidBody;
                      }
  
@@ -944,7 +995,7 @@ index 87392d0..1f5e54a 100644
                      viewProjMap.rigidBody.updateLinear(prevView, curView, projectionLinearComponent);
                      viewProjMap.rigidBody.updateAngular(prevView, curView, projectionAngularComponent, projectionScaleComponent, projectionSkewComponent);
                      viewProjMap.rigidBody.updateDecomposition(curView, projectionDecompose);
-@@ -709,7 +746,45 @@ namespace RT64 {
+@@ -709,7 +774,45 @@ namespace RT64 {
          }
      }
  
@@ -991,7 +1042,7 @@ index 87392d0..1f5e54a 100644
          GameFrameMap::TransformMap &curTransformMap = curWorkloadMap.transforms[curTransformIndex];
          if (prevWorkloadMap != nullptr) {
              curTransformMap.rigidBody = prevWorkloadMap->transforms[prevTransformIndex].rigidBody;
-@@ -733,7 +808,7 @@ namespace RT64 {
+@@ -733,7 +836,7 @@ namespace RT64 {
          uint32_t curVertexCount = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
          uint32_t prevVertexIndex = prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex];
          uint32_t prevVertexCount = prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex);
@@ -1000,7 +1051,7 @@ index 87392d0..1f5e54a 100644
              const std::vector<float> &curPosFloats = curWorkload.drawData.posFloats;
              const std::vector<float> &prevPosFloats = prevWorkload.drawData.posFloats;
              std::vector<float> &curVelFloats = curWorkload.drawData.velFloats;
-@@ -744,17 +819,178 @@ namespace RT64 {
+@@ -744,17 +847,178 @@ namespace RT64 {
                  const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
                  const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
                  float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];

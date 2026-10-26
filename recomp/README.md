@@ -464,6 +464,15 @@ order drawn. In RT64:
   through `RT64::setInterpolationPaused`). The blur blends each frame with a
   copy of the last; blended on the frames drawn between the game's, that copy
   was only a fraction of a frame old, and the blur was all but gone (issue #77).
+- a split screen's views stay apart (`GameFrame::isSceneCompatible` and the
+  scenes' pairing): each player's view is its own scene, paired with last frame's
+  in the same part of the frame (their scissors overlap), and a scene with no
+  scissor only with another without one. The views' cameras look alike to RT64
+  (the same projection, the camera in the model matrices), so they were grouped
+  and paired across players: the frames between were drawn from between two
+  players' cameras, the level culled for one of them, and the split screen
+  flickered; then a scene drawing nothing scissored took player 2's place, and
+  player 2's camera jittered.
 
 A character's shadow (`func_15186794`) is the ground under it, clipped anew
 every frame and drawn with the shadow's texture projected onto it from the
