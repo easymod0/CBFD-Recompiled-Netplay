@@ -52,7 +52,6 @@
 #include <iterator>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -256,9 +255,9 @@ namespace {
     // The settings, with a player id made the first time.
     ServerSettings load_or_make_settings() {
         ServerSettings settings = load_settings();
-        if (settings.player == 0) {
-            std::random_device random;
-            while (settings.player == 0) settings.player = (uint64_t)random() << 32 | random();
+        // (The system's random source: who may come back to a place, and who's kicked or blocked, go by it. Without
+        // one, none is kept and each match makes its own, lockstep::begin.)
+        if (settings.player == 0 && conker::netplay::random_key(settings.player)) {
             save_settings(settings);
         }
         return settings;

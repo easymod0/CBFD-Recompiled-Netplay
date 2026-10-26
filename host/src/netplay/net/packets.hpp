@@ -17,6 +17,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -25,6 +26,13 @@ namespace conker::netplay {
     constexpr uint16_t protocol_version = 24;
     // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
     constexpr size_t max_release_name = 40;
+    // Every character of `text` printable, with no spaces (release names, a server's texts): the length is each one's own.
+    inline bool printable_word(std::string_view text) {
+        for (const char c : text) {
+            if (c <= ' ' || c > '~') return false;
+        }
+        return true;
+    }
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most spectators a match takes: machines with no players, watching (they get every input, send none).

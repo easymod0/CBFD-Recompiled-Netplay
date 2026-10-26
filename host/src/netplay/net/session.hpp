@@ -108,6 +108,8 @@ namespace conker::netplay {
     // Gives this process a new id (and the library that identity), closing every connection: for each new
     // match through a signalling server, which doesn't give an id out again for an hour after it's left.
     bool new_id(std::string& error);
+    // 64 bits from the system's random source (never 0): a match's key, a player id. False if there's none.
+    bool random_key(uint64_t& key);
 
     // How ICE connections find their way: the servers the library asks (STUN for this machine's public
     // address, TURN to relay), as "host:port" lists separated by commas (empty: none), and which ways are

@@ -81,10 +81,6 @@ namespace conker::netplay {
         }
     }
 
-    bool platforms_mix(signal::Platform a, signal::Platform b) {
-        return (a == signal::Platform::macos) == (b == signal::Platform::macos);
-    }
-
     LanBeacon::~LanBeacon() {
         close();
     }
@@ -183,7 +179,7 @@ namespace conker::netplay {
             }
             const std::optional<lan::Beacon> beacon = lan::decode({ data, (size_t)size });
             // Only this game's.
-            if (!beacon || from.sin_family != AF_INET || beacon->fit != want_fit || !platforms_mix(beacon->platform, want_platform)) {
+            if (!beacon || from.sin_family != AF_INET || beacon->fit != want_fit || !signal::platforms_mix(beacon->platform, want_platform)) {
                 continue;
             }
             Endpoint endpoint;
