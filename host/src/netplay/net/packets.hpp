@@ -18,7 +18,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 13;
+    constexpr uint16_t protocol_version = 14;
     // The game's controller ports.
     constexpr int max_players = 4;
     // The most reads an Inputs packet carries: a peer catching up can send several at once. (Inputs are
@@ -125,11 +125,13 @@ namespace conker::netplay {
     constexpr uint32_t memory_region_size = 64 * 1024;
     constexpr int memory_regions = 128;
     // The XXH3-64 of the game's memory as the sender made read `read`, and each region's, cut to its low 16
-    // bits (enough to tell which differ, once the whole hash says something does).
+    // bits (enough to tell which differ, once the whole hash says something does), and how many of the sender's
+    // reads since its last Hash waited long for the others (lockstep.cpp's long_wait_ms: the host's auto delay).
     struct Hash {
         uint32_t read = 0;
         uint64_t hash = 0;
         std::array<uint16_t, memory_regions> regions{};
+        uint8_t long_waits = 0;
         bool operator==(const Hash&) const = default;
     };
     // Host to everyone, once every port is taken: the match starts, with this many players, whether every

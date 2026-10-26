@@ -290,10 +290,12 @@ screen; the log says who left and from when.
 
 **The delay follows the connection.** With `auto`, the host checks every 30 reads, and changes the delay
 when the round trips want another, or when 3 or more of its reads came late from waiting for the others
-since the last check (a lossy network: the inputs sent again come late, which the round trips don't show;
-then one read more, up to 2 more than the round trips need: a peer that can't keep up makes reads late
+since the last check (a lossy network: the inputs sent again come late, which the round trips don't show),
+or when half or more of a machine's reads since its last hash waited over 8 ms for the others (its own, or a
+joiner's, which its `Hash` carries: two machines half a frame out of step, as on a LAN at delay 0, keep 30
+frames a second but show them unevenly, which frame interpolation makes judder; then one read more, up to 2 more than the round trips need: a peer that can't keep up makes reads late
 whatever the delay). It raises it after 2 checks in a row, and lowers it only after 5 with 12 ms to spare and
-no read late from waiting (a read at a time while it's above what the round trips need for waiting), and not
+no read late or waiting long (a read at a time while it's above what the round trips need for waiting), and not
 within 90 reads of the last change, so it doesn't go back and forth. It
 tells the joiners `Delay`: the delay becomes D from read R, where R is past any read a joiner can have sent
 its pads at before it hears (a joiner is at most the delay ahead of the host, and the Delay comes after the

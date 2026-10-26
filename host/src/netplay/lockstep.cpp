@@ -85,7 +85,10 @@ namespace {
     // The host's checks (every hash_every reads) in a row that wanted a higher delay, and a lower one. Higher:
     // the round trips need more, or at least late_reads_to_raise reads came late as they waited for the others
     // since the last check (a lossy network: the pads that are sent again come late, which a higher delay
-    // hides; the round trips don't show it), then one more, up to most_raised_for_waiting more than the round
+    // hides; the round trips don't show it), or most of a peer's reads since its last hash waited over
+    // long_wait_ms (its own, or a joiner's, its Hash says: two machines half a frame out of step on a LAN, one
+    // waiting so at every read, keep 30 frames a second but show them unevenly, which frame interpolation
+    // makes judder), then one more, up to most_raised_for_waiting more than the round
     // trips need (a peer that can't keep up, rather than the network, makes reads late whatever the delay). It's
     // raised after raise_checks (every read waits until then), and lowered only after lower_checks with
     // lower_spare_ms to spare and no read late from waiting, so it doesn't go back and forth: a read at a time
@@ -97,6 +100,11 @@ namespace {
     int raised_for_waiting = 0;
     constexpr int most_raised_for_waiting = 2;
     uint64_t late_from_waiting = 0;
+    // Reads since this peer's last hash that waited over long_wait_ms, and the most a joiner's last Hash said.
+    uint64_t long_waits = 0;
+    uint8_t joiners_long_waits = 0;
+    constexpr double long_wait_ms = 8.0;    // delay_needed's wait_ms: more than a read can wait unseen
+    constexpr uint64_t long_waits_to_raise = hash_every / 2;
     constexpr int raise_checks = 2;
     constexpr int lower_checks = 5;
     constexpr uint64_t late_reads_to_raise = 3;
@@ -558,6 +566,7 @@ namespace {
                     if (own_hashes.empty() || hash->read >= own_hashes.begin()->first) {
                         their_hashes[{ event.port, hash->read }] = *hash;
                     }
+                    joiners_long_waits = std::max(joiners_long_waits, hash->long_waits);
                 }
                 break;
         }
@@ -637,18 +646,21 @@ namespace {
         const std::vector<int> trips = session->round_trips_ms();
         if (trips.empty() || trips.size() < (size_t)session->joiners() || read < delays.from + settle_reads) {
             late_from_waiting = 0;
+            joiners_long_waits = 0;
             wanted_higher = 0;
             wanted_lower = 0;
             return;
         }
         const uint64_t late = late_from_waiting;
         late_from_waiting = 0;
+        const uint64_t most_long_waits = std::max<uint64_t>(long_waits, joiners_long_waits);
+        joiners_long_waits = 0;
         const int needed = delay_needed(trips, spare_ms);
         const int roomy = delay_needed(trips, spare_ms + lower_spare_ms);
-        const bool waiting = late >= late_reads_to_raise && delay < conker::netplay::max_delay &&
-            raised_for_waiting < most_raised_for_waiting;
+        const bool waiting = (late >= late_reads_to_raise || most_long_waits >= long_waits_to_raise) &&
+            delay < conker::netplay::max_delay && raised_for_waiting < most_raised_for_waiting;
         wanted_higher = needed > delay || waiting ? wanted_higher + 1 : 0;
-        wanted_lower = roomy < delay && late == 0 ? wanted_lower + 1 : 0;
+        wanted_lower = roomy < delay && late == 0 && most_long_waits < long_waits_to_raise ? wanted_lower + 1 : 0;
         if (wanted_higher < raise_checks && wanted_lower < lower_checks) {
             return;
         }
@@ -665,8 +677,9 @@ namespace {
             to = delay - 1;
             raised_for_waiting--;
         }
-        std::printf("[netplay] round trips to the players: %s ms; %llu reads late from waiting since the last check\n",
-            trips_text(trips).c_str(), (unsigned long long)late);
+        std::printf("[netplay] round trips to the players: %s ms; %llu reads late from waiting, at most %llu of %llu waited over "
+            "%.0f ms, since the last check\n", trips_text(trips).c_str(), (unsigned long long)late, (unsigned long long)most_long_waits,
+            (unsigned long long)hash_every, long_wait_ms);
         change_delay(to, read + delay + 2);
         session->send(Delay{ (uint8_t)to, (uint32_t)delays.from });
         wanted_higher = 0;
@@ -963,6 +976,8 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     wanted_lower = 0;
     raised_for_waiting = 0;
     late_from_waiting = 0;
+    long_waits = 0;
+    joiners_long_waits = 0;
     outage_until = 0;
     if (catching_up) set_catching_up(false);
     initial_sent = false;
@@ -1237,6 +1252,7 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
         for (int i = 0; i < netplay::memory_regions; i++) {
             sent_hash.regions[i] = (uint16_t)own.regions[i];
         }
+        sent_hash.long_waits = (uint8_t)std::min<uint64_t>(long_waits, 255);
         session->send(sent_hash);
     }
 
@@ -1329,9 +1345,11 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
             waits.longest_read = read;
         }
     }
+    if (waited * 1000 > long_wait_ms) long_waits++;
     if (delay_option == auto_delay && session->hosting() && read % hash_every == 0) {
         adapt_delay(read);
     }
+    if (read % hash_every == 0) long_waits = 0;
     publish();
 
     for (int port = 0; port < match_players; port++) {

@@ -12,7 +12,7 @@
 //              (s16 mouse x, y, s16 gyro x, y, s8 wheel, u32 controls: only
 //              valid_controls: a field of view code up to fov_codes, no bit past 16); the unused ones zero, and the last read not past
 //              2^32 - 1
-//   5 Hash     u32 read, u64 hash, 128 u16 region hashes                             273 bytes
+//   5 Hash     u32 read, u64 hash, 128 u16 region hashes, u8 long waits              274 bytes
 //   6 Bye      u8 reason                                                               6 bytes
 //   7 Start    u8 players (2 to 4), u8 own view (0 or 1), u8 delay (0 to 8), u8 pairs  9 bytes
 //              (ports below players, an even number of them)
@@ -39,7 +39,7 @@ namespace conker::netplay {
                 case welcome: return header_size + 2;
                 case refuse: return header_size + 1;
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size);
-                case hash: return header_size + 12 + 2 * memory_regions;
+                case hash: return header_size + 12 + 2 * memory_regions + 1;
                 case bye: return header_size + 1;
                 case start: return header_size + 4;
                 case gone: return header_size + 6;
@@ -192,6 +192,7 @@ namespace conker::netplay {
                 for (uint16_t region : p.regions) {
                     w.u16(region);
                 }
+                w.u8(p.long_waits);
             }
             else if constexpr (std::is_same_v<T, Gone>) {
                 w.u8(p.port);
@@ -274,6 +275,7 @@ namespace conker::netplay {
                 for (uint16_t& region : p.regions) {
                     region = r.u16();
                 }
+                p.long_waits = r.u8();
                 packet = p;
                 break;
             }
