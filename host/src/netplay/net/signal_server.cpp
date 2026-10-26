@@ -122,12 +122,6 @@ namespace {
     constexpr double lists_per_second = 1.0 / 3.0;
     constexpr double list_burst = 6.0;
 
-    // Whether games on these platforms play together: Linux and Windows have, live; macOS hasn't been
-    // tried with them.
-    int platform_group(signal::Platform platform) {
-        return platform == signal::Platform::macos ? 1 : 0;
-    }
-
     volatile std::sig_atomic_t stopping = 0;
     void on_signal(int) { stopping = 1; }
 
@@ -545,7 +539,7 @@ namespace {
             for (const auto& [room, connection] : rooms) {
                 const auto host = peers.find(connection);
                 if (host == peers.end() || !host->second.listed ||
-                    platform_group(host->second.listing.platform) != platform_group(ask.platform)) {
+                    !signal::platforms_mix(host->second.listing.platform, ask.platform)) {
                     continue;
                 }
                 const signal::Publish& listing = host->second.listing;

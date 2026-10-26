@@ -68,8 +68,7 @@ namespace conker::netplay::signal {
                 d.port < d.players && d.other < d.players && d.port != d.other && d.rollback <= max_rollback && d.delay <= max_delay;
         }
         bool valid_release(const std::string& text) {
-            return !text.empty() && text.size() <= max_release &&
-                std::all_of(text.begin(), text.end(), [](char c) { return c > ' ' && c <= '~'; });
+            return !text.empty() && text.size() <= max_release && printable_word(text);
         }
         // A listed room's fields but its number (Publish's is the server's to fill in), as version `as` has
         // them (a release from 6 on; versions before it leave it out, and other_build).
@@ -119,8 +118,7 @@ namespace conker::netplay::signal {
             return room;
         }
         bool valid_text(const std::string& text) {
-            return !text.empty() && text.size() <= max_text &&
-                std::all_of(text.begin(), text.end(), [](char c) { return c > ' ' && c <= '~'; });
+            return !text.empty() && text.size() <= max_text && printable_word(text);
         }
     }
 

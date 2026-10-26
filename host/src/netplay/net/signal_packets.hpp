@@ -129,6 +129,11 @@ namespace conker::netplay::signal {
 
     // The game's platform, as a listed room's host and a peer asking for the list report it.
     enum class Platform : uint8_t { gnu_linux = 1, windows, macos, last = macos };   // not "linux": GCC defines it
+    // Whether games on these platforms play together (the server's room list and LAN discovery both go by it): Linux
+    // and Windows have, live; macOS hasn't been tried with them.
+    constexpr bool platforms_mix(Platform a, Platform b) {
+        return (a == Platform::macos) == (b == Platform::macos);
+    }
     // A listed room as everyone sees it: its number (the room code's), its match's players, how many are
     // in (the host's too, 1 to players), whether the match is being played (joining it isn't possible
     // then), whether its host allows direct connections, and its rollback (packets.hpp: 0 to max_rollback);

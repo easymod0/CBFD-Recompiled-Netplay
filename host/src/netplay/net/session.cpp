@@ -92,21 +92,6 @@ namespace conker::netplay {
             }
         };
 
-        // A match's key: 64 bits from the system's random source (never 0, which is "no key").
-        bool random_key(uint64_t& key) {
-            do {
-#if defined(_WIN32)
-                if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, (PUCHAR)&key, sizeof(key), BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-                    return false;
-                }
-#else
-                if (getentropy(&key, sizeof(key)) != 0) {
-                    return false;
-                }
-#endif
-            } while (key == 0);
-            return true;
-        }
 
         // Whether two keys are the same, taking the same time whatever they are (no early exit for a
         // stranger to time).
@@ -218,6 +203,22 @@ namespace conker::netplay {
             std::copy(std::begin(parsed.m_ipv6), std::end(parsed.m_ipv6), endpoint.ip.begin());
         }
         return encode_join_code(endpoint);
+    }
+
+    // 64 bits from the system's random source (never 0, which is "none"): a match's key, an id.
+    bool random_key(uint64_t& key) {
+        do {
+#if defined(_WIN32)
+            if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, (PUCHAR)&key, sizeof(key), BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+                return false;
+            }
+#else
+            if (getentropy(&key, sizeof(key)) != 0) {
+                return false;
+            }
+#endif
+        } while (key == 0);
+        return true;
     }
 
     bool startup(std::string& error) {
@@ -805,7 +806,7 @@ namespace conker::netplay {
         // Another protocol version is told so; anything else is a broken packet.
         const bool other_version = data.size() >= 4 && data[0] == 'C' && data[1] == 'N' &&
             (uint16_t)(data[2] | (data[3] << 8)) != protocol_version;
-        if (other_version && !is_host && peer->port < 0) {
+        if (other_version && !is_host && !is_welcomed) {
             // A host of another version refusing this joiner (its Refuse is kept the same): why, and its release.
             if (std::optional<Refuse> refusal = decode_refusal(data)) {
                 refusal->reason = Reason::version;
@@ -865,15 +866,15 @@ namespace conker::netplay {
                     std::find(kicked.begin(), kicked.end(), theirs->player) != kicked.end() || theirs->player == hello.player) {
                     refusal = Reason::kicked;
                 }
+                // Not as someone still in (a player or spectator: their id is theirs). Seated twice, the Roster would give the
+                // one who's there the other's ports too. (One whose old connection the host hasn't let go of yet can try
+                // again once it has: told, as for a match it can't get in, that it's under way.)
+                if (!refusal && std::any_of(peers.begin(), peers.end(), [&](const Peer& p) { return in(p) && p.player == theirs->player; })) {
+                    refusal = Reason::started;
+                }
                 // A spectator (nobody playing): if the host takes them and has room, whenever the match is (not after it).
+                // (A player who left may watch, their place held for them all the same.)
                 if (!refusal && theirs->players == 0) {
-                    // (Not as someone in the match: their id is theirs, and a spectator's kick would keep them out. A player
-                    // who left may watch, their place held for them all the same.)
-                    const bool someone = std::any_of(peers.begin(), peers.end(), [&](const Peer& p) { return in(p) && p.player == theirs->player; });
-                    if (someone) {
-                        refuse(peer, Reason::kicked);
-                        return;
-                    }
                     const int number = free_spectator();
                     if (!takes_spectators() || closed || number < 0) {
                         refuse(peer, !takes_spectators() ? Reason::watching : closed ? Reason::started : Reason::full);
@@ -1296,8 +1297,7 @@ namespace conker::netplay {
     }
 
     void Session::set_release(const std::string& name) {
-        const bool valid = name.size() <= max_release_name &&
-            std::all_of(name.begin(), name.end(), [](char c) { return c > ' ' && c <= '~'; });
+        const bool valid = name.size() <= max_release_name && printable_word(name);
         release = valid ? name : std::string();
     }
 
