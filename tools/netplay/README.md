@@ -423,12 +423,15 @@ by that port's. With `auto` the host chooses each machine's, so one player's bad
 Each machine times every input that comes against when it made the read the input was sent at (by the
 library's receive time: the game thread only polls at its reads), against a rolling one-second median (a trip
 that changes for good isn't unevenness): how much later the latest tenth came is that port's spread, sent to
-the host with its hashes, beside how many reads it waited for each port. The host goes by the receiver that
+the host with its hashes, beside how many reads it waited for each port (and how many of those waited over
+8 ms). The host goes by the receiver that
 has a port the most evenly and waited for it the least (a receiver with a bad link gets everyone's late). It
 checks every 30 reads. Without rollback every pad must arrive in time along the slowest way one goes, so the
 round trips' delay is everyone's, plus what the machine's spread needs past a read; it raises a machine's
-after 2 checks in a row wanting more (or 3 reads waiting for it since the last check: then one read more, up
-to 2 more than the trips need), and lowers it only after 10 with 12 ms to spare and none waiting for it.
+after 2 checks in a row wanting more (or 3 reads late from waiting for it since the last check, or half the
+reads waiting over 8 ms for it: two machines half a frame out of step, as on a LAN at delay 0, keep 30 frames
+a second but show them unevenly, which frame interpolation makes judder; then one read more, up to 2 more than
+the trips need), and lowers it only after 10 with 12 ms to spare and none waiting for it.
 With rollback, a machine's delay is for its one-way trip to the host (the host's own: to the nearest
 joiner), less the 3 reads predicting covers (at least 1 unless a LAN's trip needs none), plus what its spread
 needs past a read: the others' predicting covers the rest. It's chosen at the start from the round trips,

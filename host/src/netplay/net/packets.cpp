@@ -14,8 +14,8 @@
 //              (s16 mouse x, y, s16 gyro x, y, s8 wheel, u32 controls: only
 //              valid_controls: a field of view code up to fov_codes, no bit past 16); the unused ones zero, and the last read not past
 //              2^32 - 1; then 4 s8 gaps (time sync: any value), u16 controls (an early copy's: any)
-//   5 Hash     u32 read, u64 hash, 128 u16 region hashes, 4 u8 spreads (any),         281 bytes
-//              4 u8 reads waited (any)
+//   5 Hash     u32 read, u64 hash, 128 u16 region hashes, 4 u8 spreads (any),         285 bytes
+//              4 u8 reads waited (any), 4 u8 reads waited long (any)
 //   6 Bye      u8 reason                                                               6 bytes
 //   7 Start    u8 players (2 to 4), u8 own view (0 or 1), 4 u8 delays (0 to 8),      14 bytes
 //              u8 pairs
@@ -63,7 +63,7 @@ namespace conker::netplay {
                 case welcome: return header_size + 6;
                 case refuse: return header_size + 2 + max_release_name;
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players + 2;
-                case hash: return header_size + 12 + 2 * memory_regions + 2 * max_players;
+                case hash: return header_size + 12 + 2 * memory_regions + 3 * max_players;
                 case bye: return header_size + 1;
                 case start: return header_size + 5 + max_players;
                 case gone: return header_size + 6;
@@ -368,6 +368,9 @@ namespace conker::netplay {
                 for (uint8_t waited : p.waited) {
                     w.u8(waited);
                 }
+                for (uint8_t waited : p.waited_long) {
+                    w.u8(waited);
+                }
             }
             else if constexpr (std::is_same_v<T, Gone>) {
                 w.u8(p.port);
@@ -539,6 +542,9 @@ namespace conker::netplay {
                     spread = r.u8();
                 }
                 for (uint8_t& waited : p.waited) {
+                    waited = r.u8();
+                }
+                for (uint8_t& waited : p.waited_long) {
                     waited = r.u8();
                 }
                 packet = p;

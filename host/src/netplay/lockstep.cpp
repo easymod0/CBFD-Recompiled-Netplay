@@ -171,10 +171,12 @@ namespace {
     // need, along the slowest way a pad goes, plus what this machine's inputs arriving unevenly needs; checks in a row
     // that wanted a higher delay, and a lower one. Higher: the trips need more, or at least late_reads_to_raise reads
     // waited for the machine since the last check (a lossy network: the pads that are sent again come late, which a
-    // higher delay hides; the round trips don't show it), then one more, up to most_raised_for_waiting more than the
+    // higher delay hides; the round trips don't show it), or at least long_waits_to_raise reads waited over
+    // long_wait_ms for it (two machines half a frame out of step on a LAN, one waiting so at every read for the other:
+    // 30 frames a second still, but shown unevenly, which frame interpolation makes judder), then one more, up to most_raised_for_waiting more than the
     // round trips need (a peer that can't keep up, rather than the network, makes reads late whatever the delay).
     // It's raised after raise_checks (every read waits until then), and lowered only after lower_checks with
-    // lower_spare_ms to spare and no read waiting for it, so it doesn't go back and forth: a read at a time while it's
+    // lower_spare_ms to spare and no read waiting for it (late, or long), so it doesn't go back and forth: a read at a time while it's
     // above what the round trips need for waiting, else to what they need. Nor is it changed again within
     // settle_reads of the last change (Delay's from read relies on that: a joiner is at most the delay ahead only once
     // the pads a lowering already sent are played).
@@ -191,6 +193,8 @@ namespace {
     constexpr int raise_checks = 2;
     constexpr int lower_checks = 10;
     constexpr uint64_t late_reads_to_raise = 3;
+    constexpr double long_wait_ms = 8.0;    // reads_for's wait_ms: more than a read can wait unseen
+    constexpr uint64_t long_waits_to_raise = hash_every / 2;
     constexpr double lower_spare_ms = 12.0;
     constexpr uint64_t settle_reads = 90;
     // With rollback, the delay is for rollback, and steady (issues #26, #40): a change of delay is felt (the own inputs'
@@ -228,19 +232,24 @@ namespace {
     std::array<std::deque<float>, conker::netplay::max_players> lateness;
     // ...inputs that came before this machine made the read they were sent at (it's behind): the read and when.
     std::array<std::deque<std::pair<uint64_t, double>>, conker::netplay::max_players> early_inputs;
-    // ...and the reads this machine's game waited for each port's inputs (Hash's `waited`, wrapping).
+    // ...and the reads this machine's game waited for each port's inputs (Hash's `waited`, wrapping), and those that
+    // waited over long_wait_ms (`waited_long`).
     std::array<uint64_t, conker::netplay::max_players> waited_for_port{};
+    std::array<uint64_t, conker::netplay::max_players> waited_long_for_port{};
     // The host: each machine's latest word (by its first port: the spread it has each port's inputs at, -1 not known;
     // its reads waited for each, and those already counted at the last check), and when it came.
     struct Report {
         std::array<int, conker::netplay::max_players> spread_ms{ -1, -1, -1, -1 };
         std::array<uint8_t, conker::netplay::max_players> waited{};
         std::array<uint8_t, conker::netplay::max_players> waited_counted{};
+        std::array<uint8_t, conker::netplay::max_players> waited_long{};
+        std::array<uint8_t, conker::netplay::max_players> waited_long_counted{};
         bool heard = false;
         double at = 0;
     };
     std::array<Report, conker::netplay::max_players> reports;
     std::array<uint64_t, conker::netplay::max_players> own_waited_counted{};
+    std::array<uint64_t, conker::netplay::max_players> own_waited_long_counted{};
     constexpr double report_fresh_seconds = 10.0;
     std::vector<uint64_t> desync_at;    // --netplay-desync-at's reads
     // Desync recovery (#21): hosting, whether a desync is set right by sending the host's game to the joiners whose
@@ -992,6 +1001,7 @@ namespace {
             const double spread = (own_ports & (1u << port)) != 0 || watching ? -1 : own_spread_ms(port);
             sent_hash.spread[port] = spread < 0 ? conker::netplay::no_spread : (uint8_t)std::min(254.0, std::round(spread / 2));
             sent_hash.waited[port] = (uint8_t)waited_for_port[port];
+            sent_hash.waited_long[port] = (uint8_t)waited_long_for_port[port];
         }
         session->send(sent_hash);
     }
@@ -1605,8 +1615,12 @@ namespace {
                         for (int port = 0; port < conker::netplay::max_players; port++) {
                             report.spread_ms[port] = hash->spread[port] == conker::netplay::no_spread ? -1 : hash->spread[port] * 2;
                         }
-                        if (!report.heard) report.waited_counted = hash->waited;
+                        if (!report.heard) {
+                            report.waited_counted = hash->waited;
+                            report.waited_long_counted = hash->waited_long;
+                        }
                         report.waited = hash->waited;
+                        report.waited_long = hash->waited_long;
                         report.heard = true;
                         report.at = now();
                     }
@@ -1763,22 +1777,27 @@ namespace {
         return most;
     }
 
-    // The host, at a check: the reads each machine (by its first port) made the others wait for its inputs since the last:
-    // for each of its ports, the fewest any receiver waited (this machine's own count, and each other's latest word: a
-    // receiver with a bad link waits for everyone), the most of its ports.
-    std::array<uint64_t, conker::netplay::max_players> machines_waited(const std::vector<uint8_t>& machines) {
+    // The host, at a check: the reads each machine (by its first port) made the others wait for its inputs since the last
+    // (`long_waits`: those that waited over long_wait_ms): for each of its ports, the fewest any receiver waited (this
+    // machine's own count, and each other's latest word: a receiver with a bad link waits for everyone), the most of its ports.
+    std::array<uint64_t, conker::netplay::max_players> machines_waited(const std::vector<uint8_t>& machines, bool long_waits) {
         std::array<std::array<int64_t, conker::netplay::max_players>, conker::netplay::max_players> counted;
         for (auto& by_port : counted) by_port.fill(-1);
         for (const uint8_t receiver : machines) {
             const int r = std::countr_zero(receiver);
             for (int port = 0; port < match_players; port++) {
                 if ((receiver & own_ports) != 0) {
-                    counted[r][port] = (int64_t)(waited_for_port[port] - own_waited_counted[port]);
-                    own_waited_counted[port] = waited_for_port[port];
+                    uint64_t& seen = long_waits ? own_waited_long_counted[port] : own_waited_counted[port];
+                    const uint64_t total = long_waits ? waited_long_for_port[port] : waited_for_port[port];
+                    counted[r][port] = (int64_t)(total - seen);
+                    seen = total;
                 }
                 else if (reports[r].heard) {
-                    counted[r][port] = (uint8_t)(reports[r].waited[port] - reports[r].waited_counted[port]);
-                    reports[r].waited_counted[port] = reports[r].waited[port];
+                    Report& report = reports[r];
+                    uint8_t& seen = long_waits ? report.waited_long_counted[port] : report.waited_counted[port];
+                    const uint8_t total = long_waits ? report.waited_long[port] : report.waited[port];
+                    counted[r][port] = (uint8_t)(total - seen);
+                    seen = total;
                 }
             }
         }
@@ -1842,7 +1861,8 @@ namespace {
     // everyone), a joiner predicts up to its window further.
     void adapt_delay(uint64_t read) {
         const std::vector<uint8_t> machines = playing_machines();
-        const std::array<uint64_t, conker::netplay::max_players> waited = machines_waited(machines);
+        const std::array<uint64_t, conker::netplay::max_players> waited = machines_waited(machines, false);
+        const std::array<uint64_t, conker::netplay::max_players> waited_long = machines_waited(machines, true);
         const std::array<int, conker::netplay::max_players> trips = session->round_trips_by_port();
         // (Of the machines in the match only: one let go of is still connected, its trip no one's concern.)
         std::vector<int> all;
@@ -1866,6 +1886,7 @@ namespace {
             MachineDelay& m = machine_delays[first];
             const int now_delay = delays[first].after;
             const uint64_t late = waited[first];
+            const uint64_t long_waits = waited_long[first];
             // (A machine's ports go by one delay: a new player on two ports with different ones gets its first's.)
             bool uneven_ports = false;
             for (int port = 0; port < match_players; port++) {
@@ -1932,10 +1953,10 @@ namespace {
                 const int uneven = uneven_reads(spread);
                 const int needed = std::min(delay_needed(all, spare_ms) + uneven, conker::netplay::max_delay);
                 const int roomy = std::min(delay_needed(all, spare_ms + lower_spare_ms) + uneven, conker::netplay::max_delay);
-                const bool waiting = late >= late_reads_to_raise && now_delay < conker::netplay::max_delay &&
-                    m.raised_for_waiting < most_raised_for_waiting;
+                const bool waiting = (late >= late_reads_to_raise || long_waits >= long_waits_to_raise) &&
+                    now_delay < conker::netplay::max_delay && m.raised_for_waiting < most_raised_for_waiting;
                 m.wanted_higher = needed > now_delay || waiting ? m.wanted_higher + 1 : 0;
-                m.wanted_lower = roomy < now_delay && late == 0 ? m.wanted_lower + 1 : 0;
+                m.wanted_lower = roomy < now_delay && late == 0 && long_waits < long_waits_to_raise ? m.wanted_lower + 1 : 0;
                 if (m.wanted_higher < raise_checks && m.wanted_lower < lower_checks) {
                     continue;
                 }
@@ -1958,7 +1979,8 @@ namespace {
                     continue;
                 }
                 std::printf("[netplay] round trips to the players: %s ms; %s's inputs %.0f ms uneven; %llu reads waited for them since "
-                    "the last check\n", trips_text(all).c_str(), ports_text(machine).c_str(), spread, (unsigned long long)late);
+                    "the last check, %llu over %.0f ms\n", trips_text(all).c_str(), ports_text(machine).c_str(), spread,
+                    (unsigned long long)late, (unsigned long long)long_waits, long_wait_ms);
             }
             change_delay(machine, to, from);
             session->send(Delay{ machine, (uint8_t)to, (uint32_t)from });
@@ -3122,7 +3144,9 @@ bool conker::lockstep::begin(const netplay::Hello& me, std::string& error) {
     for (auto& early : early_inputs) early.clear();
     read_made_number.fill(never);
     waited_for_port = {};
+    waited_long_for_port = {};
     own_waited_counted = {};
+    own_waited_long_counted = {};
     stall_since = {};
     long_stall_at = {};
     slowed_for = {};
@@ -4584,6 +4608,13 @@ bool conker::lockstep::on_read(uint64_t read, ultramodern::input::Pad* pads, net
 
     const double done = now();
     const double waited = done - since;
+    // Lockstep: a read that waited long for a port, at the game's own pace (the boot's first reads wait for everyone, as
+    // the games load: those aren't counted, nor while catching up). With rollback a read waits only past the window.
+    if (rollback_option == 0 && read >= rollback_from_read && !catching_up && waited * 1000 > long_wait_ms) {
+        for (int port = 0; port < match_players; port++) {
+            if ((waited_on & (1u << port)) != 0) waited_long_for_port[port]++;
+        }
+    }
     if (waits.reads > 0 && done - waits.last_read_at > late_seconds) {
         waits.late++;
         // (With rollback, not the boot's: everyone waits for every input there, as the games load.)
