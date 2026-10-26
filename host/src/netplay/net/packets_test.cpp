@@ -78,16 +78,18 @@ int main() {
     CHECK(round_trips(Refuse{ Reason::build, "v0.1.6-netplay.15" }, 47));
     CHECK(round_trips(Refuse{ Reason::build, std::string(max_release_name, '~') }, 47));
     CHECK(round_trips(some_inputs(), 161));
-    CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 281));
+    CHECK(round_trips(Hash{ 4000000000u, 0xFEDCBA9876543210ull }, 285));
     Hash regions{ 30, 1 };
     for (int i = 0; i < memory_regions; i++) regions.regions[i] = (uint16_t)(0x0101 * i + 7);
     regions.spread = { no_spread, 0, 17, 254 };
     regions.waited = { 0, 255, 3, 1 };
-    CHECK(round_trips(regions, 281));
+    regions.waited_long = { 9, 0, 2, 255 };
+    CHECK(round_trips(regions, 285));
     const std::vector<uint8_t> hash = bytes_of(regions);
     CHECK(hash[17] == 7 && hash[18] == 0 && hash[19] == 8 && hash[20] == 1 && hash[271] == 0x86 && hash[272] == 0x7F);
     CHECK(hash[273] == no_spread && hash[274] == 0 && hash[275] == 17 && hash[276] == 254);       // spreads
     CHECK(hash[277] == 0 && hash[278] == 255 && hash[279] == 3 && hash[280] == 1);                // reads waited
+    CHECK(hash[281] == 9 && hash[282] == 0 && hash[283] == 2 && hash[284] == 255);                // ...long
     CHECK(round_trips(Bye{ Reason::desync }, 6));
     CHECK(round_trips(start_of(3, 0), 14));
     CHECK(round_trips(start_of(4, 1, max_delay), 14));

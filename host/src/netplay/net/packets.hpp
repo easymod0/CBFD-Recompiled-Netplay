@@ -22,7 +22,7 @@
 
 namespace conker::netplay {
     // Changes whenever any packet's layout or meaning does: peers with another one are refused.
-    constexpr uint16_t protocol_version = 23;
+    constexpr uint16_t protocol_version = 24;
     // The longest release name a Refuse carries (hello.hpp's release_name; signal_packets.hpp's max_release).
     constexpr size_t max_release_name = 40;
     // The game's controller ports.
@@ -174,7 +174,7 @@ namespace conker::netplay {
     // input delays (lockstep.cpp): how each port's inputs reach the sender, by port. `spread`: how unevenly they
     // arrive, in 2 ms (how much later than their usual time the latest tenth of them came; no_spread: not known,
     // as the sender's own ports'); `waited`: the reads the sender's game has waited for that port's inputs in all
-    // (it wraps).
+    // (it wraps); `waited_long`: those of them that waited over lockstep.cpp's long_wait_ms (it wraps too).
     constexpr uint8_t no_spread = 255;
     struct Hash {
         uint32_t read = 0;
@@ -182,6 +182,7 @@ namespace conker::netplay {
         std::array<uint16_t, memory_regions> regions{};
         std::array<uint8_t, max_players> spread{ no_spread, no_spread, no_spread, no_spread };
         std::array<uint8_t, max_players> waited{};
+        std::array<uint8_t, max_players> waited_long{};
         bool operator==(const Hash&) const = default;
     };
     // Host to everyone, once every port is taken: the match starts, with this many players, whether every
