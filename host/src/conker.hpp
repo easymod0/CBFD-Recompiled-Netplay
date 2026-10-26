@@ -320,13 +320,18 @@ namespace conker {
     // conker_config.cpp: General's Start Game Directly (issue #133), read from the General tab's saved file
     // (main asks before the tabs exist).
     bool start_game_directly();
+    // The Quit prompt's Return to Launcher (main.cpp): quits the game, then starts the program again at the
+    // launcher.
+    void return_to_launcher();
 
-    // sound_volumes.cpp: the Sound tab's Music, Sound Effects and Speech volumes.
+    // sound_volumes.cpp: the Sound tab's Music, Sound Effects and Speech volumes, and Sound Mode.
     namespace sound_volumes {
         // conker_config.cpp: the options, on the Sound tab.
         void add_options(recomp::config::Config& config);
         // From the game thread, as the game starts a frame's display list: the volumes are read from the settings.
         void game_frame(uint8_t* rdram);
+        // The same, with that hook's context (for calling the game): Sound Mode kept the same as the game's own.
+        void sound_mode_frame(uint8_t* rdram, recomp_context* ctx);
     }
 
     // Graphics: Overscan Borders (conker_config.cpp; the crop is set in widescreen.cpp).

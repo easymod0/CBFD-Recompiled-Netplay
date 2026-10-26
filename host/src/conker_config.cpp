@@ -147,8 +147,10 @@ namespace {
         set_game_input_description(GameInput::C_LEFT, "Rotates the camera.");
         set_game_input_description(GameInput::C_RIGHT, "Rotates the camera.");
         const char* dpad = "Unused in the main game. Mods may use it.";
-        set_game_input_description(GameInput::DPAD_UP, dpad);
-        set_game_input_description(GameInput::DPAD_DOWN, dpad);
+        set_game_input_description(GameInput::DPAD_UP, "Zooms the sniper scope in, with Aiming: Swap Sticks on (the stick walks then). "
+            "Otherwise unused in the main game; mods may use it.");
+        set_game_input_description(GameInput::DPAD_DOWN, "Zooms the sniper scope out, with Aiming: Swap Sticks on (the stick walks then). "
+            "Otherwise unused in the main game; mods may use it.");
         set_game_input_description(GameInput::DPAD_LEFT, dpad);
         set_game_input_description(GameInput::DPAD_RIGHT, dpad);
     }
@@ -188,8 +190,9 @@ void conker::init_config() {
         };
         general_config.add_enum_option(start_directly_option, "Start Game Directly",
             "Starts the game as soon as the program opens, without the launcher, once a ROM has been picked. Takes "
-            "effect the next time it's opened. To get the launcher back, turn it <recomp-color primary>Off</recomp-color> "
-            "in the settings while playing (Esc or the controller's menu button).",
+            "effect the next time it's opened. To get to the launcher while playing (to install mods or turn them on or "
+            "off), choose <b>Return to Launcher</b> in the Quit prompt (the settings' top right): the program restarts "
+            "at the launcher.",
             choices, StartDirectly::Off);
     }
 #if defined(CONKER_NETPLAY)

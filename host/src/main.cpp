@@ -19,6 +19,7 @@
 //                created if need be: e.g. to run two copies at once, as netplay's tests do
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -74,6 +75,7 @@ static void install_crash_handler() {
 }
 #elif defined(_WIN32)
 #include <Windows.h>
+#include <shellapi.h>
 #include <DbgHelp.h>
 #include <atomic>
 #include <csignal>
@@ -358,20 +360,19 @@ ultramodern::input::connected_device_info_t conker::get_connected_device_info(in
 }
 
 namespace {
-    // conker_data/ (the stored ROM and saves) lives next to the executable, so it's
-    // found however the game is started: double-click, shortcut or another directory.
-    std::filesystem::path exe_directory(const char* argv0) {
+    // The executable, however the game is started: double-click, shortcut or another directory.
+    std::filesystem::path exe_path(const char* argv0) {
 #if defined(_WIN32)
         wchar_t buffer[MAX_PATH];
         DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
         if (length > 0 && length < MAX_PATH) {
-            return std::filesystem::path(buffer).parent_path();
+            return std::filesystem::path(buffer);
         }
 #elif defined(__linux__)
         std::error_code error;
         std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", error);
         if (!error) {
-            return exe.parent_path();
+            return exe;
         }
 #elif defined(__APPLE__)
         char buffer[4096];
@@ -380,12 +381,110 @@ namespace {
             std::error_code error;
             std::filesystem::path exe = std::filesystem::canonical(buffer, error);
             if (!error) {
-                return exe.parent_path();
+                return exe;
             }
         }
 #endif
-        return std::filesystem::absolute(argv0).parent_path();
+        return std::filesystem::absolute(argv0);
     }
+
+    // conker_data/ (the stored ROM and saves) lives next to the executable, so it's
+    // found however the game is started.
+    std::filesystem::path exe_directory(const char* argv0) {
+        return exe_path(argv0).parent_path();
+    }
+
+    // The Quit prompt's Return to Launcher (issue #133): the game quits as ever, and once it has (its saves
+    // written, everything shut down) main starts the program again with --launcher, which opens the
+    // launcher even with Start Game Directly on. A running game can't be stopped and started again in
+    // place. On Linux and macOS the program replaces itself (the same process, which Steam goes on
+    // tracking); on Windows it starts a new one and this one ends. Only --data and --window carry over:
+    // the rest (a ROM, a netplay match or replay, --seconds) was for the game just quit.
+    std::atomic<bool> restart_into_launcher = false;
+
+    template <typename Char>
+    bool carried_over(const Char* option) {
+        const char* kept[] = { "--data", "--window" };
+        for (const char* k : kept) {
+            size_t i = 0;
+            while (k[i] != '\0' && option[i] == (Char)k[i]) {
+                i++;
+            }
+            if (k[i] == '\0' && option[i] == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+#if defined(_WIN32)
+    // An argument quoted as CommandLineToArgvW reads it back.
+    void append_quoted(std::wstring& line, const std::wstring& arg) {
+        line += L" \"";
+        size_t backslashes = 0;
+        for (wchar_t c : arg) {
+            if (c == L'\\') {
+                backslashes++;
+                continue;
+            }
+            line.append(c == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+            backslashes = 0;
+            line += c;
+        }
+        line.append(backslashes * 2, L'\\');
+        line += L'"';
+    }
+#endif
+
+    void restart_at_launcher(int argc, char** argv) {
+        const std::filesystem::path exe = exe_path(argv[0]);
+#if defined(_WIN32)
+        int count = 0;
+        wchar_t** wargs = CommandLineToArgvW(GetCommandLineW(), &count);
+        std::wstring command_line;
+        append_quoted(command_line, exe.wstring());
+        for (int i = 1; wargs != nullptr && i + 1 < count; i++) {
+            if (carried_over(wargs[i])) {
+                append_quoted(command_line, wargs[i]);
+                append_quoted(command_line, wargs[++i]);
+            }
+        }
+        if (wargs != nullptr) {
+            LocalFree(wargs);
+        }
+        command_line += L" --launcher";
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(exe.c_str(), command_line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                &startup, &process)) {
+            std::fprintf(stderr, "[host] couldn't start the program again (error %lu)\n", GetLastError());
+            return;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+#else
+        std::vector<char*> args{ argv[0] };
+        for (int i = 1; i + 1 < argc; i++) {
+            if (carried_over(argv[i])) {
+                args.push_back(argv[i]);
+                args.push_back(argv[++i]);
+            }
+        }
+        args.push_back((char*)"--launcher");
+        args.push_back(nullptr);
+        const std::string path = exe.string();
+        std::fflush(stdout);
+        std::fflush(stderr);
+        execv(path.c_str(), args.data());
+        std::fprintf(stderr, "[host] couldn't start the program again (%s)\n", std::strerror(errno));
+#endif
+    }
+}
+
+void conker::return_to_launcher() {
+    restart_into_launcher = true;
+    ultramodern::quit();
 }
 
 const char* conker::rom_error_text(recomp::RomValidationError error) {
@@ -458,6 +557,7 @@ int main(int argc, char** argv) {
     std::filesystem::path rom_path;
     std::filesystem::path data_dir;
     int seconds = 0;
+    bool show_launcher = false;
 #if defined(CONKER_RT64)
     headless = false;
 #endif
@@ -490,6 +590,9 @@ int main(int argc, char** argv) {
             conker::netplay_view::set_replay_ports(ports);
         }
 #endif
+        else if (std::strcmp(argv[i], "--launcher") == 0) {
+            show_launcher = true; // Return to Launcher's restart: the launcher, whatever Start Game Directly says
+        }
 #if defined(CONKER_RT64)
         else if (std::strcmp(argv[i], "--window") == 0 && i + 1 < argc) {
             int width = 0, height = 0;
@@ -583,8 +686,8 @@ int main(int argc, char** argv) {
 
 #if defined(CONKER_RT64)
     // General: Start Game Directly (issue #133): the game starts without the launcher once a ROM has been
-    // picked (and the launcher is shown as ever without one).
-    if (!headless && !start_directly && rom_path.empty() && conker::start_game_directly()) {
+    // picked (and the launcher is shown as ever without one), unless Return to Launcher restarted the program.
+    if (!headless && !start_directly && !show_launcher && rom_path.empty() && conker::start_game_directly()) {
         recomp::check_all_stored_roms();
         start_directly = recomp::is_rom_valid(game_id);
     }
@@ -653,9 +756,13 @@ int main(int argc, char** argv) {
     // Ended here rather than by returning: some of the runtime's threads (the game's own, the audio's) are never joined,
     // and destroying the program's statics under them made quitting crash now and then (a message queue freed while one
     // took from it). Everything kept is written by now (recomp::start joins the game, saving and timer threads; the
-    // settings are written as they change; stdout and stderr aren't buffered), but a save state just taken.
+    // settings are written as they change; stdout and stderr aren't buffered), but a save state just taken. Return to
+    // Launcher starts the program again first (on Linux and macOS it replaces this one, so doesn't come back).
     conker::save_states::wait_for_writes();
     std::fflush(stdout);
     std::fflush(stderr);
+    if (restart_into_launcher) {
+        restart_at_launcher(argc, argv);
+    }
     std::_Exit(EXIT_SUCCESS);
 }

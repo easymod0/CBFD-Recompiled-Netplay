@@ -97,7 +97,8 @@ yourself instead, read on.
   stays out of walls, camera turning speed and inversion, and a Field of View
   setting.
 - An aiming **Reticle**, a green ring like Live & Reloaded's, and **Swap Sticks**
-  and **Lock-On** options for aiming.
+  and **Lock-On** options for aiming. With Swap Sticks, Conker walks while aiming,
+  the sniper scope included (zooming with the D-pad or the mouse wheel).
 - Full audio: music, sound effects and the voice acting, each with a volume of its
   own (Music, Sound Effects and Speech, under the Main Volume).
 - Saving (EEPROM), stored per user.
@@ -295,8 +296,9 @@ Run `host/build/ConkerRecomp` (Linux and macOS) or `host\build-win\ConkerRecomp.
 (Windows). The first time, pick **Load ROM** in the launcher and select your ROM
 (the same `baserom.us.z64` works). After that it's remembered, so just choose
 **Start Game**. With **Start Game Directly** on the General tab, the game starts as
-soon as the program opens, without the launcher (turn it off in the settings while
-playing to get the launcher back).
+soon as the program opens, without the launcher. To get to the launcher while
+playing (to install mods or turn them on or off), choose **Return to Launcher** in
+the settings' Quit prompt: the program restarts at the launcher.
 
 - **Settings** (in the launcher, or Esc / the controller's menu button in game)
   has its options by tab: General (deadzone, rumble), Camera (turning, the free
