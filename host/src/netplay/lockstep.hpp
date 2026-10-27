@@ -14,6 +14,8 @@
 //   --players <n>                ...of <n> players, 2 to 4 (2 by default)
 //   --split-screen               (hosting) let each player choose what they see; by default every player
 //                                sees only their own view of the split screen (the match's rule, for all)
+//   --characters <n>             (hosting; the harness's) the most characters in the match's multiplayer
+//                                games, 0 (the game's own, by default), 12 or 16 (more_bots.cpp)
 //   --netplay-address <address>  (hosting) this computer's address as the others reach it: the join code
 //                                is made from it and printed (it holds the match's random key)
 //   --netplay-join <code>        joins the host by its join code, or by its room code (on --netplay-server)
@@ -294,6 +296,8 @@ namespace conker::lockstep {
     // once connected. The game's memory is laid out by it as it starts, so it's the same on every machine.
     void set_characters(int characters);
     int characters();
+    // Hosting a match (--netplay-host, by a port or a room; not Quick Match), from the options.
+    bool hosts();
     // The ports whose views are shown two to a window in "my view only" (bit n: port n; each machine with two
     // players'), the same for every peer (Start), once connected.
     uint8_t view_pairs();

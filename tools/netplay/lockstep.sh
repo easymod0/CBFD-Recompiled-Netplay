@@ -24,8 +24,9 @@
 #              "my view only", the match's rule, so every copy widens each camera's culls up and down: both copies
 #              of a match of two must match its solo replay
 #   bots       a 2-player Deathmatch of 16 characters (make_match.py --characters 16 --bots 14: more_bots.cpp), the
-#              host's rule (--characters 16), which the joiner takes from it: the game's memory is laid out by it
-#              as the game starts, so both copies of a match of two must match its solo replay
+#              host's rule (--characters 16), which the joiner takes from it (its recording says the game's own):
+#              the game's memory is laid out by it as the game starts, so both copies of a match of two must
+#              match its solo replay, which mustn't match the same recording replayed with the game's own
 #   room       the match through a room on a netplay server (netplay_server, beside the game's build, on
 #              loopback): the host makes the room, public, which the server must list for the game's hashes;
 #              the joiner joins by its code (direct connections: there's no relay here,
@@ -140,6 +141,11 @@ python3 tools/netplay/make_match.py "$OUT/bots.pads" --mode deathmatch --players
 python3 tools/netplay/make_match.py "$OUT/bots-other.pads" --mode deathmatch --players 2 --mouse --seed "$((SEED + 1))" \
     --own-view --characters 16 --bots 14 > /dev/null || exit 2
 scramble "$OUT/bots.pads" "$OUT/bots-other.pads" 2 "$OUT/bots-" || exit 2
+# The game's own (the header's flags without the characters, bits 8-15): the joiner's, and a solo replay of it.
+for name in bots-2 bots-original; do
+    python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[33]=0; open(sys.argv[2],'wb').write(d)" \
+        "$OUT/$( [ $name = bots-2 ] && echo bots-2 || echo bots ).pads" "$OUT/$name.pads" || exit 2
+done
 BOTS_READS=$(( ($(wc -c < "$OUT/bots.pads") - 40) / 73 ))
 
 
@@ -397,7 +403,12 @@ fi
 
 echo "bots"
 pads=bots.pads start bots-solo
-finish "was the last: quitting" bots-solo || exit 1
+pads=bots-original.pads start bots-original
+finish "was the last: quitting" bots-solo bots-original || exit 1
+if python3 tools/netplay/compare_hashes.py "$OUT/bots-solo.log" "$OUT/bots-original.log" > /dev/null; then
+    echo "  bots-solo same as bots-original: the 16 characters made no difference"
+    failed=1
+fi
 pads=bots-1.pads start bots-host --netplay-host 27327 --netplay-address 127.0.0.1 --players 2 --characters 16
 pads=bots-2.pads start bots-join --netplay-join "$(code_of bots-host)"
 if finish "was the last: quitting" bots-host bots-join; then

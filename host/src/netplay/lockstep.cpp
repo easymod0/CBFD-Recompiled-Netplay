@@ -4276,6 +4276,10 @@ void conker::lockstep::set_characters(int characters) {
     host_characters = characters >= 0 && characters <= 0xFF && netplay::valid_characters((uint8_t)characters) ? characters : 0;
 }
 
+bool conker::lockstep::hosts() {
+    return host_port > 0 || host_room;
+}
+
 int conker::lockstep::characters() {
     return match_started ? match_characters : 0;
 }
