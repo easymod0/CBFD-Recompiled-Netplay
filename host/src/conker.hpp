@@ -257,6 +257,12 @@ namespace conker {
     }
 
     // rumble.cpp: the Rumble Pak, sent to each port's controller.
+    // more_bots.cpp: Multiplayer Characters, more bots in a multiplayer game (discussion #105).
+    namespace more_bots {
+        // The option, on the General tab.
+        void add_options(recomp::config::Config& config);
+    }
+
     namespace rumble {
         // Its settings (motor, style), on the General tab.
         void add_options(recomp::config::Config& config);
