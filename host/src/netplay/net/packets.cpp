@@ -60,15 +60,15 @@ namespace conker::netplay {
         constexpr size_t size_of(uint8_t kind) {
             switch (kind) {
                 case hello: return header_size + 50;
-                case welcome: return header_size + 6;
+                case welcome: return header_size + 7;
                 case refuse: return header_size + 2 + max_release_name;
                 case inputs: return header_size + 6 + input_window * (pad_size + motion_size) + max_players + 2;
                 case hash: return header_size + 12 + 2 * memory_regions + 3 * max_players;
                 case bye: return header_size + 1;
-                case start: return header_size + 5 + max_players;
+                case start: return header_size + 6 + max_players;
                 case gone: return header_size + 6;
                 case delay: return header_size + 6;
-                case roster: return header_size + 12 * max_players + 5 + 9 * max_spectators;
+                case roster: return header_size + 12 * max_players + 6 + 9 * max_spectators;
                 case ready: return header_size + 1;
                 case resync: return header_size + 5;
                 case back: return header_size + 14;
@@ -95,7 +95,7 @@ namespace conker::netplay {
         }
         bool valid_fields(const Roster& p) {
             if (p.players < 2 || p.players > max_players || p.own_view > 1 || (p.delay > max_delay && p.delay != auto_delay) ||
-                p.rollback > max_rollback || p.spectators > 1) {
+                p.rollback > max_rollback || p.spectators > 1 || !valid_characters(p.characters)) {
                 return false;
             }
             for (const Watcher& w : p.watchers) {
@@ -121,8 +121,9 @@ namespace conker::netplay {
         bool valid_fields(const Welcome& p) {
             return p.players >= 2 && p.players <= max_players && (p.ports & 1) == 0 &&
                 (p.ports >> p.players) == 0 && p.rejoin <= 2 &&
-                (p.rejoin == 0 ? p.own_view == 0 && p.pairs == 0 && p.rollback == 0
-                               : p.own_view <= 1 && valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback);
+                (p.rejoin == 0 ? p.own_view == 0 && p.pairs == 0 && p.rollback == 0 && p.characters == 0
+                               : p.own_view <= 1 && valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback &&
+                                     valid_characters(p.characters));
         }
         bool valid_release(const std::string& release) {
             return release.size() <= max_release_name && printable_word(release);
@@ -161,7 +162,7 @@ namespace conker::netplay {
             return p.players >= 2 && p.players <= max_players && p.own_view <= 1 &&
                 std::all_of(p.delays.begin(), p.delays.end(), [](uint8_t d) { return d <= max_delay; }) &&
                 valid_pairs(p.pairs, p.players) && p.rollback <= max_rollback && (p.open & 1) == 0 && (p.open >> p.players) == 0 &&
-                (p.open & p.pairs) == 0;
+                (p.open & p.pairs) == 0 && valid_characters(p.characters);
         }
 
         bool valid_fields(const Resync& p) {
@@ -314,6 +315,7 @@ namespace conker::netplay {
                 w.u8(p.delay);
                 w.u8(p.rollback);
                 w.u8(p.spectators);
+                w.u8(p.characters);
                 for (const Watcher& watcher : p.watchers) {
                     w.u64(watcher.player);
                     w.u8(watcher.platform);
@@ -329,6 +331,7 @@ namespace conker::netplay {
                 w.u8(p.own_view);
                 w.u8(p.pairs);
                 w.u8(p.rollback);
+                w.u8(p.characters);
             }
             else if constexpr (std::is_same_v<T, Refuse>) {
                 w.u8((uint8_t)p.reason);
@@ -390,6 +393,7 @@ namespace conker::netplay {
                 w.u8(p.pairs);
                 w.u8(p.rollback);
                 w.u8(p.open);
+                w.u8(p.characters);
             }
             else if constexpr (std::is_same_v<T, Resync>) {
                 w.u32(p.read);
@@ -473,6 +477,7 @@ namespace conker::netplay {
                 p.delay = r.u8();
                 p.rollback = r.u8();
                 p.spectators = r.u8();
+                p.characters = r.u8();
                 for (Watcher& w : p.watchers) {
                     w.player = r.u64();
                     w.platform = r.u8();
@@ -491,6 +496,7 @@ namespace conker::netplay {
                 p.own_view = r.u8();
                 p.pairs = r.u8();
                 p.rollback = r.u8();
+                p.characters = r.u8();
                 packet = p;
                 break;
             }
@@ -563,6 +569,7 @@ namespace conker::netplay {
                     p.pairs = r.u8();
                     p.rollback = r.u8();
                     p.open = r.u8();
+                    p.characters = r.u8();
                     packet = p;
                 }
                 break;
