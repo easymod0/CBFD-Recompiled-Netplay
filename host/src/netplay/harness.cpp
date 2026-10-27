@@ -43,6 +43,9 @@
 //                       recording's rule instead (not with --replay)
 //   --view-pairs <ports>  ...with these ports' views shown two to a window (e.g. 12: ports 1 and 2, as a
 //                       machine with two players), recorded too (not with --replay; within --ports)
+//   --characters <n>    the most characters in a multiplayer game, 0 (the game's own), 12 or 16
+//                       (more_bots.cpp): records or hashes so, recorded in the recording (not with --replay);
+//                       hosting a match (lockstep.hpp), the match's rule
 //   --netplay-host, --netplay-join, ...  a netplay match in lockstep (lockstep.hpp)
 //
 // Controller reads are counted from the first, so read <n> of one run is read <n> of another. The pads
@@ -1289,8 +1292,9 @@ bool conker::harness::parse_option(int argc, char** argv, int& i) {
     }
     if (std::strcmp(option, "--characters") == 0) {
         // The most characters in a multiplayer game: 0 (the game's own), 12 or 16 (more_bots.cpp).
-        const int characters = has_value ? std::atoi(argv[i + 1]) : -1;
-        if (!has_value || characters < 0 || characters > 0xFF || !conker::netplay::valid_characters((uint8_t)characters)) {
+        const std::string value = has_value ? argv[i + 1] : "";
+        const int characters = value == "0" ? 0 : value == "12" ? 12 : value == "16" ? 16 : -1;
+        if (characters < 0) {
             std::fprintf(stderr, "[harness] --characters needs 0 (the game's own), 12 or 16\n");
             options_valid = false;
         }
@@ -1400,6 +1404,11 @@ bool conker::harness::prepare() {
         return false;
     }
     if (characters_option >= 0) {
+        if (conker::lockstep::active() && !conker::lockstep::hosts()) {
+            // Joining (or Quick Match, the game's own): the host's rule.
+            std::fprintf(stderr, "[harness] --characters is the host's choice\n");
+            return false;
+        }
         conker::lockstep::set_characters(characters_option);
     }
     if (!conker::lockstep::prepare()) {
