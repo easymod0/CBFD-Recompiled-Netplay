@@ -10,7 +10,8 @@
 // - The team games, War, Beach, Raptor and Heist (func_151E1744, bots on each team): a record of 12 bytes
 //   (0x800AB710 + that +1 * 12): the teams, then the fewest characters, the most, and the most on a team, for 1-2
 //   players (+1 to +3) and for 3-4 (+4 to +6), loaded into $s1, $s3 and $a1 (0x151E18C8-0x151E18E0). War allows 4
-//   characters with 3 or 4 players: no bots.
+//   characters with 3 or 4 players: a bot with 3, none with 4. With two teams the menu also keeps each team to 8,
+//   and Beach's and Raptor's second team to its map's size (+7: 2), so those two have 10 at most.
 // Nothing else reads them. The game has places for 16 characters (D_8008FE44, each one's slot), so 16 is the most.
 // Tank stops at 12: past it the game overruns a heap block (the heap walk, func_10004250, crashes as the level is
 // freed). Race isn't changed.
@@ -23,15 +24,18 @@
 // end a page lower, for the rank names (below). The recompilation has 8MB, all of it in save states. It's set as
 // the game starts, so 16 takes effect then; until then the limit is 12.
 //
-// The rank names. The HUD's rank, "0 (11th)" (func_150918EC at 0x15092018), takes its name from a table of 13
-// ("P", then "1st" to "12th"); past it are other strings, then pointers that aren't strings (a crash). 13th to
-// 16th are written into that page.
+// The rank names. The HUD's rank, "0 (11th)" (func_150918EC, at 0x15092018 and 0x15092FEC), takes its name from
+// a table of 13 ("P", then "1st" to "12th"); past it are other strings, then pointers that aren't strings (a
+// crash). The pause and match-end scores (func_151EA15C at 0x151EABBC) take it from that table or another, by
+// the rank less 1. Past 12th, each gets one of 13th to 16th, written into that page.
 //
 // In netplay (and a replay or recording) it's the match's rule (the host's), the same on every machine: the
 // harness's characters_rule.
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
+#include <variant>
 #include <vector>
 
 #include "recomp.h"
@@ -100,7 +104,8 @@ void conker::more_bots::add_options(recomp::config::Config& config) {
     config.add_enum_option(characters_option, "Multiplayer Characters",
         "The most characters, players and bots, in a multiplayer game, with any number of players (the game allows "
         "fewer bots the more players there are: none in a 4-player Deathmatch or War). <recomp-color primary>Original"
-        "</recomp-color> for the game's own. Tank stops at 12, and Race is the game's own. 16 takes effect the next "
+        "</recomp-color> for the game's own. Tank stops at 12, Beach and Raptor at 10 (one side keeps its size), and "
+        "Race is the game's own. 16 takes effect the next "
         "time the game starts (until then it's 12). In netplay it's the host's choice.",
         choices, Characters::Original);
     option_added = true;
@@ -136,18 +141,35 @@ extern "C" void conker_more_bots_teams(uint8_t* rdram, recomp_context* ctx) {
     ctx->r5 = std::max<int>((int)(int32_t)ctx->r5, most_here / team_count);
 }
 
+namespace {
+    // Rank `rank`'s name ("13th" to "16th": "th" is the font's 0xB9), 4 bytes each in the rank names' page; a rank
+    // in the game's table (12th or less) keeps `name`, the one the game loaded.
+    gpr rank_name(uint8_t* rdram, uint32_t rank, gpr name) {
+        if (rank <= (uint32_t)game_most) {
+            return name;
+        }
+        const uint32_t shown = std::min<uint32_t>(rank, most);
+        const gpr ours = (gpr)(int32_t)(rank_names + (shown - 13) * 4);
+        MEM_B(0, ours) = (int8_t)('0' + shown / 10);
+        MEM_B(1, ours) = (int8_t)('0' + shown % 10);
+        MEM_B(2, ours) = (int8_t)0xB9;
+        MEM_B(3, ours) = 0;
+        return ours;
+    }
+}
+
 // func_150918EC at 0x1509201C: $t8, the rank * 4, and $t9, the name it loaded.
 extern "C" void conker_more_bots_rank_name(uint8_t* rdram, recomp_context* ctx) {
-    const uint32_t rank = (uint32_t)ctx->r24 / 4;
-    if (rank <= (uint32_t)game_most) {
-        return;
-    }
-    // "13th" to "16th" ("th" is the font's 0xB9), 4 bytes each.
-    const uint32_t shown = std::min<uint32_t>(rank, most);
-    const gpr name = (gpr)(int32_t)(rank_names + (shown - 13) * 4);
-    MEM_B(0, name) = (int8_t)('0' + shown / 10);
-    MEM_B(1, name) = (int8_t)('0' + shown % 10);
-    MEM_B(2, name) = (int8_t)0xB9;
-    MEM_B(3, name) = 0;
-    ctx->r25 = name;
+    ctx->r25 = rank_name(rdram, (uint32_t)ctx->r24 / 4, ctx->r25);
+}
+
+// func_150918EC at 0x15092FF0 (its other way to the HUD's rank): $t6, the rank * 4, and $t9, the name.
+extern "C" void conker_more_bots_rank_name_other(uint8_t* rdram, recomp_context* ctx) {
+    ctx->r25 = rank_name(rdram, (uint32_t)ctx->r14 / 4, ctx->r25);
+}
+
+// func_151EA15C at 0x151EABC0 (a player's row of the pause and match-end scores): $v0, the rank less 1 (0 at
+// least), and $t5, the name it loaded.
+extern "C" void conker_more_bots_score_rank_name(uint8_t* rdram, recomp_context* ctx) {
+    ctx->r13 = rank_name(rdram, (uint32_t)ctx->r2 + 1, ctx->r13);
 }
