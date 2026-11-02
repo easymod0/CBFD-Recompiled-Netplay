@@ -24,7 +24,10 @@ connects everyone, through its relay when it must. **More options**: input delay
 spectators, or hosting **Without a server** (your address and a forwarded UDP port).
 
 **In the waiting room** players mark themselves **Ready** and the host starts. The host can **Kick** or
-**Block** anyone, start with places still open, and move people between playing and watching.
+**Block** anyone, start with places still open, and move people between playing and watching. Others see you
+by a name made from a random player id, kept in `netplay.json`. It stays the same in every match and on every
+server (that's how blocking and coming back to your place work), so players who meet you again can tell it's
+you. **New name** (Settings) makes a new id.
 
 **During a match**
 - **Late joining**: new players can join a match under way, on an open place or one left empty.
@@ -53,7 +56,7 @@ types is shown to anyone else.
 The netplay server's address is under **Settings** (`conker.jesp.ca:27100` by default), with **Test connection**.
 Reporting a problem: each run writes `conker.log` next to the game (in your user folder on macOS, or where the
 game's folder can't be written to), and keeps the run before as `conker.prev.log`. Please attach them; they hold
-the addresses netplay connected to.
+no join codes, private room codes or other players' addresses.
 
 How it works and how to test it: [tools/netplay/README.md](tools/netplay/README.md).
 
